@@ -1,7 +1,18 @@
 # Example tracked configuration for mailroom.
 # Live secrets and tokens do not belong in this file.
+#
+# Precedence:
+# 1. Built-in defaults
+# 2. User config via ProjectDirs
+# 3. Repo-local .mailroom/config.toml
+# 4. MAILROOM_ environment overrides
+#
+# For user-level config files outside the repo, prefer absolute paths when
+# overriding filesystem locations.
+# Relative filesystem paths are resolved from the repo root.
 
 [workspace]
+# runtime_root sets the default parent for the workspace subdirectories below.
 runtime_root = ".mailroom"
 auth_dir = ".mailroom/auth"
 cache_dir = ".mailroom/cache"
@@ -10,15 +21,11 @@ vault_dir = ".mailroom/vault"
 exports_dir = ".mailroom/exports"
 logs_dir = ".mailroom/logs"
 
-[mailbox]
-mode = "single-user-single-mailbox"
-search_store = "sqlite-fts5"
+[store]
+# database_path defaults to workspace.state_dir/mailroom.sqlite3 when omitted.
+database_path = ".mailroom/state/mailroom.sqlite3"
+busy_timeout_ms = 5000
 
-[execution]
-native_core = "rust"
-operator_surfaces = ["cli", "tui"]
-plugin_assisted = true
-
-[roadmap]
-current_milestone = "v1-search-triage-draft-queue"
-
+# Example environment overrides:
+# MAILROOM_STORE__BUSY_TIMEOUT_MS=10000
+# MAILROOM_STORE__DATABASE_PATH=/absolute/path/to/mailroom.sqlite3
