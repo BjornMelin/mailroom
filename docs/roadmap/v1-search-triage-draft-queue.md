@@ -15,11 +15,24 @@ Deliver the first complete operational slice:
 - workspace initialization
 - config contract
 - SQLite schema ownership
+- SQLite bootstrap and diagnostics
 - mailbox/account modeling
 - search primitives
 - triage queues and status tracking
 - draft queue records and operator notes
 - plugin-assisted operator documentation
+
+## Current status
+
+The substrate layer is in place:
+
+- repo-local runtime initialization under `.mailroom/`
+- typed config resolution with defaults, user config, repo config, and env overrides
+- local SQLite bootstrap with embedded migrations
+- store diagnostics that expose schema version and active pragma state
+
+The next implementation slice should start at mailbox/account modeling and Gmail
+auth wiring, not re-open config or store ownership.
 
 ## Deferred
 
@@ -33,4 +46,3 @@ Deliver the first complete operational slice:
 ## Success condition
 
 An operator can set up the workspace, inspect mailbox-derived state, search it quickly, classify work for follow-up, and stage reply/draft actions in a durable local system.
-

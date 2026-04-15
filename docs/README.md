@@ -12,5 +12,6 @@ Start here:
 
 1. [`decisions/0001-foundation.md`](decisions/0001-foundation.md)
 2. [`architecture/system-overview.md`](architecture/system-overview.md)
-3. [`operations/plugin-assisted-workflows.md`](operations/plugin-assisted-workflows.md)
-4. [`roadmap/v1-search-triage-draft-queue.md`](roadmap/v1-search-triage-draft-queue.md)
+3. [`operations/local-config-and-store.md`](operations/local-config-and-store.md)
+4. [`operations/plugin-assisted-workflows.md`](operations/plugin-assisted-workflows.md)
+5. [`roadmap/v1-search-triage-draft-queue.md`](roadmap/v1-search-triage-draft-queue.md)
