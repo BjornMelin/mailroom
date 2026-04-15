@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let repo_root = discover_repo_root(std::env::current_dir()?)?;
+    let cwd = std::env::current_dir()?;
+    let repo_root = discover_repo_root(cwd)?;
     let paths = workspace::WorkspacePaths::from_repo_root(repo_root);
 
     match cli.command {
@@ -32,7 +33,7 @@ pub fn run() -> Result<()> {
         } => {
             let created = paths.ensure_runtime_dirs()?;
             println!(
-                "initialized {} runtime paths under {}",
+                "initialized {} new runtime paths under {}",
                 created.len(),
                 paths.runtime_root.display()
             );
@@ -61,6 +62,7 @@ fn is_repo_root(path: &Path) -> bool {
 mod tests {
     use super::discover_repo_root;
     use crate::workspace::WorkspacePaths;
+    use std::fs;
     use std::path::PathBuf;
 
     #[test]
@@ -84,5 +86,22 @@ mod tests {
             discover_repo_root(nested).unwrap(),
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         );
+    }
+
+    #[test]
+    fn workspace_init_reports_only_new_runtime_paths() {
+        let repo_root = std::env::temp_dir().join(format!("mailroom-test-{}", std::process::id()));
+        if repo_root.exists() {
+            fs::remove_dir_all(&repo_root).unwrap();
+        }
+
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let first = paths.ensure_runtime_dirs().unwrap();
+        let second = paths.ensure_runtime_dirs().unwrap();
+
+        assert_eq!(first.len(), 6);
+        assert!(second.is_empty());
+
+        fs::remove_dir_all(repo_root).unwrap();
     }
 }
