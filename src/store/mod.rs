@@ -121,7 +121,7 @@ pub fn init(config_report: &ConfigReport) -> Result<StoreInitReport> {
 
     let pragmas = read_pragmas(&connection)?;
     let known_migrations = migrations::known_migration_count();
-    let pending_migrations = pending_migrations(known_migrations, pragmas.user_version);
+    let pending_migrations = pending_migrations(known_migrations, pragmas.user_version)?;
 
     Ok(StoreInitReport {
         database_path,
@@ -152,7 +152,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
     let connection =
         connection::open_read_only(&database_path, config_report.config.store.busy_timeout_ms)?;
     let pragmas = read_pragmas(&connection)?;
-    let pending_migrations = pending_migrations(known_migrations, pragmas.user_version);
+    let pending_migrations = pending_migrations(known_migrations, pragmas.user_version)?;
 
     Ok(StoreDoctorReport {
         config: config_report,
@@ -173,12 +173,19 @@ fn ensure_database_parent_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn pending_migrations(known_migrations: usize, user_version: i64) -> usize {
+fn pending_migrations(known_migrations: usize, user_version: i64) -> Result<usize> {
     if user_version < 0 {
-        return known_migrations;
+        return Ok(known_migrations);
     }
 
-    known_migrations.saturating_sub(user_version as usize)
+    let user_version = user_version as usize;
+    if user_version > known_migrations {
+        return Err(anyhow!(
+            "database schema version {user_version} is newer than embedded migrations ({known_migrations})"
+        ));
+    }
+
+    Ok(known_migrations - user_version)
 }
 
 fn read_pragmas(connection: &Connection) -> Result<StorePragmas> {
@@ -344,6 +351,16 @@ mod tests {
         assert_eq!(synchronous, 2);
 
         fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn pending_migrations_errors_when_database_is_ahead() {
+        let error = super::pending_migrations(1, 3).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("database schema version 3 is newer than embedded migrations (1)")
+        );
     }
 
     #[cfg(unix)]

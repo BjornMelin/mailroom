@@ -184,13 +184,17 @@ mod tests {
             fs::remove_dir_all(&repo_root).unwrap();
         }
 
+        let runtime_root = unique_temp_dir("mailroom-lib-alt-runtime");
         fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
         fs::write(
             repo_root.join(".mailroom/config.toml"),
-            r#"
+            format!(
+                r#"
 [workspace]
-runtime_root = "/tmp/mailroom-lib-alt"
+runtime_root = "{}"
 "#,
+                runtime_root.display()
+            ),
         )
         .unwrap();
 
@@ -199,16 +203,13 @@ runtime_root = "/tmp/mailroom-lib-alt"
         let configured_paths =
             runtime_paths_from_config(&repo_root, &config_report.config.workspace);
 
-        assert_eq!(
-            configured_paths.runtime_root,
-            PathBuf::from("/tmp/mailroom-lib-alt")
-        );
-        assert_eq!(
-            configured_paths.state_dir,
-            PathBuf::from("/tmp/mailroom-lib-alt/state")
-        );
+        assert_eq!(configured_paths.runtime_root, runtime_root);
+        assert_eq!(configured_paths.state_dir, runtime_root.join("state"));
 
         fs::remove_dir_all(repo_root).unwrap();
+        if runtime_root.exists() {
+            fs::remove_dir_all(runtime_root).unwrap();
+        }
     }
 
     #[test]
@@ -218,13 +219,17 @@ runtime_root = "/tmp/mailroom-lib-alt"
             fs::remove_dir_all(&repo_root).unwrap();
         }
 
+        let runtime_root = unique_temp_dir("mailroom-doctor-alt-runtime");
         fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
         fs::write(
             repo_root.join(".mailroom/config.toml"),
-            r#"
+            format!(
+                r#"
 [workspace]
-runtime_root = "/tmp/mailroom-doctor-alt"
+runtime_root = "{}"
 "#,
+                runtime_root.display()
+            ),
         )
         .unwrap();
 
@@ -240,7 +245,9 @@ runtime_root = "/tmp/mailroom-doctor-alt"
         assert!(report.path_statuses.iter().all(|status| status.exists));
 
         fs::remove_dir_all(repo_root).unwrap();
-        fs::remove_dir_all("/tmp/mailroom-doctor-alt").unwrap();
+        if runtime_root.exists() {
+            fs::remove_dir_all(runtime_root).unwrap();
+        }
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
