@@ -1,0 +1,16 @@
+/target
+/.mailroom/
+/.env
+/.env.*
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+credentials*.json
+token*.json
+secrets*.json
+.DS_Store
+

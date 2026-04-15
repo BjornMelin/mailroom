@@ -1,0 +1,24 @@
+# Example tracked configuration for mailroom.
+# Live secrets and tokens do not belong in this file.
+
+[workspace]
+runtime_root = ".mailroom"
+auth_dir = ".mailroom/auth"
+cache_dir = ".mailroom/cache"
+state_dir = ".mailroom/state"
+vault_dir = ".mailroom/vault"
+exports_dir = ".mailroom/exports"
+logs_dir = ".mailroom/logs"
+
+[mailbox]
+mode = "single-user-single-mailbox"
+search_store = "sqlite-fts5"
+
+[execution]
+native_core = "rust"
+operator_surfaces = ["cli", "tui"]
+plugin_assisted = true
+
+[roadmap]
+current_milestone = "v1-search-triage-draft-queue"
+
