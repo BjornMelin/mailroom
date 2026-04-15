@@ -8,7 +8,6 @@ pub fn open_or_create(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
     let connection = Connection::open_with_flags(path, create_flags())?;
     configure_busy_timeout(&connection, busy_timeout_ms)?;
     configure_connection_pragmas(&connection)?;
-    configure_hardening_pragmas(&connection)?;
     Ok(connection)
 }
 
@@ -43,7 +42,7 @@ fn configure_read_only_connection_pragmas(connection: &Connection) -> Result<()>
     Ok(())
 }
 
-fn configure_hardening_pragmas(connection: &Connection) -> Result<()> {
+pub fn configure_hardening_pragmas(connection: &Connection) -> Result<()> {
     let journal_mode = connection
         .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {

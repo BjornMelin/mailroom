@@ -115,6 +115,10 @@ pub fn init(config_report: &ConfigReport) -> Result<StoreInitReport> {
     ensure_database_parent_exists(&database_path)?;
     let mut connection =
         connection::open_or_create(&database_path, config_report.config.store.busy_timeout_ms)?;
+
+    let initial_pragmas = read_pragmas(&connection)?;
+    validate_application_id(&database_path, initial_pragmas.application_id)?;
+    connection::configure_hardening_pragmas(&connection)?;
     harden_database_permissions(&database_path)?;
 
     migrations::apply(&mut connection)?;
@@ -189,6 +193,19 @@ fn pending_migrations(known_migrations: usize, user_version: i64) -> Result<usiz
     }
 
     Ok(known_migrations - user_version)
+}
+
+fn validate_application_id(database_path: &Path, application_id: i64) -> Result<()> {
+    if application_id != 0 && application_id != SQLITE_APPLICATION_ID {
+        return Err(anyhow!(
+            "database {} has application_id {}, expected 0 or {}",
+            database_path.display(),
+            application_id,
+            SQLITE_APPLICATION_ID
+        ));
+    }
+
+    Ok(())
 }
 
 fn read_pragmas(connection: &Connection) -> Result<StorePragmas> {
@@ -352,6 +369,42 @@ mod tests {
         assert_eq!(application_id, 7);
         assert_eq!(journal_mode, "delete");
         assert_eq!(synchronous, 2);
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn store_init_rejects_foreign_database_before_mutating_it() {
+        let repo_root = unique_temp_dir("mailroom-store-init-foreign");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+
+        let config_report = resolve(&paths).unwrap();
+        {
+            let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+            connection
+                .pragma_update(None, "application_id", 7_i64)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", 0_i64)
+                .unwrap();
+        }
+
+        let error = init(&config_report).unwrap_err();
+        let error_message = error.to_string();
+        assert!(error_message.contains("application_id 7"));
+        assert!(error_message.contains("expected 0 or"));
+
+        let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+        let application_id: i64 = connection
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .unwrap();
+        let user_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(application_id, 7);
+        assert_eq!(user_version, 0);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
