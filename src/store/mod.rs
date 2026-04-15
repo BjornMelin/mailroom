@@ -115,6 +115,7 @@ pub fn init(config_report: &ConfigReport) -> Result<StoreInitReport> {
     ensure_database_parent_exists(&database_path)?;
     let mut connection =
         connection::open_or_create(&database_path, config_report.config.store.busy_timeout_ms)?;
+    harden_database_permissions(&database_path)?;
 
     migrations::apply(&mut connection)?;
     harden_database_permissions(&database_path)?;

@@ -187,6 +187,7 @@ mod tests {
 
         let runtime_root = TempDir::new().unwrap();
         let runtime_root_path = runtime_root.path().to_path_buf();
+        let runtime_root_toml = runtime_root_path.to_string_lossy().replace('\\', "\\\\");
         fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
         fs::write(
             repo_root.join(".mailroom/config.toml"),
@@ -195,7 +196,7 @@ mod tests {
 [workspace]
 runtime_root = "{}"
 "#,
-                runtime_root_path.display()
+                runtime_root_toml
             ),
         )
         .unwrap();
@@ -223,6 +224,7 @@ runtime_root = "{}"
 
         let runtime_root = TempDir::new().unwrap();
         let runtime_root_path = runtime_root.path().to_path_buf();
+        let runtime_root_toml = runtime_root_path.to_string_lossy().replace('\\', "\\\\");
         fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
         fs::write(
             repo_root.join(".mailroom/config.toml"),
@@ -231,7 +233,7 @@ runtime_root = "{}"
 [workspace]
 runtime_root = "{}"
 "#,
-                runtime_root_path.display()
+                runtime_root_toml
             ),
         )
         .unwrap();

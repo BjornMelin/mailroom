@@ -1,5 +1,5 @@
 use super::SQLITE_APPLICATION_ID;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::time::Duration;
@@ -44,8 +44,11 @@ fn configure_read_only_connection_pragmas(connection: &Connection) -> Result<()>
 }
 
 fn configure_hardening_pragmas(connection: &Connection) -> Result<()> {
-    connection
+    let journal_mode = connection
         .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        bail!("failed to enforce journal_mode=WAL; sqlite reported journal_mode={journal_mode}");
+    }
     connection.pragma_update(None, "application_id", SQLITE_APPLICATION_ID)?;
     Ok(())
 }
@@ -53,12 +56,11 @@ fn configure_hardening_pragmas(connection: &Connection) -> Result<()> {
 fn create_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
-        | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
 }
 
 fn read_only_flags() -> OpenFlags {
-    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX
+    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
 }
 
 #[cfg(test)]
