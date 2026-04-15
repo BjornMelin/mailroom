@@ -126,7 +126,7 @@ fn path_exists(path: &Path) -> bool {
 
 fn is_sensitive_runtime_dir(path: &Path) -> bool {
     path.file_name()
-        .is_some_and(|name| matches!(name.to_str(), Some("auth" | "vault")))
+        .is_some_and(|name| matches!(name.to_str(), Some("auth" | "state" | "vault" | "exports")))
 }
 
 #[cfg(unix)]
@@ -138,4 +138,48 @@ fn set_owner_only_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_owner_only_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspacePaths;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_runtime_dirs_hardens_sensitive_runtime_permissions() {
+        let repo_root = unique_temp_dir("mailroom-workspace-perms");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+
+        paths.ensure_runtime_dirs().unwrap();
+
+        for path in [
+            &paths.auth_dir,
+            &paths.state_dir,
+            &paths.vault_dir,
+            &paths.exports_dir,
+        ] {
+            let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "expected owner-only permissions for {}",
+                path.display()
+            );
+        }
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
 }
