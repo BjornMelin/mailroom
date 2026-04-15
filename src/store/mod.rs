@@ -217,8 +217,15 @@ fn print_pragmas(pragmas: &StorePragmas) {
 fn harden_database_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    if path.exists() {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let mut candidate_paths = Vec::with_capacity(3);
+    candidate_paths.push(path.to_path_buf());
+    candidate_paths.push(PathBuf::from(format!("{}-wal", path.display())));
+    candidate_paths.push(PathBuf::from(format!("{}-shm", path.display())));
+
+    for candidate in candidate_paths {
+        if candidate.exists() {
+            fs::set_permissions(candidate, fs::Permissions::from_mode(0o600))?;
+        }
     }
 
     Ok(())
@@ -231,7 +238,7 @@ fn harden_database_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SQLITE_APPLICATION_ID, init, inspect, migrations};
+    use super::{SQLITE_APPLICATION_ID, harden_database_permissions, init, inspect, migrations};
     use crate::config::resolve;
     use crate::workspace::WorkspacePaths;
     use rusqlite::Connection;
@@ -363,6 +370,37 @@ mod tests {
         assert!(pragmas.foreign_keys);
         assert!(!pragmas.trusted_schema);
         assert_eq!(pragmas.synchronous, 1);
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harden_database_permissions_updates_sqlite_sidecars() {
+        let repo_root = unique_temp_dir("mailroom-store-permissions");
+        fs::create_dir_all(&repo_root).unwrap();
+
+        let database_path = repo_root.join("store.sqlite3");
+        let wal_path = repo_root.join("store.sqlite3-wal");
+        let shm_path = repo_root.join("store.sqlite3-shm");
+
+        fs::write(&database_path, b"").unwrap();
+        fs::write(&wal_path, b"").unwrap();
+        fs::write(&shm_path, b"").unwrap();
+
+        fs::set_permissions(&database_path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&wal_path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&shm_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        harden_database_permissions(&database_path).unwrap();
+
+        let database_mode = fs::metadata(&database_path).unwrap().permissions().mode() & 0o777;
+        let wal_mode = fs::metadata(&wal_path).unwrap().permissions().mode() & 0o777;
+        let shm_mode = fs::metadata(&shm_path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(database_mode, 0o600);
+        assert_eq!(wal_mode, 0o600);
+        assert_eq!(shm_mode, 0o600);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
