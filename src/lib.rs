@@ -55,7 +55,7 @@ fn discover_repo_root(start: PathBuf) -> Result<PathBuf> {
 }
 
 fn is_repo_root(path: &Path) -> bool {
-    path.join(".git").exists() || path.join("Cargo.toml").is_file()
+    path.join(".git").exists()
 }
 
 #[cfg(test)]
@@ -86,6 +86,33 @@ mod tests {
             discover_repo_root(nested).unwrap(),
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         );
+    }
+
+    #[test]
+    fn repo_root_discovery_ignores_nested_cargo_toml_without_git_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("mailroom-root-discovery-{}", std::process::id()));
+        let nested_crate = root.join("nested-crate");
+        let nested_src = nested_crate.join("src");
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        fs::create_dir_all(&nested_src).unwrap();
+        fs::write(root.join(".git"), "gitdir: /tmp/mailroom-test-git\n").unwrap();
+        fs::write(
+            nested_crate.join("Cargo.toml"),
+            "[package]\nname = \"nested\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(discover_repo_root(nested_src).unwrap(), root);
+
+        fs::remove_dir_all(
+            std::env::temp_dir().join(format!("mailroom-root-discovery-{}", std::process::id())),
+        )
+        .unwrap();
     }
 
     #[test]
