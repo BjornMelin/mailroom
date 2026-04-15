@@ -1,0 +1,10 @@
+[package]
+name = "mailroom"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.39", features = ["derive", "wrap_help"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
