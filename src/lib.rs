@@ -64,6 +64,7 @@ mod tests {
     use crate::workspace::WorkspacePaths;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn repo_local_runtime_paths_are_stable() {
@@ -90,8 +91,7 @@ mod tests {
 
     #[test]
     fn repo_root_discovery_ignores_nested_cargo_toml_without_git_metadata() {
-        let root =
-            std::env::temp_dir().join(format!("mailroom-root-discovery-{}", std::process::id()));
+        let root = unique_temp_dir("mailroom-root-discovery");
         let nested_crate = root.join("nested-crate");
         let nested_src = nested_crate.join("src");
 
@@ -109,15 +109,12 @@ mod tests {
 
         assert_eq!(discover_repo_root(nested_src).unwrap(), root);
 
-        fs::remove_dir_all(
-            std::env::temp_dir().join(format!("mailroom-root-discovery-{}", std::process::id())),
-        )
-        .unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn workspace_init_reports_only_new_runtime_paths() {
-        let repo_root = std::env::temp_dir().join(format!("mailroom-test-{}", std::process::id()));
+        let repo_root = unique_temp_dir("mailroom-test");
         if repo_root.exists() {
             fs::remove_dir_all(&repo_root).unwrap();
         }
@@ -130,5 +127,13 @@ mod tests {
         assert!(second.is_empty());
 
         fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
     }
 }
