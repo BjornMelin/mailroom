@@ -12,7 +12,7 @@ pub fn open_or_create(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
     Ok(connection)
 }
 
-pub fn open_read_only(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
+pub fn open_read_only_for_diagnostics(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
     let connection = Connection::open_with_flags(path, read_only_flags())?;
     configure_busy_timeout(&connection, busy_timeout_ms)?;
     configure_read_only_connection_pragmas(&connection)?;

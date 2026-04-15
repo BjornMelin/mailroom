@@ -113,6 +113,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     #[test]
     fn repo_local_runtime_paths_are_stable() {
@@ -184,7 +185,8 @@ mod tests {
             fs::remove_dir_all(&repo_root).unwrap();
         }
 
-        let runtime_root = unique_temp_dir("mailroom-lib-alt-runtime");
+        let runtime_root = TempDir::new().unwrap();
+        let runtime_root_path = runtime_root.path().to_path_buf();
         fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
         fs::write(
             repo_root.join(".mailroom/config.toml"),
@@ -193,7 +195,7 @@ mod tests {
 [workspace]
 runtime_root = "{}"
 "#,
-                runtime_root.display()
+                runtime_root_path.display()
             ),
         )
         .unwrap();
@@ -203,13 +205,13 @@ runtime_root = "{}"
         let configured_paths =
             runtime_paths_from_config(&repo_root, &config_report.config.workspace);
 
-        assert_eq!(configured_paths.runtime_root, runtime_root);
-        assert_eq!(configured_paths.state_dir, runtime_root.join("state"));
+        assert_eq!(configured_paths.runtime_root, runtime_root_path);
+        assert_eq!(
+            configured_paths.state_dir,
+            runtime_root.path().join("state")
+        );
 
         fs::remove_dir_all(repo_root).unwrap();
-        if runtime_root.exists() {
-            fs::remove_dir_all(runtime_root).unwrap();
-        }
     }
 
     #[test]
@@ -219,7 +221,8 @@ runtime_root = "{}"
             fs::remove_dir_all(&repo_root).unwrap();
         }
 
-        let runtime_root = unique_temp_dir("mailroom-doctor-alt-runtime");
+        let runtime_root = TempDir::new().unwrap();
+        let runtime_root_path = runtime_root.path().to_path_buf();
         fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
         fs::write(
             repo_root.join(".mailroom/config.toml"),
@@ -228,7 +231,7 @@ runtime_root = "{}"
 [workspace]
 runtime_root = "{}"
 "#,
-                runtime_root.display()
+                runtime_root_path.display()
             ),
         )
         .unwrap();
@@ -245,9 +248,6 @@ runtime_root = "{}"
         assert!(report.path_statuses.iter().all(|status| status.exists));
 
         fs::remove_dir_all(repo_root).unwrap();
-        if runtime_root.exists() {
-            fs::remove_dir_all(runtime_root).unwrap();
-        }
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

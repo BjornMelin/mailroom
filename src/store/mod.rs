@@ -149,8 +149,10 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
         });
     }
 
-    let connection =
-        connection::open_read_only(&database_path, config_report.config.store.busy_timeout_ms)?;
+    let connection = connection::open_read_only_for_diagnostics(
+        &database_path,
+        config_report.config.store.busy_timeout_ms,
+    )?;
     let pragmas = read_pragmas(&connection)?;
     let pending_migrations = pending_migrations(known_migrations, pragmas.user_version)?;
 
