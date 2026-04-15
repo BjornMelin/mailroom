@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,8 +35,14 @@ impl WorkspacePaths {
     pub fn ensure_runtime_dirs(&self) -> Result<Vec<PathBuf>> {
         let mut created = Vec::new();
         for dir in self.runtime_dirs() {
-            fs::create_dir_all(&dir)?;
-            created.push(dir);
+            let existed = dir.exists();
+            fs::create_dir_all(dir)?;
+            if is_sensitive_runtime_dir(dir) {
+                set_owner_only_permissions(dir)?;
+            }
+            if !existed {
+                created.push(dir.to_path_buf());
+            }
         }
         Ok(created)
     }
@@ -55,14 +63,14 @@ impl WorkspacePaths {
         Ok(())
     }
 
-    fn runtime_dirs(&self) -> [PathBuf; 6] {
+    fn runtime_dirs(&self) -> [&Path; 6] {
         [
-            self.auth_dir.clone(),
-            self.cache_dir.clone(),
-            self.state_dir.clone(),
-            self.vault_dir.clone(),
-            self.exports_dir.clone(),
-            self.logs_dir.clone(),
+            self.auth_dir.as_path(),
+            self.cache_dir.as_path(),
+            self.state_dir.as_path(),
+            self.vault_dir.as_path(),
+            self.exports_dir.as_path(),
+            self.logs_dir.as_path(),
         ]
     }
 }
@@ -86,8 +94,8 @@ impl DoctorReport {
             .runtime_dirs()
             .into_iter()
             .map(|path| PathStatus {
-                exists: path_exists(&path),
-                path,
+                exists: path_exists(path),
+                path: path.to_path_buf(),
             })
             .collect();
 
@@ -114,4 +122,20 @@ impl DoctorReport {
 
 fn path_exists(path: &Path) -> bool {
     path.exists()
+}
+
+fn is_sensitive_runtime_dir(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| matches!(name.to_str(), Some("auth" | "vault")))
+}
+
+#[cfg(unix)]
+fn set_owner_only_permissions(path: &Path) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }

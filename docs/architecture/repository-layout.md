@@ -24,8 +24,7 @@ As the codebase grows, prefer a layout along these lines:
 - `src/workspace/`: repo-local path and runtime initialization
 - `src/store/`: SQLite schema and queries
 - `src/gmail/`: Gmail auth and API adapters
-- `src/workflows/`: triage, drafting, cleanup, export flows
+- `src/workflows/`: triage, drafting, cleanup flows, export flows
 - `src/tui/`: ratatui application shell
 
 Do not introduce duplicate ownership of workflow rules between CLI, TUI, and adapters.
-

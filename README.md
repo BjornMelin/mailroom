@@ -13,10 +13,10 @@
 
 ## Repository layout
 
-- [`src/`](/home/bjorn/repos/mailroom/src): Rust entrypoints and workspace logic
-- [`config/`](/home/bjorn/repos/mailroom/config): tracked example configuration
-- [`docs/`](/home/bjorn/repos/mailroom/docs): architecture, decisions, operations, roadmap, and workflow docs
-- [`.github/workflows/`](/home/bjorn/repos/mailroom/.github/workflows): CI for formatting, linting, and tests
+- [`src/`](src/): Rust entrypoints and workspace logic
+- [`config/`](config/): tracked example configuration
+- [`docs/`](docs/): architecture, decisions, operations, roadmap, and workflow docs
+- [`.github/workflows/`](.github/workflows/): CI for formatting, linting, and tests
 - `.mailroom/`: ignored runtime workspace for local state
 
 ## Local runtime workspace
@@ -45,11 +45,11 @@ cargo run -- roadmap
 
 ## Docs map
 
-- [`docs/README.md`](/home/bjorn/repos/mailroom/docs/README.md): doc index
-- [`docs/decisions/0001-foundation.md`](/home/bjorn/repos/mailroom/docs/decisions/0001-foundation.md): foundational architecture decision
-- [`docs/architecture/system-overview.md`](/home/bjorn/repos/mailroom/docs/architecture/system-overview.md): system boundaries and responsibilities
-- [`docs/operations/plugin-assisted-workflows.md`](/home/bjorn/repos/mailroom/docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
-- [`docs/roadmap/v1-search-triage-draft-queue.md`](/home/bjorn/repos/mailroom/docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
+- [`docs/README.md`](docs/README.md): doc index
+- [`docs/decisions/0001-foundation.md`](docs/decisions/0001-foundation.md): foundational architecture decision
+- [`docs/architecture/system-overview.md`](docs/architecture/system-overview.md): system boundaries and responsibilities
+- [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
+- [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 
 ## Near-term build plan
 
@@ -58,4 +58,3 @@ cargo run -- roadmap
 3. Build native search/triage flows.
 4. Add draft queue state and reply workflows.
 5. Layer in a TUI over the native command core.
-
