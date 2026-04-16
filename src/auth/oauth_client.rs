@@ -179,8 +179,7 @@ pub fn oauth_client_source(
     workspace: &WorkspaceConfig,
 ) -> Result<OAuthClientSource> {
     let oauth_client_path = config.oauth_client_path(workspace);
-    if oauth_client_path.is_file() {
-        let _ = load_imported_client(&oauth_client_path)?;
+    if load_imported_client(&oauth_client_path)?.is_some() {
         return Ok(OAuthClientSource::WorkspaceFile);
     }
 
@@ -231,7 +230,7 @@ pub(crate) fn prepare_setup(
         OAuthClientSource::Unconfigured => {}
     }
 
-    let candidates = default_import_candidates()?;
+    let candidates = normalize_candidate_paths(default_import_candidates()?);
     let detected_adc = detect_adc_path();
     if should_use_interactive_setup(json, is_interactive_terminal()) {
         prepare_interactive_setup(config, workspace, candidates, detected_adc)
@@ -574,9 +573,7 @@ fn discover_import_path(credentials_file: Option<PathBuf>) -> Result<ImportDisco
         });
     }
 
-    let mut candidates = default_import_candidates()?;
-    candidates.sort();
-    candidates.dedup();
+    let candidates = normalize_candidate_paths(default_import_candidates()?);
 
     match candidates.as_slice() {
         [] => Err(anyhow!(
@@ -635,7 +632,6 @@ fn default_download_dirs(
     if let Some(home_dir) = home_dir {
         downloads_dirs.push(home_dir.join("Downloads"));
         downloads_dirs.push(home_dir.join("downloads"));
-        downloads_dirs.push(home_dir.join(".config/gcloud"));
     }
 
     if let Some(user_profile_dir) = user_profile_dir {
@@ -646,6 +642,12 @@ fn default_download_dirs(
     }
 
     downloads_dirs
+}
+
+fn normalize_candidate_paths(mut candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 fn collect_candidate_files(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -939,14 +941,15 @@ mod tests {
     use super::{
         GOOGLE_AUTH_CLIENTS_URL, GOOGLE_AUTH_OVERVIEW_URL, ImportedOAuthClient,
         ImportedOAuthClientSourceKind, OAuthClientError, OAuthClientSource, PreparedSetup,
-        detect_adc_path_from_env, import_google_desktop_client, oauth_client_exists,
-        oauth_client_source, prepare_google_desktop_client_from_adc,
-        prepare_google_desktop_client_from_values, prepare_noninteractive_setup, resolve,
-        setup_guidance, should_use_interactive_setup,
+        default_download_dirs, detect_adc_path_from_env, import_google_desktop_client,
+        normalize_candidate_paths, oauth_client_exists, oauth_client_source,
+        prepare_google_desktop_client_from_adc, prepare_google_desktop_client_from_values,
+        prepare_noninteractive_setup, resolve, setup_guidance, should_use_interactive_setup,
     };
     use crate::config::{GmailConfig, WorkspaceConfig};
     use secrecy::ExposeSecret;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn workspace_for(temp_dir: &TempDir) -> WorkspaceConfig {
@@ -1149,6 +1152,41 @@ mod tests {
                 panic!("expected non-interactive setup to import the ADC path")
             }
         }
+    }
+
+    #[test]
+    fn source_falls_back_to_unconfigured_when_workspace_file_disappears() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = workspace_for(&temp_dir);
+
+        assert_eq!(
+            oauth_client_source(&gmail_config(), &workspace).unwrap(),
+            OAuthClientSource::Unconfigured
+        );
+    }
+
+    #[test]
+    fn prepare_setup_deduplicates_discovered_candidate_paths() {
+        let candidate = PathBuf::from("/tmp/client_secret_duplicate.json");
+        let normalized = normalize_candidate_paths(vec![candidate.clone(), candidate.clone()]);
+
+        assert_eq!(normalized, vec![candidate]);
+    }
+
+    #[test]
+    fn default_download_dirs_only_include_download_locations() {
+        let home_dir = PathBuf::from("/home/tester");
+        let user_profile_dir = PathBuf::from("C:/Users/tester");
+        let downloads_dirs = default_download_dirs(Some(home_dir), Some(user_profile_dir));
+
+        assert_eq!(
+            downloads_dirs,
+            vec![
+                PathBuf::from("/home/tester/Downloads"),
+                PathBuf::from("/home/tester/downloads"),
+                PathBuf::from("C:/Users/tester/Downloads"),
+            ]
+        );
     }
 
     #[test]
