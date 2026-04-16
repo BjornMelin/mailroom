@@ -1,3 +1,4 @@
+pub mod accounts;
 mod connection;
 mod migrations;
 
@@ -290,18 +291,20 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.schema_version, 2);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
-        let table_exists: i64 = connection
+        let substrate_tables: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'",
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN ('app_metadata', 'accounts')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_exists, 1);
+        assert_eq!(substrate_tables, 2);
 
         fs::remove_dir_all(repo_root).unwrap();
     }

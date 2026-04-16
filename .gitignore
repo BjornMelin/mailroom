@@ -1,5 +1,7 @@
 /target
 /.mailroom/
+/.agents/
+/skills-lock.json
 /.env
 /.env.*
 *.log
@@ -13,4 +15,3 @@ credentials*.json
 token*.json
 secrets*.json
 .DS_Store
-

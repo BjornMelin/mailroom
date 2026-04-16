@@ -1,4 +1,5 @@
-use anyhow::Result;
+use crate::config::WorkspaceConfig;
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 use std::fs;
 #[cfg(unix)]
@@ -29,6 +30,19 @@ impl WorkspacePaths {
             exports_dir: runtime_root.join("exports"),
             logs_dir: runtime_root.join("logs"),
             runtime_root,
+        }
+    }
+
+    pub fn from_config(repo_root: PathBuf, workspace: &WorkspaceConfig) -> Self {
+        Self {
+            repo_root,
+            runtime_root: workspace.runtime_root.clone(),
+            auth_dir: workspace.auth_dir.clone(),
+            cache_dir: workspace.cache_dir.clone(),
+            state_dir: workspace.state_dir.clone(),
+            vault_dir: workspace.vault_dir.clone(),
+            exports_dir: workspace.exports_dir.clone(),
+            logs_dir: workspace.logs_dir.clone(),
         }
     }
 
@@ -75,6 +89,19 @@ impl WorkspacePaths {
     }
 }
 
+pub fn configured_repo_root_from_locations(repo_config_path: &Path) -> Result<PathBuf> {
+    repo_config_path
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            anyhow!(
+                "could not derive repo root from {}",
+                repo_config_path.display()
+            )
+        })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PathStatus {
     pub path: PathBuf,
@@ -104,19 +131,6 @@ impl DoctorReport {
             runtime_root_exists: path_exists(&paths.runtime_root),
             path_statuses,
         }
-    }
-
-    pub fn print(&self, json: bool) -> Result<()> {
-        if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
-        } else {
-            println!("repo_root={}", self.repo_root.display());
-            println!("runtime_root_exists={}", self.runtime_root_exists);
-            for status in &self.path_statuses {
-                println!("{} exists={}", status.path.display(), status.exists);
-            }
-        }
-        Ok(())
     }
 }
 

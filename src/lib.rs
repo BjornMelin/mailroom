@@ -1,20 +1,56 @@
+mod auth;
 mod cli;
 mod config;
+mod doctor;
+mod gmail;
 mod store;
 mod workspace;
 
+use crate::auth::file_store::CredentialStore;
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, ConfigCommand, StoreCommand, WorkspaceCommand};
+use cli::{
+    AccountCommand, AuthCommand, Cli, Commands, ConfigCommand, GmailCommand, GmailLabelsCommand,
+    StoreCommand, WorkspaceCommand,
+};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
     let repo_root = discover_repo_root(cwd)?;
     let paths = workspace::WorkspacePaths::from_repo_root(repo_root);
 
     match cli.command {
+        Commands::Auth {
+            command: AuthCommand::Login { json, no_browser },
+        } => {
+            let config_report = config::resolve(&paths)?;
+            let report = auth::login(&config_report, no_browser, json).await?;
+            report.print(json)?;
+        }
+        Commands::Auth {
+            command: AuthCommand::Status { json },
+        } => {
+            let config_report = config::resolve(&paths)?;
+            let report = auth::status(&config_report)?;
+            report.print(json)?;
+        }
+        Commands::Auth {
+            command: AuthCommand::Logout { json },
+        } => {
+            let config_report = config::resolve(&paths)?;
+            let report = auth::logout(&config_report)?;
+            report.print(json)?;
+        }
+        Commands::Account {
+            command: AccountCommand::Show { json },
+        } => {
+            let config_report = config::resolve(&paths)?;
+            let report = refresh_active_account(&config_report).await?;
+            report.print(json)?;
+        }
         Commands::Config {
             command: ConfigCommand::Show { json },
         } => {
@@ -26,9 +62,23 @@ pub fn run() -> Result<()> {
         }
         Commands::Doctor { json } => {
             let config_report = config::resolve(&paths)?;
-            let configured_paths =
-                runtime_paths_from_config(&paths.repo_root, &config_report.config.workspace);
-            let report = workspace::DoctorReport::inspect(&configured_paths);
+            let configured_paths = workspace::WorkspacePaths::from_config(
+                paths.repo_root.clone(),
+                &config_report.config.workspace,
+            );
+            let report = doctor::DoctorReport::inspect(&configured_paths, config_report)?;
+            report.print(json)?;
+        }
+        Commands::Gmail {
+            command:
+                GmailCommand::Labels {
+                    command: GmailLabelsCommand::List { json },
+                },
+        } => {
+            let config_report = config::resolve(&paths)?;
+            let report = GmailLabelsReport {
+                labels: gmail_client(&config_report)?.list_labels().await?,
+            };
             report.print(json)?;
         }
         Commands::Roadmap => {
@@ -43,8 +93,10 @@ pub fn run() -> Result<()> {
             command: WorkspaceCommand::Init,
         } => {
             let config_report = config::resolve(&paths)?;
-            let configured_paths =
-                runtime_paths_from_config(&paths.repo_root, &config_report.config.workspace);
+            let configured_paths = workspace::WorkspacePaths::from_config(
+                paths.repo_root.clone(),
+                &config_report.config.workspace,
+            );
             let created = configured_paths.ensure_runtime_dirs()?;
             println!(
                 "initialized {} new runtime paths under {}",
@@ -59,8 +111,10 @@ pub fn run() -> Result<()> {
             command: StoreCommand::Init { json },
         } => {
             let config_report = config::resolve(&paths)?;
-            let configured_paths =
-                runtime_paths_from_config(&paths.repo_root, &config_report.config.workspace);
+            let configured_paths = workspace::WorkspacePaths::from_config(
+                paths.repo_root.clone(),
+                &config_report.config.workspace,
+            );
             configured_paths.ensure_runtime_dirs()?;
             let report = store::init(&config_report)?;
             report.print(json)?;
@@ -77,20 +131,50 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn runtime_paths_from_config(
-    repo_root: &Path,
-    workspace: &config::WorkspaceConfig,
-) -> workspace::WorkspacePaths {
-    workspace::WorkspacePaths {
-        repo_root: repo_root.to_path_buf(),
-        runtime_root: workspace.runtime_root.clone(),
-        auth_dir: workspace.auth_dir.clone(),
-        cache_dir: workspace.cache_dir.clone(),
-        state_dir: workspace.state_dir.clone(),
-        vault_dir: workspace.vault_dir.clone(),
-        exports_dir: workspace.exports_dir.clone(),
-        logs_dir: workspace.logs_dir.clone(),
-    }
+fn gmail_client(config_report: &config::ConfigReport) -> Result<gmail::GmailClient> {
+    gmail::GmailClient::new(
+        config_report.config.gmail.clone(),
+        auth::file_store::FileCredentialStore::new(
+            config_report
+                .config
+                .gmail
+                .credential_path(&config_report.config.workspace),
+        ),
+    )
+}
+
+async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<AccountShowReport> {
+    let repo_root =
+        workspace::configured_repo_root_from_locations(&config_report.locations.repo_config_path)?;
+    let configured_paths =
+        workspace::WorkspacePaths::from_config(repo_root, &config_report.config.workspace);
+    let gmail_client = gmail_client(config_report)?;
+    let profile = gmail_client.get_profile().await?;
+    let access_scope = auth::file_store::FileCredentialStore::new(
+        config_report
+            .config
+            .gmail
+            .credential_path(&config_report.config.workspace),
+    )
+    .load()?
+    .map(|credentials| credentials.scopes.join(" "))
+    .unwrap_or_else(|| config_report.config.gmail.scopes.join(" "));
+    configured_paths.ensure_runtime_dirs()?;
+    store::init(config_report)?;
+    let account = store::accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::accounts::UpsertAccountInput {
+            email_address: profile.email_address,
+            history_id: profile.history_id,
+            messages_total: profile.messages_total,
+            threads_total: profile.threads_total,
+            access_scope,
+            refreshed_at_epoch_s: current_epoch_seconds(),
+        },
+    )?;
+
+    Ok(AccountShowReport { account })
 }
 
 fn discover_repo_root(start: PathBuf) -> Result<PathBuf> {
@@ -107,13 +191,17 @@ fn is_repo_root(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_repo_root, runtime_paths_from_config};
+    use super::{discover_repo_root, refresh_active_account};
+    use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::resolve;
     use crate::workspace::WorkspacePaths;
+    use secrecy::SecretString;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn repo_local_runtime_paths_are_stable() {
@@ -204,7 +292,7 @@ runtime_root = "{}"
         let paths = WorkspacePaths::from_repo_root(repo_root.clone());
         let config_report = resolve(&paths).unwrap();
         let configured_paths =
-            runtime_paths_from_config(&repo_root, &config_report.config.workspace);
+            WorkspacePaths::from_config(repo_root.clone(), &config_report.config.workspace);
 
         assert_eq!(configured_paths.runtime_root, runtime_root_path);
         assert_eq!(
@@ -241,7 +329,7 @@ runtime_root = "{}"
         let paths = WorkspacePaths::from_repo_root(repo_root.clone());
         let config_report = resolve(&paths).unwrap();
         let configured_paths =
-            runtime_paths_from_config(&repo_root, &config_report.config.workspace);
+            WorkspacePaths::from_config(repo_root.clone(), &config_report.config.workspace);
         configured_paths.ensure_runtime_dirs().unwrap();
 
         let report = crate::workspace::DoctorReport::inspect(&configured_paths);
@@ -252,6 +340,65 @@ runtime_root = "{}"
         fs::remove_dir_all(repo_root).unwrap();
     }
 
+    #[tokio::test]
+    async fn refresh_active_account_persists_stored_granted_scopes() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "emailAddress": "operator@example.com",
+                "messagesTotal": 10,
+                "threadsTotal": 7,
+                "historyId": "12345"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root);
+        paths.ensure_runtime_dirs().unwrap();
+        let mut config_report = resolve(&paths).unwrap();
+        config_report.config.gmail.api_base_url = format!("{}/gmail/v1", mock_server.uri());
+        config_report.config.gmail.scopes = vec![String::from("requested:scope")];
+        let credential_store = FileCredentialStore::new(
+            config_report
+                .config
+                .gmail
+                .credential_path(&config_report.config.workspace),
+        );
+        credential_store
+            .save(&StoredCredentials {
+                account_id: String::from("gmail:operator@example.com"),
+                access_token: SecretString::from(String::from("access-token")),
+                refresh_token: Some(SecretString::from(String::from("refresh-token"))),
+                expires_at_epoch_s: Some(u64::MAX),
+                scopes: vec![String::from("granted:scope")],
+            })
+            .unwrap();
+
+        let report = refresh_active_account(&config_report).await.unwrap();
+
+        assert_eq!(report.account.access_scope, "granted:scope");
+    }
+
+    #[tokio::test]
+    async fn refresh_active_account_without_credentials_does_not_create_database() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root);
+        let config_report = resolve(&paths).unwrap();
+
+        let error = refresh_active_account(&config_report).await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "mailroom is not authenticated; run `mailroom auth login` first"
+        );
+        assert!(!config_report.config.store.database_path.exists());
+        assert!(!config_report.config.workspace.runtime_root.exists());
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -259,4 +406,53 @@ runtime_root = "{}"
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AccountShowReport {
+    account: store::accounts::AccountRecord,
+}
+
+impl AccountShowReport {
+    fn print(&self, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(self)?);
+        } else {
+            println!("account_id={}", self.account.account_id);
+            println!("email_address={}", self.account.email_address);
+            println!("history_id={}", self.account.history_id);
+            println!("messages_total={}", self.account.messages_total);
+            println!("threads_total={}", self.account.threads_total);
+            println!(
+                "last_profile_refresh_epoch_s={}",
+                self.account.last_profile_refresh_epoch_s
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GmailLabelsReport {
+    labels: Vec<gmail::GmailLabel>,
+}
+
+impl GmailLabelsReport {
+    fn print(&self, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(self)?);
+        } else {
+            for label in &self.labels {
+                println!("{} {} {}", label.id, label.name, label.label_type);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn current_epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs() as i64
 }

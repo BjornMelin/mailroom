@@ -26,6 +26,27 @@ logs_dir = ".mailroom/logs"
 database_path = ".mailroom/state/mailroom.sqlite3"
 busy_timeout_ms = 5000
 
+[gmail]
+# client_id is required for `mailroom auth login`.
+# For Google-installed app clients, client_secret is usually omitted.
+client_id = "your-installed-app-client-id.apps.googleusercontent.com"
+# client_secret = ""
+
+# Advanced endpoint overrides are mainly useful for tests and local mocks.
+auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+api_base_url = "https://gmail.googleapis.com/gmail/v1"
+
+# Mailroom binds a localhost callback listener during login.
+listen_host = "127.0.0.1"
+listen_port = 0
+open_browser = true
+request_timeout_secs = 30
+
+# Gmail search support and mailbox mutations both require gmail.modify.
+scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+
 # Example environment overrides:
 # MAILROOM_STORE__BUSY_TIMEOUT_MS=10000
 # MAILROOM_STORE__DATABASE_PATH=/absolute/path/to/mailroom.sqlite3
+# MAILROOM_GMAIL__CLIENT_ID=your-installed-app-client-id.apps.googleusercontent.com
