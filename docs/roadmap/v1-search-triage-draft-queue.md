@@ -30,9 +30,12 @@ The substrate layer is in place:
 - typed config resolution with defaults, user config, repo config, and env overrides
 - local SQLite bootstrap with embedded migrations
 - store diagnostics that expose schema version and active pragma state
+- Gmail OAuth login with PKCE and loopback localhost callback
+- repo-local Gmail credential storage under `.mailroom/auth/`
+- active account persistence from `users.getProfile`
+- native Gmail label reads for live mailbox verification
 
-The next implementation slice should start at mailbox/account modeling and Gmail
-auth wiring, not re-open config or store ownership.
+The next implementation slice should start at search primitives and mailbox sync/update flows, not re-open auth, account, config, or store ownership.
 
 ## Deferred
 

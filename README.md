@@ -7,6 +7,7 @@
 - Primary stack: Rust + `clap`
 - Planned operator surfaces: CLI first, TUI second
 - Local operational store: SQLite with migration-owned schema and future FTS5 search
+- Native Gmail foundation: OAuth login, active account persistence, and live profile/label reads
 - Versioned content: code, docs, examples, plans
 - Ignored runtime content: `.mailroom/` state, caches, exports, secrets, and attachment vaults
 - V1 milestone: search + triage + draft queue
@@ -36,17 +37,23 @@ These paths are intentionally ignored from git.
 Repo-local overrides also live under `.mailroom/`:
 
 - `.mailroom/config.toml`
+- `.mailroom/auth/gmail-credentials.json`
 - `.mailroom/state/mailroom.sqlite3`
 
 ## Native commands
 
-The current binary can resolve config and bootstrap the local store:
+The current binary can now resolve config, bootstrap the local store, manage Gmail auth, and inspect the authenticated mailbox:
 
 ```bash
 cargo run -- workspace init
 cargo run -- paths --json
 cargo run -- doctor --json
 cargo run -- config show --json
+cargo run -- auth status --json
+cargo run -- auth login --no-browser
+cargo run -- auth logout --json
+cargo run -- account show --json
+cargo run -- gmail labels list --json
 cargo run -- store init --json
 cargo run -- store doctor --json
 cargo run -- roadmap
@@ -59,19 +66,26 @@ Config precedence is:
 3. Repo-local `.mailroom/config.toml`
 4. `MAILROOM_` environment overrides
 
+For Gmail auth, configure at least:
+
+- `gmail.client_id`
+- optionally `gmail.client_secret`
+- leave the default `gmail.modify` scope unless you are intentionally testing a narrower mock configuration
+
 ## Docs map
 
 - [`docs/README.md`](docs/README.md): doc index
 - [`docs/decisions/0001-foundation.md`](docs/decisions/0001-foundation.md): foundational architecture decision
 - [`docs/architecture/system-overview.md`](docs/architecture/system-overview.md): system boundaries and responsibilities
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
+- [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
 - [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
 - [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 
 ## Near-term build plan
 
-1. Add mailbox/account modeling and Gmail auth contracts.
-2. Build search primitives over the local SQLite store.
-3. Add triage state and durable workflow queues.
-4. Add draft/reply queue records and operator notes.
-5. Layer in a TUI over the native command core.
+1. Build local search primitives over the SQLite store.
+2. Add triage state and durable workflow queues.
+3. Add draft/reply queue records and operator notes.
+4. Layer in sync/update flows over the active Gmail account.
+5. Add a TUI over the native command core.

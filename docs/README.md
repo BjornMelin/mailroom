@@ -11,7 +11,9 @@
 Start here:
 
 1. [`decisions/0001-foundation.md`](decisions/0001-foundation.md)
-2. [`architecture/system-overview.md`](architecture/system-overview.md)
-3. [`operations/local-config-and-store.md`](operations/local-config-and-store.md)
-4. [`operations/plugin-assisted-workflows.md`](operations/plugin-assisted-workflows.md)
-5. [`roadmap/v1-search-triage-draft-queue.md`](roadmap/v1-search-triage-draft-queue.md)
+2. [`decisions/0002-gmail-auth-stack.md`](decisions/0002-gmail-auth-stack.md)
+3. [`architecture/system-overview.md`](architecture/system-overview.md)
+4. [`operations/local-config-and-store.md`](operations/local-config-and-store.md)
+5. [`operations/gmail-auth-and-account.md`](operations/gmail-auth-and-account.md)
+6. [`operations/plugin-assisted-workflows.md`](operations/plugin-assisted-workflows.md)
+7. [`roadmap/v1-search-triage-draft-queue.md`](roadmap/v1-search-triage-draft-queue.md)

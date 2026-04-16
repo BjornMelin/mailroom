@@ -32,6 +32,8 @@ Documenting these alongside the native tool keeps the repo useful while the Rust
 
 ### Use native `mailroom` workflows for
 
+- Gmail login, local credential persistence, and active account tracking
+- live mailbox profile verification and label reads
 - repo-owned local search/index state
 - repeatable triage workflows
 - durable draft queue state
@@ -41,4 +43,3 @@ Documenting these alongside the native tool keeps the repo useful while the Rust
 ## Rule
 
 If an operation exists only in the plugin path today, document it plainly. Do not claim the native binary already owns it.
-

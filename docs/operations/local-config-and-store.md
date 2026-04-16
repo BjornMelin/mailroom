@@ -27,6 +27,7 @@ Path defaults are derived in two stages:
 
 - `workspace.runtime_root` is the parent default for `auth_dir`, `cache_dir`, `state_dir`, `vault_dir`, `exports_dir`, and `logs_dir`
 - `store.database_path` defaults to `workspace.state_dir/mailroom.sqlite3`
+- `gmail` auth defaults to Google-installed-app endpoints, localhost loopback auth, and a repo-local credential file at `workspace.auth_dir/gmail-credentials.json`
 - relative configured filesystem paths are resolved from the repo root so command behavior stays stable from subdirectories
 - explicit child path or `store.database_path` overrides still win when set
 
@@ -35,6 +36,7 @@ Path defaults are derived in two stages:
 The repo-local defaults are:
 
 - `.mailroom/auth/`
+- `.mailroom/auth/gmail-credentials.json`
 - `.mailroom/cache/`
 - `.mailroom/state/`
 - `.mailroom/vault/`
@@ -52,6 +54,12 @@ Inspect resolved config with:
 
 ```bash
 cargo run -- config show --json
+```
+
+Inspect auth state with:
+
+```bash
+cargo run -- auth status --json
 ```
 
 ## Store bootstrap
@@ -92,6 +100,11 @@ The store currently enforces:
 - fixed SQLite `application_id`
 
 On Unix-like systems, `mailroom` also hardens the database file to `0600` after creation.
+
+The Gmail credential file is also hardened on Unix-like systems:
+
+- `.mailroom/auth/` is kept owner-only
+- `.mailroom/auth/gmail-credentials.json` is written as `0600`
 
 ## Migration ownership
 
