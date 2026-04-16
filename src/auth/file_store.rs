@@ -74,12 +74,15 @@ impl CredentialStore for FileCredentialStore {
     }
 
     fn load(&self) -> Result<Option<StoredCredentials>> {
-        if !self.path.exists() {
-            return Ok(None);
-        }
-
-        let raw = fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read credentials from {}", self.path.display()))?;
+        let raw = match fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read credentials from {}", self.path.display())
+                });
+            }
+        };
         let disk: DiskCredentials = serde_json::from_str(&raw)
             .with_context(|| format!("failed to parse credentials from {}", self.path.display()))?;
 
@@ -114,17 +117,17 @@ impl CredentialStore for FileCredentialStore {
         let tmp_path = self.path.with_extension("tmp");
         fs::write(&tmp_path, payload)?;
         set_owner_only_file_permissions(&tmp_path)?;
-        fs::rename(&tmp_path, &self.path)?;
+        persist_tmp_file(&tmp_path, &self.path)?;
         set_owner_only_file_permissions(&self.path)?;
         Ok(())
     }
 
     fn clear(&self) -> Result<bool> {
-        if !self.path.exists() {
-            return Ok(false);
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
         }
-        fs::remove_file(&self.path)?;
-        Ok(true)
     }
 }
 
@@ -156,6 +159,18 @@ fn set_owner_only_file_permissions(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_owner_only_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn persist_tmp_file(tmp_path: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+    }
+
+    fs::rename(tmp_path, destination)?;
     Ok(())
 }
 
@@ -226,5 +241,51 @@ mod tests {
 
         assert!(store.clear().unwrap());
         assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn load_returns_none_when_credentials_file_is_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = FileCredentialStore::new(temp_dir.path().join("gmail-credentials.json"));
+
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_returns_false_when_credentials_file_is_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = FileCredentialStore::new(temp_dir.path().join("gmail-credentials.json"));
+
+        assert!(!store.clear().unwrap());
+    }
+
+    #[test]
+    fn save_overwrites_existing_credentials_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = FileCredentialStore::new(temp_dir.path().join("gmail-credentials.json"));
+
+        store
+            .save(&StoredCredentials {
+                account_id: String::from("gmail:first@example.com"),
+                access_token: SecretString::from(String::from("first-access-token")),
+                refresh_token: Some(SecretString::from(String::from("first-refresh-token"))),
+                expires_at_epoch_s: Some(123),
+                scopes: vec![String::from("scope:a")],
+            })
+            .unwrap();
+        store
+            .save(&StoredCredentials {
+                account_id: String::from("gmail:second@example.com"),
+                access_token: SecretString::from(String::from("second-access-token")),
+                refresh_token: Some(SecretString::from(String::from("second-refresh-token"))),
+                expires_at_epoch_s: Some(456),
+                scopes: vec![String::from("scope:b")],
+            })
+            .unwrap();
+
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.account_id, "gmail:second@example.com");
+        assert_eq!(loaded.expires_at_epoch_s, Some(456));
+        assert_eq!(loaded.scopes, vec![String::from("scope:b")]);
     }
 }

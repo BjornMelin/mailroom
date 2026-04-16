@@ -20,8 +20,7 @@ pub struct CallbackListener {
 
 impl CallbackListener {
     pub async fn bind(config: &GmailConfig) -> Result<Self> {
-        let address = format!("{}:{}", config.listen_host, config.listen_port);
-        let listener = TcpListener::bind(&address).await?;
+        let listener = TcpListener::bind((config.listen_host.as_str(), config.listen_port)).await?;
         let local_addr = listener.local_addr()?;
         let redirect_url = redirect_url_for(local_addr)?;
 
@@ -44,12 +43,7 @@ impl CallbackListener {
                 .map_err(|_| AuthError::CallbackTimedOut)?
                 .map_err(AuthError::CallbackIo)?;
 
-            let mut buffer = vec![0_u8; 8 * 1024];
-            let bytes_read = stream
-                .read(&mut buffer)
-                .await
-                .map_err(AuthError::CallbackIo)?;
-            let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+            let request = read_callback_request(&mut stream).await?;
             let callback = match parse_callback_request(&request) {
                 Ok(callback) => callback,
                 Err(error) if is_malformed_callback_error(&error) => {
@@ -91,6 +85,27 @@ impl CallbackListener {
             return Err(AuthError::OAuthCallback(response).into());
         }
     }
+}
+
+async fn read_callback_request(stream: &mut tokio::net::TcpStream) -> Result<String> {
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+
+    loop {
+        let bytes_read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(AuthError::CallbackIo)?;
+        if bytes_read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..bytes_read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 8 * 1024 {
+            break;
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&request).into_owned())
 }
 
 pub fn open_browser_if_requested(url: &Url, enabled: bool) -> Result<bool> {
@@ -331,5 +346,54 @@ mod tests {
         assert!(unrelated_response.contains("/oauth2/callback"));
         assert!(callback_response.contains("200 OK"));
         assert_eq!(wait_for_code.await.unwrap(), String::from("real-code"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_code_reads_callback_requests_across_multiple_tcp_reads() {
+        let listener = CallbackListener::bind(&GmailConfig {
+            client_id: Some(String::from("client-id")),
+            client_secret: None,
+            auth_url: String::from("https://accounts.google.com/o/oauth2/v2/auth"),
+            token_url: String::from("https://oauth2.googleapis.com/token"),
+            api_base_url: String::from("https://gmail.googleapis.com/gmail/v1"),
+            listen_host: String::from("127.0.0.1"),
+            listen_port: 0,
+            open_browser: false,
+            request_timeout_secs: 30,
+            scopes: vec![String::from("https://www.googleapis.com/auth/gmail.modify")],
+        })
+        .await
+        .unwrap();
+        let callback_url = Url::parse(&listener.redirect_url.to_string()).unwrap();
+        let callback_host = callback_url.host_str().unwrap();
+        let callback_port = callback_url.port().unwrap();
+        let wait_for_code = tokio::spawn(async move {
+            listener
+                .wait_for_code(&CsrfToken::new(String::from("expected-state")))
+                .await
+                .unwrap()
+                .secret()
+                .to_owned()
+        });
+
+        let mut callback_stream = TcpStream::connect((callback_host, callback_port))
+            .await
+            .unwrap();
+        callback_stream
+            .write_all(b"GET /oauth2/callback?code=split")
+            .await
+            .unwrap();
+        callback_stream
+            .write_all(b"-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut callback_response = String::new();
+        callback_stream
+            .read_to_string(&mut callback_response)
+            .await
+            .unwrap();
+
+        assert!(callback_response.contains("200 OK"));
+        assert_eq!(wait_for_code.await.unwrap(), String::from("split-code"));
     }
 }

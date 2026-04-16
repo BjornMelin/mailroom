@@ -70,11 +70,7 @@ pub struct GmailClient {
 
 impl GmailClient {
     pub fn new(config: GmailConfig, credential_store: FileCredentialStore) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(config.request_timeout_secs))
-            .build()
-            .context("failed to build reqwest Gmail client")?;
+        let http = build_gmail_http_client(&config)?;
 
         Ok(Self {
             config,
@@ -111,11 +107,7 @@ impl GmailClient {
         config: &GmailConfig,
         access_token: &str,
     ) -> Result<GmailProfile> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(config.request_timeout_secs))
-            .build()
-            .context("failed to build reqwest Gmail client")?;
+        let http = build_gmail_http_client(config)?;
 
         let url = format!(
             "{}/users/me/profile",
@@ -170,7 +162,7 @@ impl GmailClient {
             .load()?
             .ok_or(GmailClientError::MissingCredentials)?;
 
-        let now_epoch_s = current_epoch_seconds();
+        let now_epoch_s = u64::try_from(crate::time::current_epoch_seconds()?)?;
         if credentials.should_refresh(TOKEN_REFRESH_LEEWAY_SECS, now_epoch_s) {
             return self.refresh_credentials(&credentials).await;
         }
@@ -261,11 +253,12 @@ fn matches_unauthorized(error: &anyhow::Error) -> bool {
         .is_some_and(|error| matches!(error, GmailClientError::Api { status, .. } if *status == StatusCode::UNAUTHORIZED))
 }
 
-fn current_epoch_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time before unix epoch")
-        .as_secs()
+fn build_gmail_http_client(config: &GmailConfig) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(config.request_timeout_secs))
+        .build()
+        .context("failed to build reqwest Gmail client")
 }
 
 #[cfg(test)]

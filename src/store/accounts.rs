@@ -1,6 +1,6 @@
 use super::connection;
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde::Serialize;
 use std::path::Path;
 
@@ -91,11 +91,11 @@ pub fn upsert_active(
         params![
             input.gmail_account_id(),
             GMAIL_PROVIDER,
-            input.email_address,
-            input.history_id,
+            &input.email_address,
+            &input.history_id,
             input.messages_total,
             input.threads_total,
-            input.access_scope,
+            &input.access_scope,
             created_at_epoch_s,
             input.refreshed_at_epoch_s,
             input.refreshed_at_epoch_s,
@@ -118,7 +118,11 @@ pub fn deactivate_all(
     busy_timeout_ms: u64,
     updated_at_epoch_s: i64,
 ) -> Result<usize> {
-    let connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let connection = match connection::open_existing(database_path, busy_timeout_ms) {
+        Ok(connection) => connection,
+        Err(error) if is_missing_database_error(&error) => return Ok(0),
+        Err(error) => return Err(error),
+    };
     let changed = match connection.execute(
         "UPDATE accounts
          SET is_active = 0,
@@ -183,6 +187,18 @@ fn is_missing_accounts_table_error(error: &rusqlite::Error) -> bool {
         error,
         rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("no such table: accounts")
     )
+}
+
+fn is_missing_database_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<rusqlite::Error>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                rusqlite::Error::SqliteFailure(code, _)
+                    if code.code == ErrorCode::CannotOpen
+            )
+        })
 }
 
 #[cfg(test)]
@@ -292,6 +308,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(changed, 0);
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn deactivate_all_does_not_create_store_for_missing_database() {
+        let repo_root = unique_temp_dir("mailroom-accounts-missing-db");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+
+        let changed = deactivate_all(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            200,
+        )
+        .unwrap();
+
+        assert_eq!(changed, 0);
+        assert!(!config_report.config.store.database_path.exists());
 
         fs::remove_dir_all(repo_root).unwrap();
     }

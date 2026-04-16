@@ -5,6 +5,7 @@ use crate::config::{ConfigReport, GmailConfig};
 use crate::gmail::GmailClient;
 use crate::store;
 use crate::store::accounts::{self, AccountRecord, UpsertAccountInput};
+use crate::time::current_epoch_seconds;
 use crate::workspace::{self, WorkspacePaths};
 use anyhow::{Context, Result};
 use file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
@@ -189,7 +190,7 @@ pub async fn login(
         token.access_token().secret(),
     )
     .await?;
-    let now_epoch_s = current_epoch_seconds();
+    let now_epoch_s = current_epoch_seconds()?;
     let mut account_input = UpsertAccountInput {
         email_address: profile.email_address,
         history_id: profile.history_id,
@@ -254,7 +255,7 @@ pub fn logout(config_report: &ConfigReport) -> Result<LogoutReport> {
         accounts::deactivate_all(
             &config_report.config.store.database_path,
             config_report.config.store.busy_timeout_ms,
-            current_epoch_seconds(),
+            current_epoch_seconds()?,
         )?
     } else {
         0
@@ -291,13 +292,6 @@ fn oauth_http_client(config: &GmailConfig) -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(config.request_timeout_secs))
         .build()
         .context("failed to build OAuth reqwest client")
-}
-
-fn current_epoch_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time before unix epoch")
-        .as_secs() as i64
 }
 
 fn persist_login_state(

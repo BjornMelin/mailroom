@@ -42,6 +42,17 @@ cargo run -- account show --json
 cargo run -- gmail labels list --json
 ```
 
+## Plugin-assisted workflow (Codex)
+
+Codex Gmail capabilities are the operator-assisted inspection path before native
+sync and search workflows are ready.
+
+- inspect mailbox and thread context before local sync tooling is complete
+- compare plugin-assisted reads with `cargo run -- account show --json` and
+  `cargo run -- gmail labels list --json`
+- keep final mutation decisions in native Mailroom commands so inspection and
+  mutation stay clearly separated
+
 ## Login flow
 
 `mailroom auth login`:

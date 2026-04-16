@@ -51,7 +51,7 @@ impl WorkspacePaths {
         for dir in self.runtime_dirs() {
             let existed = dir.exists();
             fs::create_dir_all(dir)?;
-            if is_sensitive_runtime_dir(dir) {
+            if self.is_sensitive_runtime_dir(dir) {
                 set_owner_only_permissions(dir)?;
             }
             if !existed {
@@ -85,6 +85,19 @@ impl WorkspacePaths {
             self.vault_dir.as_path(),
             self.exports_dir.as_path(),
             self.logs_dir.as_path(),
+        ]
+    }
+
+    fn is_sensitive_runtime_dir(&self, path: &Path) -> bool {
+        self.sensitive_runtime_dirs().contains(&path)
+    }
+
+    fn sensitive_runtime_dirs(&self) -> [&Path; 4] {
+        [
+            self.auth_dir.as_path(),
+            self.state_dir.as_path(),
+            self.vault_dir.as_path(),
+            self.exports_dir.as_path(),
         ]
     }
 }
@@ -138,11 +151,6 @@ fn path_exists(path: &Path) -> bool {
     path.exists()
 }
 
-fn is_sensitive_runtime_dir(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| matches!(name.to_str(), Some("auth" | "state" | "vault" | "exports")))
-}
-
 #[cfg(unix)]
 fn set_owner_only_permissions(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -168,6 +176,42 @@ mod tests {
     fn ensure_runtime_dirs_hardens_sensitive_runtime_permissions() {
         let repo_root = unique_temp_dir("mailroom-workspace-perms");
         let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+
+        paths.ensure_runtime_dirs().unwrap();
+
+        for path in [
+            &paths.auth_dir,
+            &paths.state_dir,
+            &paths.vault_dir,
+            &paths.exports_dir,
+        ] {
+            let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "expected owner-only permissions for {}",
+                path.display()
+            );
+        }
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_runtime_dirs_hardens_configured_sensitive_directories() {
+        let repo_root = unique_temp_dir("mailroom-workspace-custom-perms");
+        let runtime_root = repo_root.join(".mailroom-custom");
+        let paths = WorkspacePaths {
+            repo_root: repo_root.clone(),
+            runtime_root: runtime_root.clone(),
+            auth_dir: runtime_root.join("gmail-secrets"),
+            cache_dir: runtime_root.join("cache"),
+            state_dir: runtime_root.join("gmail-state"),
+            vault_dir: runtime_root.join("vault-storage"),
+            exports_dir: runtime_root.join("exports-out"),
+            logs_dir: runtime_root.join("logs"),
+        };
 
         paths.ensure_runtime_dirs().unwrap();
 

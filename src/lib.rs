@@ -4,6 +4,7 @@ mod config;
 mod doctor;
 mod gmail;
 mod store;
+mod time;
 mod workspace;
 
 use crate::auth::file_store::CredentialStore;
@@ -15,6 +16,7 @@ use cli::{
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use time::current_epoch_seconds;
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -170,7 +172,7 @@ async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<
             messages_total: profile.messages_total,
             threads_total: profile.threads_total,
             access_scope,
-            refreshed_at_epoch_s: current_epoch_seconds(),
+            refreshed_at_epoch_s: current_epoch_seconds()?,
         },
     )?;
 
@@ -448,11 +450,4 @@ impl GmailLabelsReport {
         }
         Ok(())
     }
-}
-
-fn current_epoch_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time before unix epoch")
-        .as_secs() as i64
 }
