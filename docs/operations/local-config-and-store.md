@@ -28,6 +28,7 @@ Path defaults are derived in two stages:
 - `workspace.runtime_root` is the parent default for `auth_dir`, `cache_dir`, `state_dir`, `vault_dir`, `exports_dir`, and `logs_dir`
 - `store.database_path` defaults to `workspace.state_dir/mailroom.sqlite3`
 - `gmail` auth defaults to Google-installed-app endpoints, localhost loopback auth, and a repo-local credential file at `workspace.auth_dir/gmail-credentials.json`
+- imported Google Desktop app client metadata defaults to `workspace.auth_dir/gmail-oauth-client.json`
 - relative configured filesystem paths are resolved from the repo root so command behavior stays stable from subdirectories
 - explicit child path or `store.database_path` overrides still win when set
 
@@ -36,6 +37,7 @@ Path defaults are derived in two stages:
 The repo-local defaults are:
 
 - `.mailroom/auth/`
+- `.mailroom/auth/gmail-oauth-client.json`
 - `.mailroom/auth/gmail-credentials.json`
 - `.mailroom/cache/`
 - `.mailroom/state/`
@@ -61,6 +63,19 @@ Inspect auth state with:
 ```bash
 cargo run -- auth status --json
 ```
+
+Guided Gmail auth setup starts with:
+
+```bash
+cargo run -- auth setup
+```
+
+`mailroom auth setup` can:
+
+- auto-discover a downloaded Desktop app JSON
+- import `--credentials-file /path/to/client_secret.json`
+- prompt for Client ID and optional Client Secret
+- import an existing gcloud ADC authorized-user session
 
 ## Store bootstrap
 
@@ -104,6 +119,7 @@ On Unix-like systems, `mailroom` also hardens the database file to `0600` after 
 The Gmail credential file is also hardened on Unix-like systems:
 
 - `.mailroom/auth/` is kept owner-only
+- `.mailroom/auth/gmail-oauth-client.json` is written as `0600`
 - `.mailroom/auth/gmail-credentials.json` is written as `0600`
 
 ## Migration ownership

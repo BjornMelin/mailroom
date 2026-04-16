@@ -34,6 +34,11 @@ impl DoctorReport {
             println!("repo_root={}", self.workspace.repo_root.display());
             println!("runtime_root_exists={}", self.workspace.runtime_root_exists);
             println!("database_exists={}", self.store.database_exists);
+            println!("oauth_client_exists={}", self.auth.oauth_client_exists);
+            println!(
+                "oauth_client_path={}",
+                self.auth.oauth_client_path.display()
+            );
             println!("credential_exists={}", self.auth.credential_exists);
             println!("credential_path={}", self.auth.credential_path.display());
             println!("configured={}", self.auth.configured);

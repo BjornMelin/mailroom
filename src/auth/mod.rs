@@ -1,5 +1,6 @@
 pub mod file_store;
 mod flow;
+pub mod oauth_client;
 
 use crate::config::{ConfigReport, GmailConfig};
 use crate::gmail::GmailClient;
@@ -9,11 +10,15 @@ use crate::time::current_epoch_seconds;
 use crate::workspace::{self, WorkspacePaths};
 use anyhow::{Context, Result};
 use file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
+use oauth_client::{
+    ImportedOAuthClient, OAuthClientSource, PreparedSetup, resolve as resolve_oauth_client,
+};
 use oauth2::{
     AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, Scope, TokenResponse, TokenUrl,
     basic::BasicClient,
 };
 use reqwest::redirect::Policy;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use std::io::Write;
 use std::time::Duration;
@@ -22,6 +27,9 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthStatusReport {
     pub configured: bool,
+    pub oauth_client_source: String,
+    pub oauth_client_path: std::path::PathBuf,
+    pub oauth_client_exists: bool,
     pub credential_path: std::path::PathBuf,
     pub credential_exists: bool,
     pub access_token_expires_at_epoch_s: Option<u64>,
@@ -35,6 +43,9 @@ impl AuthStatusReport {
             println!("{}", serde_json::to_string_pretty(self)?);
         } else {
             println!("configured={}", self.configured);
+            println!("oauth_client_source={}", self.oauth_client_source);
+            println!("oauth_client_path={}", self.oauth_client_path.display());
+            println!("oauth_client_exists={}", self.oauth_client_exists);
             println!("credential_path={}", self.credential_path.display());
             println!("credential_exists={}", self.credential_exists);
             match self.access_token_expires_at_epoch_s {
@@ -50,6 +61,51 @@ impl AuthStatusReport {
                 }
                 None => println!("active_account=<none>"),
             }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetupReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_client: Option<ImportedOAuthClient>,
+    pub login: LoginReport,
+}
+
+impl SetupReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(self)?);
+        } else {
+            println!("oauth_client_imported={}", self.imported_client.is_some());
+            if let Some(imported_client) = &self.imported_client {
+                println!(
+                    "oauth_client_source_kind={}",
+                    imported_client.source_kind.as_str()
+                );
+                match &imported_client.source_path {
+                    Some(source_path) => {
+                        println!("oauth_client_source_path={}", source_path.display())
+                    }
+                    None => println!("oauth_client_source_path=<none>"),
+                }
+                println!(
+                    "oauth_client_path={}",
+                    imported_client.oauth_client_path.display()
+                );
+                println!(
+                    "oauth_client_auto_discovered={}",
+                    imported_client.auto_discovered
+                );
+                println!("oauth_client_id={}", imported_client.client_id);
+                println!(
+                    "oauth_client_secret_present={}",
+                    imported_client.client_secret_present
+                );
+            }
+            self.login.print(false)?;
         }
 
         Ok(())
@@ -109,8 +165,6 @@ impl LogoutReport {
 
 #[derive(Debug, Error)]
 pub(crate) enum AuthError {
-    #[error("gmail.client_id is not configured")]
-    MissingClientId,
     #[error("oauth callback returned a malformed request")]
     MalformedCallbackRequest,
     #[error("oauth callback did not include an authorization code")]
@@ -135,26 +189,86 @@ enum AuthorizationPrompt {
     StderrJson(String),
 }
 
+pub async fn setup(
+    config_report: &ConfigReport,
+    credentials_file: Option<std::path::PathBuf>,
+    no_browser: bool,
+    json: bool,
+) -> Result<SetupReport> {
+    let setup_action = oauth_client::prepare_setup(
+        &config_report.config.gmail,
+        &config_report.config.workspace,
+        credentials_file,
+        json,
+    )?;
+    let (imported_client, completed_login) = match &setup_action {
+        PreparedSetup::UseExisting => (
+            None,
+            authenticate_with_client_override(config_report, None, no_browser, json).await?,
+        ),
+        PreparedSetup::ImportClient(prepared_import) => {
+            let completed_login = authenticate_with_client_override(
+                config_report,
+                Some(prepared_import.resolved_client().clone()),
+                no_browser,
+                json,
+            )
+            .await?;
+            oauth_client::persist_prepared_google_desktop_client(prepared_import)?;
+            (
+                Some(prepared_import.imported_client().clone()),
+                completed_login,
+            )
+        }
+        PreparedSetup::ImportAdc(prepared_import) => {
+            let completed_login = authenticate_with_refresh_token_override(
+                config_report,
+                prepared_import.resolved_client().clone(),
+                prepared_import.refresh_token().clone(),
+            )
+            .await?;
+            oauth_client::persist_prepared_google_desktop_client(prepared_import.client_import())?;
+            (
+                Some(prepared_import.imported_client().clone()),
+                completed_login,
+            )
+        }
+    };
+    let login = finalize_login(config_report, completed_login)?;
+
+    Ok(SetupReport {
+        imported_client,
+        login,
+    })
+}
+
 pub async fn login(
     config_report: &ConfigReport,
     no_browser: bool,
     json: bool,
 ) -> Result<LoginReport> {
-    let workspace_paths = configured_workspace_paths(config_report)?;
-    let credential_store = credential_store(config_report);
-    let client_id = config_report
-        .config
-        .gmail
-        .client_id
-        .clone()
-        .ok_or(AuthError::MissingClientId)?;
-    let mut oauth_client = BasicClient::new(ClientId::new(client_id))
+    let completed_login =
+        authenticate_with_client_override(config_report, None, no_browser, json).await?;
+    finalize_login(config_report, completed_login)
+}
+
+async fn authenticate_with_client_override(
+    config_report: &ConfigReport,
+    resolved_client_override: Option<oauth_client::ResolvedOAuthClient>,
+    no_browser: bool,
+    json: bool,
+) -> Result<CompletedOAuthLogin> {
+    let resolved_client = match resolved_client_override {
+        Some(resolved_client) => resolved_client,
+        None => resolve_oauth_client(&config_report.config.gmail, &config_report.config.workspace)?,
+    };
+    let mut oauth_client = BasicClient::new(ClientId::new(resolved_client.client_id))
         .set_auth_uri(AuthUrl::new(config_report.config.gmail.auth_url.clone())?)
         .set_token_uri(TokenUrl::new(config_report.config.gmail.token_url.clone())?);
-    if let Some(secret) = &config_report.config.gmail.client_secret
+    if let Some(secret) = resolved_client.client_secret
         && !secret.is_empty()
     {
-        oauth_client = oauth_client.set_client_secret(ClientSecret::new(secret.clone()));
+        oauth_client = oauth_client.set_client_secret(ClientSecret::new(secret));
     }
     let listener = flow::CallbackListener::bind(&config_report.config.gmail).await?;
     oauth_client = oauth_client.set_redirect_uri(listener.redirect_url.clone());
@@ -184,6 +298,42 @@ pub async fn login(
         .request_async(&http_client)
         .await
         .context("failed to exchange Gmail OAuth authorization code")?;
+    completed_login_from_token_response(config_report, &token, None, opened_browser).await
+}
+
+async fn authenticate_with_refresh_token_override(
+    config_report: &ConfigReport,
+    resolved_client: oauth_client::ResolvedOAuthClient,
+    refresh_token: SecretString,
+) -> Result<CompletedOAuthLogin> {
+    let mut oauth_client = BasicClient::new(ClientId::new(resolved_client.client_id))
+        .set_auth_uri(AuthUrl::new(config_report.config.gmail.auth_url.clone())?)
+        .set_token_uri(TokenUrl::new(config_report.config.gmail.token_url.clone())?);
+    if let Some(secret) = resolved_client.client_secret
+        && !secret.is_empty()
+    {
+        oauth_client = oauth_client.set_client_secret(ClientSecret::new(secret));
+    }
+    let http_client = oauth_http_client(&config_report.config.gmail)?;
+    let token = oauth_client
+        .exchange_refresh_token(&oauth2::RefreshToken::new(
+            refresh_token.clone().expose_secret().to_owned(),
+        ))
+        .request_async(&http_client)
+        .await
+        .context("failed to exchange gcloud ADC refresh token for a Gmail access token")?;
+    completed_login_from_token_response(config_report, &token, Some(refresh_token), false).await
+}
+
+async fn completed_login_from_token_response<T>(
+    config_report: &ConfigReport,
+    token: &T,
+    refresh_token_fallback: Option<SecretString>,
+    opened_browser: bool,
+) -> Result<CompletedOAuthLogin>
+where
+    T: TokenResponse,
+{
     let profile = GmailClient::fetch_profile_with_access_token(
         &config_report.config.gmail,
         token.access_token().secret(),
@@ -198,32 +348,64 @@ pub async fn login(
         access_scope: String::new(),
         refreshed_at_epoch_s: now_epoch_s,
     };
-    let credentials = StoredCredentials::from_token_response(
+    let mut credentials = StoredCredentials::from_token_response(
         account_input.gmail_account_id(),
-        &token,
+        token,
         &config_report.config.gmail.scopes,
     );
+    if credentials.refresh_token.is_none() {
+        credentials.refresh_token = refresh_token_fallback;
+    }
     account_input.access_scope = credentials.scopes.join(" ");
+    Ok(CompletedOAuthLogin {
+        opened_browser,
+        credentials,
+        account_input,
+    })
+}
+
+fn finalize_login(
+    config_report: &ConfigReport,
+    completed_login: CompletedOAuthLogin,
+) -> Result<LoginReport> {
+    let workspace_paths = configured_workspace_paths(config_report)?;
+    let credential_store = credential_store(config_report);
     let account = persist_login_state(
         config_report,
         &workspace_paths,
         &credential_store,
-        &credentials,
-        &account_input,
+        &completed_login.credentials,
+        &completed_login.account_input,
     )?;
 
     Ok(LoginReport {
-        opened_browser,
+        opened_browser: completed_login.opened_browser,
         credential_path: credential_store.path().to_path_buf(),
-        access_token_expires_at_epoch_s: credentials.expires_at_epoch_s,
-        scopes: credentials.scopes,
+        access_token_expires_at_epoch_s: completed_login.credentials.expires_at_epoch_s,
+        scopes: completed_login.credentials.scopes,
         account,
     })
+}
+
+struct CompletedOAuthLogin {
+    opened_browser: bool,
+    credentials: StoredCredentials,
+    account_input: UpsertAccountInput,
 }
 
 pub fn status(config_report: &ConfigReport) -> Result<AuthStatusReport> {
     let credential_store = credential_store(config_report);
     let credentials = credential_store.load()?;
+    let oauth_client_path = config_report
+        .config
+        .gmail
+        .oauth_client_path(&config_report.config.workspace);
+    let source = oauth_client::oauth_client_source(
+        &config_report.config.gmail,
+        &config_report.config.workspace,
+    )?;
+    let oauth_client_exists = matches!(source, OAuthClientSource::WorkspaceFile);
+    let configured = !matches!(source, OAuthClientSource::Unconfigured);
     let active_account = if config_report.config.store.database_path.exists() {
         accounts::get_active(
             &config_report.config.store.database_path,
@@ -234,7 +416,10 @@ pub fn status(config_report: &ConfigReport) -> Result<AuthStatusReport> {
     };
 
     Ok(AuthStatusReport {
-        configured: config_report.config.gmail.client_id.is_some(),
+        configured,
+        oauth_client_source: source.as_str().to_owned(),
+        oauth_client_path,
+        oauth_client_exists,
         credential_path: credential_store.path().to_path_buf(),
         credential_exists: credentials.is_some(),
         access_token_expires_at_epoch_s: credentials
@@ -379,9 +564,10 @@ fn emit_authorization_prompt(prompt: Option<AuthorizationPrompt>) -> Result<()> 
 mod tests {
     use super::{
         AuthorizationPrompt, authorization_prompt, configured_workspace_paths, login, logout,
-        persist_login_state,
+        persist_login_state, setup, status,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
+    use crate::auth::oauth_client::{self, PreparedSetup, setup_guidance};
     use crate::config::resolve;
     use crate::store::accounts::UpsertAccountInput;
     use crate::workspace::WorkspacePaths;
@@ -465,7 +651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_missing_client_id_does_not_create_runtime_state() {
+    async fn login_without_oauth_client_does_not_create_runtime_state() {
         let temp_dir = TempDir::new().unwrap();
         let repo_root = temp_dir.path().to_path_buf();
         let paths = WorkspacePaths::from_repo_root(repo_root);
@@ -473,9 +659,232 @@ mod tests {
 
         let error = login(&config_report, true, true).await.unwrap_err();
 
-        assert_eq!(error.to_string(), "gmail.client_id is not configured");
+        assert_eq!(
+            error.to_string(),
+            "gmail OAuth client is not configured; run `mailroom auth setup` or set gmail.client_id"
+        );
         assert!(!config_report.config.store.database_path.exists());
         assert!(!config_report.config.workspace.runtime_root.exists());
+    }
+
+    #[test]
+    fn status_reports_imported_oauth_client_as_configured() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root);
+        let config_report = resolve(&paths).unwrap();
+        let oauth_client_path = config_report
+            .config
+            .gmail
+            .oauth_client_path(&config_report.config.workspace);
+        fs::create_dir_all(oauth_client_path.parent().unwrap()).unwrap();
+        fs::write(
+            &oauth_client_path,
+            r#"{
+  "client_id": "desktop-client.apps.googleusercontent.com",
+  "client_secret": "desktop-secret"
+}"#,
+        )
+        .unwrap();
+
+        let report = status(&config_report).unwrap();
+
+        assert!(report.configured);
+        assert_eq!(report.oauth_client_source, "workspace_file");
+        assert!(report.oauth_client_exists);
+    }
+
+    #[test]
+    fn status_distinguishes_configured_auth_from_imported_client_file_presence() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let repo_config_path = repo_root.join(".mailroom/config.toml");
+        fs::create_dir_all(repo_config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &repo_config_path,
+            r#"
+[gmail]
+client_id = "inline-client.apps.googleusercontent.com"
+client_secret = "inline-secret"
+"#,
+        )
+        .unwrap();
+
+        let config_report = resolve(&paths).unwrap();
+        let report = status(&config_report).unwrap();
+
+        assert!(report.configured);
+        assert_eq!(report.oauth_client_source, "config");
+        assert!(!report.oauth_client_exists);
+    }
+
+    #[test]
+    fn status_errors_when_malformed_imported_oauth_client_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let repo_config_path = repo_root.join(".mailroom/config.toml");
+        let oauth_client_path = repo_root.join(".mailroom/auth/gmail-oauth-client.json");
+        fs::create_dir_all(repo_config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(oauth_client_path.parent().unwrap()).unwrap();
+        fs::write(
+            &repo_config_path,
+            r#"
+[gmail]
+client_id = "inline-client.apps.googleusercontent.com"
+client_secret = "inline-secret"
+"#,
+        )
+        .unwrap();
+        fs::write(&oauth_client_path, "{not-json").unwrap();
+
+        let config_report = resolve(&paths).unwrap();
+        let error = status(&config_report).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse OAuth client from")
+        );
+    }
+
+    #[test]
+    fn status_reports_valid_imported_oauth_client_as_authoritative_over_inline_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let repo_config_path = repo_root.join(".mailroom/config.toml");
+        let oauth_client_path = repo_root.join(".mailroom/auth/gmail-oauth-client.json");
+        fs::create_dir_all(repo_config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(oauth_client_path.parent().unwrap()).unwrap();
+        fs::write(
+            &repo_config_path,
+            r#"
+[gmail]
+client_id = "inline-client.apps.googleusercontent.com"
+client_secret = "inline-secret"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &oauth_client_path,
+            r#"{
+  "client_id": "imported-client.apps.googleusercontent.com",
+  "client_secret": "imported-secret"
+}"#,
+        )
+        .unwrap();
+
+        let config_report = resolve(&paths).unwrap();
+        let report = status(&config_report).unwrap();
+
+        assert!(report.configured);
+        assert_eq!(report.oauth_client_source, "workspace_file");
+        assert!(report.oauth_client_exists);
+    }
+
+    #[tokio::test]
+    async fn setup_missing_credentials_file_reports_guidance() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let config_report = resolve(&paths).unwrap();
+
+        let error = setup(
+            &config_report,
+            Some(repo_root.join("missing-client-secret.json")),
+            true,
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Google desktop-app credentials JSON was not found")
+        );
+        assert!(setup_guidance().contains("console.cloud.google.com"));
+        assert!(!config_report.config.workspace.runtime_root.exists());
+    }
+
+    #[tokio::test]
+    async fn setup_preserves_existing_oauth_client_when_login_fails_after_staging_replacement() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let repo_config_path = repo_root.join(".mailroom/config.toml");
+        let oauth_client_path = repo_root.join(".mailroom/auth/gmail-oauth-client.json");
+        let credentials_path = repo_root.join("client_secret_replacement.json");
+        fs::create_dir_all(repo_config_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(oauth_client_path.parent().unwrap()).unwrap();
+        fs::write(
+            &repo_config_path,
+            r#"
+[gmail]
+auth_url = "not-a-valid-url"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &oauth_client_path,
+            r#"{
+  "client_id": "existing-client.apps.googleusercontent.com",
+  "client_secret": "existing-secret"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            &credentials_path,
+            r#"{
+  "installed": {
+    "client_id": "replacement-client.apps.googleusercontent.com",
+    "client_secret": "replacement-secret"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let config_report = resolve(&paths).unwrap();
+        let original_oauth_client = fs::read_to_string(&oauth_client_path).unwrap();
+        let error = setup(&config_report, Some(credentials_path), true, true)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("relative URL without a base"));
+        assert_eq!(
+            fs::read_to_string(&oauth_client_path).unwrap(),
+            original_oauth_client
+        );
+    }
+
+    #[test]
+    fn setup_reuses_existing_imported_oauth_client_when_no_new_credentials_file_is_given() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let oauth_client_path = repo_root.join(".mailroom/auth/gmail-oauth-client.json");
+        fs::create_dir_all(oauth_client_path.parent().unwrap()).unwrap();
+        fs::write(
+            &oauth_client_path,
+            r#"{
+  "client_id": "imported-client.apps.googleusercontent.com",
+  "client_secret": "imported-secret"
+}"#,
+        )
+        .unwrap();
+
+        let config_report = resolve(&paths).unwrap();
+        let setup_action = oauth_client::prepare_setup(
+            &config_report.config.gmail,
+            &config_report.config.workspace,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert!(matches!(setup_action, PreparedSetup::UseExisting));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +69,18 @@ pub enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
+    /// Configure Gmail OAuth via downloaded JSON, pasted values, or imported gcloud ADC, then continue into Gmail login
+    Setup {
+        /// Path to the downloaded Google desktop-app credentials JSON
+        #[arg(long)]
+        credentials_file: Option<PathBuf>,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+        /// Print the authorization URL without trying to open a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Complete Gmail OAuth login and persist credentials locally
     Login {
         /// Emit JSON instead of plain text

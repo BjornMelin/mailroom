@@ -1,4 +1,5 @@
 use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
+use crate::auth::oauth_client::resolve as resolve_oauth_client;
 use crate::config::GmailConfig;
 use anyhow::{Context, Result};
 use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenUrl, basic::BasicClient};
@@ -64,16 +65,22 @@ struct GmailLabelsResponse {
 #[derive(Debug, Clone)]
 pub struct GmailClient {
     config: GmailConfig,
+    workspace: crate::config::WorkspaceConfig,
     http: reqwest::Client,
     credential_store: FileCredentialStore,
 }
 
 impl GmailClient {
-    pub fn new(config: GmailConfig, credential_store: FileCredentialStore) -> Result<Self> {
+    pub fn new(
+        config: GmailConfig,
+        workspace: crate::config::WorkspaceConfig,
+        credential_store: FileCredentialStore,
+    ) -> Result<Self> {
         let http = build_gmail_http_client(&config)?;
 
         Ok(Self {
             config,
+            workspace,
             http,
             credential_store,
         })
@@ -201,18 +208,14 @@ impl GmailClient {
             .refresh_token
             .as_ref()
             .ok_or(GmailClientError::MissingRefreshToken)?;
-        let mut oauth_client = BasicClient::new(ClientId::new(
-            self.config
-                .client_id
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("gmail.client_id is not configured"))?,
-        ))
-        .set_auth_uri(AuthUrl::new(self.config.auth_url.clone())?)
-        .set_token_uri(TokenUrl::new(self.config.token_url.clone())?);
-        if let Some(secret) = &self.config.client_secret
+        let resolved_client = resolve_oauth_client(&self.config, &self.workspace)?;
+        let mut oauth_client = BasicClient::new(ClientId::new(resolved_client.client_id))
+            .set_auth_uri(AuthUrl::new(self.config.auth_url.clone())?)
+            .set_token_uri(TokenUrl::new(self.config.token_url.clone())?);
+        if let Some(secret) = resolved_client.client_secret
             && !secret.is_empty()
         {
-            oauth_client = oauth_client.set_client_secret(ClientSecret::new(secret.clone()));
+            oauth_client = oauth_client.set_client_secret(ClientSecret::new(secret));
         }
         let token = oauth_client
             .exchange_refresh_token(&RefreshToken::new(refresh_token.expose_secret().to_owned()))
@@ -288,11 +291,24 @@ fn build_gmail_http_client(config: &GmailConfig) -> Result<reqwest::Client> {
 mod tests {
     use super::{GmailClient, GmailProfile};
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
-    use crate::config::GmailConfig;
+    use crate::config::{GmailConfig, WorkspaceConfig};
     use secrecy::{ExposeSecret, SecretString};
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn workspace_for(temp_dir: &TempDir) -> WorkspaceConfig {
+        let root = temp_dir.path().join(".mailroom");
+        WorkspaceConfig {
+            runtime_root: root.clone(),
+            auth_dir: root.join("auth"),
+            cache_dir: root.join("cache"),
+            state_dir: root.join("state"),
+            vault_dir: root.join("vault"),
+            exports_dir: root.join("exports"),
+            logs_dir: root.join("logs"),
+        }
+    }
 
     #[tokio::test]
     async fn get_profile_uses_stored_credentials() {
@@ -309,6 +325,7 @@ mod tests {
             .await;
 
         let temp_dir = TempDir::new().unwrap();
+        let workspace = workspace_for(&temp_dir);
         let store = FileCredentialStore::new(temp_dir.path().join("gmail-credentials.json"));
         store
             .save(&StoredCredentials {
@@ -333,6 +350,7 @@ mod tests {
                 request_timeout_secs: 30,
                 scopes: vec![String::from("scope:a")],
             },
+            workspace,
             store,
         )
         .unwrap();
@@ -376,6 +394,7 @@ mod tests {
             .await;
 
         let temp_dir = TempDir::new().unwrap();
+        let workspace = workspace_for(&temp_dir);
         let store = FileCredentialStore::new(temp_dir.path().join("gmail-credentials.json"));
         store
             .save(&StoredCredentials {
@@ -400,6 +419,7 @@ mod tests {
                 request_timeout_secs: 30,
                 scopes: vec![String::from("scope:a")],
             },
+            workspace,
             store.clone(),
         )
         .unwrap();

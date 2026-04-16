@@ -190,6 +190,10 @@ impl GmailConfig {
     pub fn credential_path(&self, workspace: &WorkspaceConfig) -> PathBuf {
         workspace.auth_dir.join("gmail-credentials.json")
     }
+
+    pub fn oauth_client_path(&self, workspace: &WorkspaceConfig) -> PathBuf {
+        workspace.auth_dir.join("gmail-oauth-client.json")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
