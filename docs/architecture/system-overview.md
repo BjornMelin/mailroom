@@ -19,6 +19,9 @@ The native Rust core owns:
 - workspace paths and local runtime layout
 - config loading and precedence resolution
 - storage initialization, migration ownership, and pragma hardening
+- Gmail OAuth login, credential persistence, and token refresh
+- active account verification against Gmail profile data
+- live label reads used for operator inspection and future sync validation
 - mailbox state modeling
 - search, triage, and draft queue workflows
 - structured CLI output
@@ -52,17 +55,21 @@ overrides the user-level config location but remains ignored from git.
 
 ## Current substrate
 
-The current native substrate is intentionally narrow:
+The current native substrate is intentionally narrow but now usable:
 
 - typed config resolution with `Figment`
 - user config discovery via `directories::ProjectDirs`
 - repo-local config overrides under `.mailroom/config.toml`
 - SQLite bootstrap through `rusqlite`
 - migration application through embedded SQL files and `rusqlite_migration`
+- Gmail installed-app OAuth using PKCE and a loopback localhost callback
+- repo-local credential storage under `.mailroom/auth/`
+- active account persistence in SQLite
+- live Gmail profile and label inspection through the native client
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
-This substrate exists to support later mailbox/account modeling, search, triage,
-and draft workflows without inventing a second config or storage path later.
+This substrate exists to support later search, sync, triage, and draft
+workflows without inventing a second config, auth, or storage path later.
 
 ## Non-goals for v1
 

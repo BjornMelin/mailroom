@@ -18,12 +18,14 @@ const ENV_SPLIT: &str = "__";
 pub struct MailroomConfig {
     pub workspace: WorkspaceConfig,
     pub store: StoreConfig,
+    pub gmail: GmailConfig,
 }
 
 impl MailroomConfig {
     pub fn defaults_for(paths: &WorkspacePaths) -> Self {
         let workspace = WorkspaceConfig::defaults_for(paths);
         Self {
+            gmail: GmailConfig::defaults_for(&workspace),
             store: StoreConfig::defaults_for(&workspace),
             workspace,
         }
@@ -33,10 +35,15 @@ impl MailroomConfig {
         let workspace = defaults
             .workspace
             .with_overrides(repo_root, overrides.workspace);
+        let gmail = defaults.gmail.with_overrides(&workspace, overrides.gmail);
         let store = defaults
             .store
             .with_overrides(repo_root, &workspace, overrides.store);
-        Self { workspace, store }
+        Self {
+            workspace,
+            store,
+            gmail,
+        }
     }
 }
 
@@ -129,12 +136,70 @@ impl StoreConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailConfig {
+    pub client_id: Option<String>,
+    #[serde(skip_serializing)]
+    pub client_secret: Option<String>,
+    pub auth_url: String,
+    pub token_url: String,
+    pub api_base_url: String,
+    pub listen_host: String,
+    pub listen_port: u16,
+    pub open_browser: bool,
+    pub request_timeout_secs: u64,
+    pub scopes: Vec<String>,
+}
+
+impl GmailConfig {
+    fn defaults_for(_workspace: &WorkspaceConfig) -> Self {
+        Self {
+            client_id: None,
+            client_secret: None,
+            auth_url: String::from("https://accounts.google.com/o/oauth2/v2/auth"),
+            token_url: String::from("https://oauth2.googleapis.com/token"),
+            api_base_url: String::from("https://gmail.googleapis.com/gmail/v1"),
+            listen_host: String::from("127.0.0.1"),
+            listen_port: 0,
+            open_browser: true,
+            request_timeout_secs: 30,
+            scopes: vec![String::from("https://www.googleapis.com/auth/gmail.modify")],
+        }
+    }
+
+    fn with_overrides(self, _workspace: &WorkspaceConfig, overrides: PartialGmailConfig) -> Self {
+        Self {
+            client_id: overrides.client_id.or(self.client_id),
+            client_secret: overrides.client_secret.or(self.client_secret),
+            auth_url: overrides.auth_url.unwrap_or(self.auth_url),
+            token_url: overrides.token_url.unwrap_or(self.token_url),
+            api_base_url: overrides.api_base_url.unwrap_or(self.api_base_url),
+            listen_host: overrides.listen_host.unwrap_or(self.listen_host),
+            listen_port: overrides.listen_port.unwrap_or(self.listen_port),
+            open_browser: overrides.open_browser.unwrap_or(self.open_browser),
+            request_timeout_secs: overrides
+                .request_timeout_secs
+                .unwrap_or(self.request_timeout_secs),
+            scopes: overrides
+                .scopes
+                .filter(|scopes| !scopes.is_empty())
+                .unwrap_or(self.scopes),
+        }
+    }
+
+    pub fn credential_path(&self, workspace: &WorkspaceConfig) -> PathBuf {
+        workspace.auth_dir.join("gmail-credentials.json")
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PartialMailroomConfig {
     #[serde(default)]
     workspace: PartialWorkspaceConfig,
     #[serde(default)]
     store: PartialStoreConfig,
+    #[serde(default)]
+    gmail: PartialGmailConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -152,6 +217,20 @@ struct PartialWorkspaceConfig {
 struct PartialStoreConfig {
     database_path: Option<PathBuf>,
     busy_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PartialGmailConfig {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    api_base_url: Option<String>,
+    listen_host: Option<String>,
+    listen_port: Option<u16>,
+    open_browser: Option<bool>,
+    request_timeout_secs: Option<u64>,
+    scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +283,29 @@ impl ConfigReport {
                 self.config.store.database_path.display()
             );
             println!("busy_timeout_ms={}", self.config.store.busy_timeout_ms);
+            println!(
+                "gmail_client_id={}",
+                self.config
+                    .gmail
+                    .client_id
+                    .as_deref()
+                    .unwrap_or("<unconfigured>")
+            );
+            println!(
+                "gmail_client_secret_present={}",
+                self.config.gmail.client_secret.is_some()
+            );
+            println!("gmail_auth_url={}", self.config.gmail.auth_url);
+            println!("gmail_token_url={}", self.config.gmail.token_url);
+            println!("gmail_api_base_url={}", self.config.gmail.api_base_url);
+            println!("gmail_listen_host={}", self.config.gmail.listen_host);
+            println!("gmail_listen_port={}", self.config.gmail.listen_port);
+            println!("gmail_open_browser={}", self.config.gmail.open_browser);
+            println!(
+                "gmail_request_timeout_secs={}",
+                self.config.gmail.request_timeout_secs
+            );
+            println!("gmail_scopes={}", self.config.gmail.scopes.join(","));
         }
 
         Ok(())
@@ -283,6 +385,10 @@ mod tests {
         assert_eq!(
             defaults.store.database_path,
             repo_root.join(".mailroom/state/mailroom.sqlite3")
+        );
+        assert_eq!(
+            defaults.gmail.credential_path(&defaults.workspace),
+            repo_root.join(".mailroom/auth/gmail-credentials.json")
         );
     }
 
@@ -424,6 +530,72 @@ database_path = "/tmp/mailroom-custom-state/custom.sqlite3"
         assert_eq!(
             report.config.store.database_path,
             PathBuf::from("/tmp/mailroom-custom-state/custom.sqlite3")
+        );
+    }
+
+    #[test]
+    fn gmail_defaults_to_modify_scope_and_google_endpoints() {
+        let repo_root = unique_temp_dir("mailroom-config-gmail-defaults");
+        let paths = WorkspacePaths::from_repo_root(repo_root);
+        let defaults = MailroomConfig::defaults_for(&paths);
+
+        assert_eq!(
+            defaults.gmail.scopes,
+            vec![String::from("https://www.googleapis.com/auth/gmail.modify")]
+        );
+        assert_eq!(
+            defaults.gmail.auth_url,
+            "https://accounts.google.com/o/oauth2/v2/auth"
+        );
+        assert_eq!(
+            defaults.gmail.token_url,
+            "https://oauth2.googleapis.com/token"
+        );
+    }
+
+    #[test]
+    fn gmail_overrides_accept_custom_endpoints_and_scope_sets() {
+        let repo_root = unique_temp_dir("mailroom-config-gmail-overrides");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let defaults = MailroomConfig::defaults_for(&paths);
+        let locations = ConfigLocations {
+            user_config_path: None,
+            user_config_exists: false,
+            repo_config_path: repo_root.join(".mailroom/config.toml"),
+            repo_config_exists: false,
+        };
+
+        let report = resolve_with_override_provider(
+            defaults,
+            &repo_root,
+            locations,
+            Toml::string(
+                r#"
+[gmail]
+client_id = "mailroom-client-id.apps.googleusercontent.com"
+listen_port = 8181
+auth_url = "http://127.0.0.1:9001/auth"
+token_url = "http://127.0.0.1:9001/token"
+api_base_url = "http://127.0.0.1:9002/gmail/v1"
+scopes = ["scope:a", "scope:b"]
+"#,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.config.gmail.client_id.as_deref(),
+            Some("mailroom-client-id.apps.googleusercontent.com")
+        );
+        assert_eq!(report.config.gmail.listen_port, 8181);
+        assert_eq!(report.config.gmail.auth_url, "http://127.0.0.1:9001/auth");
+        assert_eq!(
+            report.config.gmail.api_base_url,
+            "http://127.0.0.1:9002/gmail/v1"
+        );
+        assert_eq!(
+            report.config.gmail.scopes,
+            vec![String::from("scope:a"), String::from("scope:b")]
         );
     }
 

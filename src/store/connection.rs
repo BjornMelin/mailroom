@@ -18,6 +18,13 @@ pub fn open_read_only_for_diagnostics(path: &Path, busy_timeout_ms: u64) -> Resu
     Ok(connection)
 }
 
+pub fn open_existing(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
+    let connection = Connection::open_with_flags(path, existing_flags())?;
+    configure_busy_timeout(&connection, busy_timeout_ms)?;
+    configure_connection_pragmas(&connection)?;
+    Ok(connection)
+}
+
 fn configure_busy_timeout(connection: &Connection, busy_timeout_ms: u64) -> Result<()> {
     if busy_timeout_ms == 0 {
         return Err(anyhow!(
@@ -60,6 +67,10 @@ fn create_flags() -> OpenFlags {
 
 fn read_only_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+}
+
+fn existing_flags() -> OpenFlags {
+    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX
 }
 
 #[cfg(test)]
