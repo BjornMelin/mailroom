@@ -33,16 +33,14 @@ impl CallbackListener {
     pub async fn wait_for_code(self, expected_state: &CsrfToken) -> Result<AuthorizationCode> {
         let deadline = Instant::now() + Duration::from_secs(CALLBACK_TIMEOUT_SECS);
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(AuthError::CallbackTimedOut.into());
-            }
+            let remaining = remaining_until(deadline)?;
 
             let (mut stream, _) = timeout(remaining, self.listener.accept())
                 .await
                 .map_err(|_| AuthError::CallbackTimedOut)?
                 .map_err(AuthError::CallbackIo)?;
 
+            let remaining = remaining_until(deadline)?;
             let request = timeout(remaining, read_callback_request(&mut stream))
                 .await
                 .map_err(|_| AuthError::CallbackTimedOut)??;
@@ -87,6 +85,14 @@ impl CallbackListener {
             return Err(AuthError::OAuthCallback(response).into());
         }
     }
+}
+
+fn remaining_until(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(AuthError::CallbackTimedOut.into());
+    }
+    Ok(remaining)
 }
 
 async fn read_callback_request(stream: &mut tokio::net::TcpStream) -> Result<String> {
