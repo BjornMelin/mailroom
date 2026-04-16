@@ -7,7 +7,6 @@ mod store;
 mod time;
 mod workspace;
 
-use crate::auth::file_store::CredentialStore;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
@@ -151,16 +150,7 @@ async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<
     let configured_paths =
         workspace::WorkspacePaths::from_config(repo_root, &config_report.config.workspace);
     let gmail_client = gmail_client(config_report)?;
-    let profile = gmail_client.get_profile().await?;
-    let access_scope = auth::file_store::FileCredentialStore::new(
-        config_report
-            .config
-            .gmail
-            .credential_path(&config_report.config.workspace),
-    )
-    .load()?
-    .map(|credentials| credentials.scopes.join(" "))
-    .unwrap_or_else(|| config_report.config.gmail.scopes.join(" "));
+    let (profile, access_scope) = gmail_client.get_profile_with_access_scope().await?;
     configured_paths.ensure_runtime_dirs()?;
     store::init(config_report)?;
     let account = store::accounts::upsert_active(

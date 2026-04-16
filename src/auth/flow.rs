@@ -43,7 +43,9 @@ impl CallbackListener {
                 .map_err(|_| AuthError::CallbackTimedOut)?
                 .map_err(AuthError::CallbackIo)?;
 
-            let request = read_callback_request(&mut stream).await?;
+            let request = timeout(remaining, read_callback_request(&mut stream))
+                .await
+                .map_err(|_| AuthError::CallbackTimedOut)??;
             let callback = match parse_callback_request(&request) {
                 Ok(callback) => callback,
                 Err(error) if is_malformed_callback_error(&error) => {

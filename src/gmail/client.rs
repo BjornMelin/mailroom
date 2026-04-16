@@ -79,15 +79,38 @@ impl GmailClient {
         })
     }
 
-    pub async fn get_profile(&self) -> Result<GmailProfile> {
-        self.get_json(
-            "users/me/profile",
-            &[(
-                "fields",
-                "emailAddress,messagesTotal,threadsTotal,historyId",
-            )],
-        )
-        .await
+    pub async fn get_profile_with_access_scope(&self) -> Result<(GmailProfile, String)> {
+        let credentials = self.active_credentials().await?;
+        let access_scope = credentials.scopes.join(" ");
+        match self
+            .request_json::<GmailProfile>(
+                "users/me/profile",
+                &[(
+                    "fields",
+                    "emailAddress,messagesTotal,threadsTotal,historyId",
+                )],
+                credentials.access_token.expose_secret(),
+            )
+            .await
+        {
+            Ok(profile) => Ok((profile, access_scope)),
+            Err(error) if matches_unauthorized(&error) => {
+                let refreshed = self.refresh_credentials(&credentials).await?;
+                let access_scope = refreshed.scopes.join(" ");
+                let profile = self
+                    .request_json::<GmailProfile>(
+                        "users/me/profile",
+                        &[(
+                            "fields",
+                            "emailAddress,messagesTotal,threadsTotal,historyId",
+                        )],
+                        refreshed.access_token.expose_secret(),
+                    )
+                    .await?;
+                Ok((profile, access_scope))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn list_labels(&self) -> Result<Vec<GmailLabel>> {
@@ -314,7 +337,7 @@ mod tests {
         )
         .unwrap();
 
-        let profile = client.get_profile().await.unwrap();
+        let (profile, access_scope) = client.get_profile_with_access_scope().await.unwrap();
         assert_eq!(
             profile,
             GmailProfile {
@@ -324,6 +347,7 @@ mod tests {
                 history_id: String::from("12345"),
             }
         );
+        assert_eq!(access_scope, "scope:a");
     }
 
     #[tokio::test]
@@ -380,10 +404,11 @@ mod tests {
         )
         .unwrap();
 
-        let profile = client.get_profile().await.unwrap();
+        let (profile, access_scope) = client.get_profile_with_access_scope().await.unwrap();
         let refreshed = store.load().unwrap().unwrap();
 
         assert_eq!(profile.email_address, "operator@example.com");
+        assert_eq!(access_scope, "scope:a");
         assert_eq!(
             refreshed.refresh_token.as_ref().unwrap().expose_secret(),
             "rotated-refresh-token"

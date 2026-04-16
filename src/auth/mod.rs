@@ -142,23 +142,22 @@ pub async fn login(
 ) -> Result<LoginReport> {
     let workspace_paths = configured_workspace_paths(config_report)?;
     let credential_store = credential_store(config_report);
-    let listener = flow::CallbackListener::bind(&config_report.config.gmail).await?;
-    let mut oauth_client = BasicClient::new(ClientId::new(
-        config_report
-            .config
-            .gmail
-            .client_id
-            .clone()
-            .ok_or(AuthError::MissingClientId)?,
-    ))
-    .set_auth_uri(AuthUrl::new(config_report.config.gmail.auth_url.clone())?)
-    .set_token_uri(TokenUrl::new(config_report.config.gmail.token_url.clone())?)
-    .set_redirect_uri(listener.redirect_url.clone());
+    let client_id = config_report
+        .config
+        .gmail
+        .client_id
+        .clone()
+        .ok_or(AuthError::MissingClientId)?;
+    let mut oauth_client = BasicClient::new(ClientId::new(client_id))
+        .set_auth_uri(AuthUrl::new(config_report.config.gmail.auth_url.clone())?)
+        .set_token_uri(TokenUrl::new(config_report.config.gmail.token_url.clone())?);
     if let Some(secret) = &config_report.config.gmail.client_secret
         && !secret.is_empty()
     {
         oauth_client = oauth_client.set_client_secret(ClientSecret::new(secret.clone()));
     }
+    let listener = flow::CallbackListener::bind(&config_report.config.gmail).await?;
+    oauth_client = oauth_client.set_redirect_uri(listener.redirect_url.clone());
     let http_client = oauth_http_client(&config_report.config.gmail)?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let should_open_browser = config_report.config.gmail.open_browser && !no_browser;

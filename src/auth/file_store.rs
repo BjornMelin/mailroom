@@ -118,7 +118,6 @@ impl CredentialStore for FileCredentialStore {
         fs::write(&tmp_path, payload)?;
         set_owner_only_file_permissions(&tmp_path)?;
         persist_tmp_file(&tmp_path, &self.path)?;
-        set_owner_only_file_permissions(&self.path)?;
         Ok(())
     }
 
