@@ -37,6 +37,7 @@ These paths are intentionally ignored from git.
 Repo-local overrides also live under `.mailroom/`:
 
 - `.mailroom/config.toml`
+- `.mailroom/auth/gmail-oauth-client.json`
 - `.mailroom/auth/gmail-credentials.json`
 - `.mailroom/state/mailroom.sqlite3`
 
@@ -50,6 +51,8 @@ cargo run -- paths --json
 cargo run -- doctor --json
 cargo run -- config show --json
 cargo run -- auth status --json
+cargo run -- auth setup
+cargo run -- auth setup --credentials-file /path/to/client_secret.json
 cargo run -- auth login --no-browser
 cargo run -- auth logout --json
 cargo run -- account show --json
@@ -66,7 +69,25 @@ Config precedence is:
 3. Repo-local `.mailroom/config.toml`
 4. `MAILROOM_` environment overrides
 
-For Gmail auth, configure at least:
+For Gmail auth, the primary path is:
+
+1. Run `cargo run -- auth setup`.
+2. If Mailroom auto-discovers exactly one `client_secret_*.json`, select it. Otherwise paste the Client ID and optional Client Secret directly into the CLI.
+3. Advanced: if you already ran `gcloud auth application-default login` with Gmail scopes, choose the ADC import option.
+4. Let Mailroom import the client locally and continue into the browser consent flow or reuse the imported ADC refresh token.
+
+Once imported, the repo-local OAuth client file becomes the authoritative Gmail
+OAuth client for future login and token refresh flows. Legacy inline
+`gmail.client_id` / `gmail.client_secret` config is only used when no imported
+client file exists.
+
+If you omit `--credentials-file`, Mailroom will try to auto-discover a single
+`client_secret_*.json` file from the current directory or `~/Downloads`, then
+offer that path inside the setup wizard. The imported file is stored in the
+standard Google Desktop app `installed` JSON shape under
+`.mailroom/auth/gmail-oauth-client.json`.
+
+Advanced manual overrides still work:
 
 - `gmail.client_id`
 - optionally `gmail.client_secret`

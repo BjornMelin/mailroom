@@ -25,6 +25,18 @@ pub async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Auth {
+            command:
+                AuthCommand::Setup {
+                    credentials_file,
+                    json,
+                    no_browser,
+                },
+        } => {
+            let config_report = config::resolve(&paths)?;
+            let report = auth::setup(&config_report, credentials_file, no_browser, json).await?;
+            report.print(json)?;
+        }
+        Commands::Auth {
             command: AuthCommand::Login { json, no_browser },
         } => {
             let config_report = config::resolve(&paths)?;
@@ -135,6 +147,7 @@ pub async fn run() -> Result<()> {
 fn gmail_client(config_report: &config::ConfigReport) -> Result<gmail::GmailClient> {
     gmail::GmailClient::new(
         config_report.config.gmail.clone(),
+        config_report.config.workspace.clone(),
         auth::file_store::FileCredentialStore::new(
             config_report
                 .config

@@ -27,7 +27,13 @@ database_path = ".mailroom/state/mailroom.sqlite3"
 busy_timeout_ms = 5000
 
 [gmail]
-# client_id is required for `mailroom auth login`.
+# The primary path is `mailroom auth setup`.
+# That wizard can:
+# - auto-discover a downloaded Desktop app JSON
+# - import `--credentials-file /path/to/client_secret.json`
+# - prompt for Client ID and optional Client Secret
+# - import an existing gcloud ADC authorized-user session
+# Manual config still works when you want to bypass the setup wizard.
 # For Google-installed app clients, client_secret is usually omitted.
 client_id = "your-installed-app-client-id.apps.googleusercontent.com"
 # client_secret = ""
