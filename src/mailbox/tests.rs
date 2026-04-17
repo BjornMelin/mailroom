@@ -542,6 +542,50 @@ async fn stale_history_retry_keeps_persisted_bootstrap_query() {
 }
 
 #[tokio::test]
+async fn forced_full_sync_keeps_persisted_bootstrap_query() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "700").await;
+    mount_labels(&mock_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("q", "newer_than:7d"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-forced", "threadId": "t-forced"}],
+            "resultSizeEstimate": 1
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("q", "newer_than:90d"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_string("forced full sync widened bootstrap query"),
+        )
+        .mount(&mock_server)
+        .await;
+    mount_message_metadata(&mock_server, "m-forced", "650", "Forced full sync").await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    seed_existing_mailbox_with_bootstrap_query(
+        &config_report,
+        "250",
+        "cached-1",
+        "Existing cached message",
+        "newer_than:7d",
+    );
+
+    let report = sync_run(&config_report, true, 90).await.unwrap();
+
+    assert_eq!(report.mode, store::mailbox::SyncMode::Full);
+    assert!(!report.fallback_from_history);
+    assert_eq!(report.bootstrap_query, "newer_than:7d");
+    assert_eq!(report.messages_upserted, 1);
+    assert_eq!(report.cursor_history_id, "700");
+}
+
+#[tokio::test]
 async fn label_refresh_failure_marks_existing_sync_state_as_failed() {
     let mock_server = MockServer::start().await;
     mount_profile(&mock_server, "350").await;

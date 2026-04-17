@@ -643,15 +643,11 @@ fn extract_email_address(value: &str) -> Option<String> {
             '"' => {
                 in_quotes = !in_quotes;
             }
-            '<' if !in_quotes => {
-                if angle_start.replace(index).is_some() {
-                    return None;
-                }
+            '<' if !in_quotes && angle_start.replace(index).is_some() => {
+                return None;
             }
-            '>' if !in_quotes => {
-                if angle_start.is_none() || angle_end.replace(index).is_some() {
-                    return None;
-                }
+            '>' if !in_quotes && (angle_start.is_none() || angle_end.replace(index).is_some()) => {
+                return None;
             }
             ',' if !in_quotes => {
                 return None;
