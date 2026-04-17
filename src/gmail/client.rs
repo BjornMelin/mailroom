@@ -621,22 +621,70 @@ fn header_value(headers: &[GmailHeader], name: &str) -> Option<String> {
 
 fn extract_email_address(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.is_empty() || value.contains(',') || value.contains('\n') {
-        return None;
-    }
-    if value.contains(':') && value.ends_with(';') {
+    if value.is_empty() || value.contains('\n') || value.contains('\r') {
         return None;
     }
 
-    if let Some((display_name, remainder)) = value.rsplit_once('<') {
-        let (candidate, suffix) = remainder.split_once('>')?;
-        if display_name.trim().is_empty() || !suffix.trim().is_empty() {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    let mut angle_start = None;
+    let mut angle_end = None;
+
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match character {
+            '\\' if in_quotes => {
+                escaped = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            '<' if !in_quotes => {
+                if angle_start.replace(index).is_some() {
+                    return None;
+                }
+            }
+            '>' if !in_quotes => {
+                if angle_start.is_none() || angle_end.replace(index).is_some() {
+                    return None;
+                }
+            }
+            ',' if !in_quotes => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+
+    if in_quotes || escaped {
+        return None;
+    }
+
+    if let Some(open_index) = angle_start {
+        let close_index = angle_end?;
+        if open_index >= close_index {
             return None;
         }
+
+        let display_name = value[..open_index].trim();
+        let candidate = value[open_index + 1..close_index].trim();
+        let suffix = value[close_index + 1..].trim();
+        if display_name.is_empty() || !suffix.is_empty() {
+            return None;
+        }
+
         return normalize_email_candidate(candidate);
     }
 
     if value.contains('<') || value.contains('>') {
+        return None;
+    }
+
+    if value.contains(':') && value.ends_with(';') {
         return None;
     }
 
@@ -847,6 +895,10 @@ mod tests {
         assert_eq!(
             extract_email_address("\"Alice Example\" <Alice.Example+ops@example.com>"),
             Some(String::from("alice.example+ops@example.com"))
+        );
+        assert_eq!(
+            extract_email_address("\"Alice, Example\" <alice@example.com>"),
+            Some(String::from("alice@example.com"))
         );
         assert_eq!(
             extract_email_address("O'Hara <o'hara@example.com>"),

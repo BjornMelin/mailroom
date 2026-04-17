@@ -23,4 +23,4 @@ pub(crate) const FULL_SYNC_PAGE_SIZE: u32 = 100;
 pub(crate) const MESSAGE_FETCH_CONCURRENCY: usize = 8;
 
 #[cfg(test)]
-pub(crate) use util::{newest_history_id, parse_next_day_epoch_ms, parse_start_of_day_epoch_ms};
+pub(crate) use util::{newest_history_id, parse_start_of_day_epoch_ms};

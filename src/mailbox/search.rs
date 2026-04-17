@@ -1,5 +1,5 @@
 use crate::config::ConfigReport;
-use crate::mailbox::util::{parse_next_day_epoch_ms, parse_start_of_day_epoch_ms};
+use crate::mailbox::util::parse_start_of_day_epoch_ms;
 use crate::mailbox::{SearchReport, SearchRequest};
 use crate::store;
 use anyhow::{Result, anyhow};
@@ -17,7 +17,7 @@ pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Res
     let before_epoch_ms = request
         .before
         .as_deref()
-        .map(parse_next_day_epoch_ms)
+        .map(parse_start_of_day_epoch_ms)
         .transpose()?;
 
     let database_path = config_report.config.store.database_path.clone();

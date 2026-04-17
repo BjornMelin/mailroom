@@ -68,11 +68,6 @@ pub(crate) fn parse_start_of_day_epoch_ms(value: &str) -> Result<i64> {
     Ok(days_from_civil(year, month, day) * 86_400_000)
 }
 
-pub(crate) fn parse_next_day_epoch_ms(value: &str) -> Result<i64> {
-    let (year, month, day) = parse_yyyy_mm_dd(value)?;
-    Ok((days_from_civil(year, month, day) + 1) * 86_400_000)
-}
-
 fn parse_yyyy_mm_dd(value: &str) -> Result<(i64, u32, u32)> {
     let mut parts = value.split('-');
     let year = parts

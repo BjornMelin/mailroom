@@ -104,7 +104,7 @@ cargo run -- store doctor --json
 connection hardening settings used by `store init`, and reports the effective
 pragma state without rewriting persisted database settings.
 
-When mailbox sync has run at least once, `doctor` and `store doctor` also
+Once the mailbox tables exist (schema v3), `doctor` and `store doctor` also
 report:
 
 - mailbox message count

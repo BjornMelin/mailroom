@@ -2,7 +2,7 @@ use super::read::{count_indexed_messages, count_labels, count_messages, read_syn
 use super::{GmailMessageUpsertInput, SyncStateRecord, SyncStateUpdate, unique_sorted_strings};
 use crate::gmail::GmailLabel;
 use crate::store::connection;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use rusqlite::{ToSql, params, params_from_iter};
 use std::path::Path;
 
@@ -71,7 +71,7 @@ pub(crate) fn replace_messages(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
     delete_account_messages(&transaction, account_id)?;
-    let replaced = write_messages(&transaction, messages, updated_at_epoch_s)?;
+    let replaced = write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
     transaction.commit()?;
     Ok(replaced)
 }
@@ -85,7 +85,11 @@ pub(crate) fn upsert_messages(
 ) -> Result<usize> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
-    let updated = write_messages(&transaction, messages, updated_at_epoch_s)?;
+    let account_id = messages
+        .first()
+        .map(|message| message.account_id.as_str())
+        .unwrap_or("");
+    let updated = write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
     transaction.commit()?;
     Ok(updated)
 }
@@ -101,7 +105,12 @@ pub(crate) fn apply_incremental_changes(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
     let deleted = delete_messages_in_transaction(&transaction, account_id, message_ids_to_delete)?;
-    write_messages(&transaction, messages_to_upsert, updated_at_epoch_s)?;
+    write_messages(
+        &transaction,
+        account_id,
+        messages_to_upsert,
+        updated_at_epoch_s,
+    )?;
     transaction.commit()?;
     Ok(deleted)
 }
@@ -276,12 +285,17 @@ fn delete_account_messages(
 
 fn write_messages(
     transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
     messages: &[GmailMessageUpsertInput],
     updated_at_epoch_s: i64,
 ) -> Result<usize> {
     if messages.is_empty() {
         return Ok(0);
     }
+    ensure!(
+        !account_id.is_empty(),
+        "mailbox messages must have a non-empty account_id"
+    );
 
     let mut upsert_message = transaction.prepare_cached(
         "INSERT INTO gmail_messages (
@@ -338,9 +352,15 @@ fn write_messages(
     )?;
 
     for message in messages {
+        ensure!(
+            message.account_id == account_id,
+            "mailbox message account_id `{}` does not match batch account `{}`",
+            message.account_id,
+            account_id
+        );
         let message_rowid: i64 = upsert_message.query_row(
             params![
-                &message.account_id,
+                account_id,
                 &message.message_id,
                 &message.thread_id,
                 &message.history_id,

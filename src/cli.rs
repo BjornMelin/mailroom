@@ -144,7 +144,7 @@ pub struct SearchArgs {
     /// Restrict matches to messages on or after this UTC date (YYYY-MM-DD)
     #[arg(long)]
     pub after: Option<String>,
-    /// Restrict matches to messages before this UTC date (YYYY-MM-DD)
+    /// Restrict matches to messages before the start of this UTC date (YYYY-MM-DD)
     #[arg(long)]
     pub before: Option<String>,
     /// Maximum number of search hits to return

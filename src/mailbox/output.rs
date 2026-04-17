@@ -68,14 +68,24 @@ impl SearchReport {
         lines.extend(self.results.iter().map(|result| {
             format!(
                 "{}\t{}\t{}\t{}",
-                result.message_id,
+                sanitize_tsv_field(&result.message_id),
                 result.internal_date_epoch_ms,
-                result.from_header.replace('\t', " "),
-                result.subject.replace('\t', " "),
+                sanitize_tsv_field(&result.from_header),
+                sanitize_tsv_field(&result.subject),
             )
         }));
         lines.join("\n") + "\n"
     }
+}
+
+fn sanitize_tsv_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\t' | '\r' | '\n' => ' ',
+            character => character,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -116,5 +126,36 @@ mod tests {
             rendered
                 .contains("m-1\t123\tAlice Example <alice@example.com>\tAlpha launch checklist")
         );
+    }
+
+    #[test]
+    fn render_plain_search_report_sanitizes_tsv_control_characters() {
+        let report = SearchReport {
+            terms: String::from("alpha"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 1,
+            results: vec![store::mailbox::SearchResult {
+                message_id: String::from("m-\t1"),
+                thread_id: String::from("t-1"),
+                internal_date_epoch_ms: 123,
+                subject: String::from("Alpha\nlaunch"),
+                from_header: String::from("Alice\r\nExample <alice@example.com>"),
+                from_address: Some(String::from("alice@example.com")),
+                recipient_headers: String::from("ops@example.com"),
+                snippet: String::from("snippet"),
+                label_names: vec![String::from("INBOX")],
+                thread_message_count: 1,
+                rank: 0.5,
+            }],
+        };
+
+        let rendered = report.render_plain();
+
+        assert!(!rendered.contains('\r'));
+        assert_eq!(rendered.lines().count(), 5);
+        assert!(rendered.contains("m- 1\t123\tAlice  Example <alice@example.com>\tAlpha launch"));
     }
 }

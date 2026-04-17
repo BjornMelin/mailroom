@@ -1,7 +1,7 @@
 use super::{
     GmailMessageUpsertInput, SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, get_sync_state,
-    inspect_mailbox, replace_labels, search::build_plain_fts5_query, search_messages,
-    upsert_messages, upsert_sync_state,
+    inspect_mailbox, replace_labels, replace_messages, search::build_plain_fts5_query,
+    search_messages, upsert_messages, upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -406,6 +406,115 @@ fn inspect_mailbox_reports_sync_state_and_counts() {
     .unwrap();
     assert_eq!(after_delete.message_count, 0);
     assert_eq!(after_delete.indexed_message_count, 0);
+}
+
+#[test]
+fn replace_messages_rejects_mixed_account_batches() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-replace-account-guard");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("101"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Alpha launch checklist"),
+            subject: String::from("Alpha launch"),
+            from_header: String::from("Alice <alice@example.com>"),
+            from_address: Some(String::from("alice@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![],
+            label_names_text: String::new(),
+        }],
+        100,
+    )
+    .unwrap();
+
+    let error = replace_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:second@example.com"),
+            message_id: String::from("m-2"),
+            thread_id: String::from("t-2"),
+            history_id: String::from("102"),
+            internal_date_epoch_ms: 1_700_000_100_000,
+            snippet: String::from("Beta launch checklist"),
+            subject: String::from("Beta launch"),
+            from_header: String::from("Bob <bob@example.com>"),
+            from_address: Some(String::from("bob@example.com")),
+            recipient_headers: String::from("second@example.com"),
+            to_header: String::from("second@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 456,
+            label_ids: vec![],
+            label_names_text: String::new(),
+        }],
+        100,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("does not match batch account"));
+
+    let operator_results = search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("alpha"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(operator_results.len(), 1);
+
+    let second_results = search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SearchQuery {
+            account_id: String::from("gmail:second@example.com"),
+            terms: String::from("beta"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert!(second_results.is_empty());
 }
 
 #[test]
