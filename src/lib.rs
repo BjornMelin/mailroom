@@ -28,10 +28,7 @@ pub async fn run() -> Result<()> {
         Commands::Auth { command } => handle_auth_command(&paths, command).await?,
         Commands::Account { command } => handle_account_command(&paths, command).await?,
         Commands::Config { command } => handle_config_command(&paths, command)?,
-        Commands::Paths { json } => {
-            let config_report = config::resolve(&paths)?;
-            configured_paths(&config_report)?.print(json)?;
-        }
+        Commands::Paths { json } => handle_paths_command(&paths, json)?,
         Commands::Doctor { json } => handle_doctor_command(&paths, json)?,
         Commands::Gmail { command } => handle_gmail_command(&paths, command).await?,
         Commands::Roadmap => print_roadmap(),
@@ -39,6 +36,15 @@ pub async fn run() -> Result<()> {
         Commands::Sync { command } => handle_sync_command(&paths, command).await?,
         Commands::Workspace { command } => handle_workspace_command(&paths, command)?,
         Commands::Store { command } => handle_store_command(&paths, command)?,
+    }
+
+    Ok(())
+}
+
+fn handle_paths_command(paths: &workspace::WorkspacePaths, json: bool) -> Result<()> {
+    match config::resolve(paths) {
+        Ok(config_report) => configured_paths(&config_report)?.print(json)?,
+        Err(_) => paths.print(json)?,
     }
 
     Ok(())
@@ -273,7 +279,7 @@ fn is_repo_root(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_repo_root, refresh_active_account};
+    use super::{discover_repo_root, handle_paths_command, refresh_active_account};
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::resolve;
     use crate::workspace::WorkspacePaths;
@@ -418,6 +424,23 @@ runtime_root = "{}"
 
         assert!(report.runtime_root_exists);
         assert!(report.path_statuses.iter().all(|status| status.exists));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn paths_command_still_prints_repo_local_paths_when_config_is_malformed() {
+        let repo_root = unique_temp_dir("mailroom-paths-malformed-config");
+        if repo_root.exists() {
+            fs::remove_dir_all(&repo_root).unwrap();
+        }
+
+        fs::create_dir_all(repo_root.join(".mailroom")).unwrap();
+        fs::write(repo_root.join(".mailroom/config.toml"), "[workspace\n").unwrap();
+
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        assert!(resolve(&paths).is_err());
+        handle_paths_command(&paths, true).unwrap();
 
         fs::remove_dir_all(repo_root).unwrap();
     }

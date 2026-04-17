@@ -5,6 +5,7 @@ use super::{
 use crate::auth;
 use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
 use crate::config::{ConfigReport, resolve};
+use crate::mailbox::util::bootstrap_query;
 use crate::store;
 use crate::store::accounts;
 use crate::workspace::WorkspacePaths;
@@ -12,6 +13,12 @@ use secrecy::SecretString;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+struct SeededMailboxLabels {
+    labels: Vec<crate::gmail::GmailLabel>,
+    label_ids: Vec<String>,
+    label_names_text: String,
+}
 
 #[test]
 fn parses_yyyy_mm_dd_date_bounds() {
@@ -542,13 +549,14 @@ async fn stale_history_retry_keeps_persisted_bootstrap_query() {
 }
 
 #[tokio::test]
-async fn forced_full_sync_keeps_persisted_bootstrap_query() {
+async fn forced_full_sync_uses_requested_bootstrap_query() {
     let mock_server = MockServer::start().await;
+    let requested_bootstrap_query = bootstrap_query(90);
     mount_profile(&mock_server, "700").await;
     mount_labels(&mock_server).await;
     Mock::given(method("GET"))
         .and(path("/gmail/v1/users/me/messages"))
-        .and(query_param("q", "newer_than:7d"))
+        .and(query_param("q", requested_bootstrap_query.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "messages": [{"id": "m-forced", "threadId": "t-forced"}],
             "resultSizeEstimate": 1
@@ -557,9 +565,10 @@ async fn forced_full_sync_keeps_persisted_bootstrap_query() {
         .await;
     Mock::given(method("GET"))
         .and(path("/gmail/v1/users/me/messages"))
-        .and(query_param("q", "newer_than:90d"))
+        .and(query_param("q", "newer_than:7d"))
         .respond_with(
-            ResponseTemplate::new(500).set_body_string("forced full sync widened bootstrap query"),
+            ResponseTemplate::new(500)
+                .set_body_string("forced full sync reused persisted bootstrap query"),
         )
         .mount(&mock_server)
         .await;
@@ -580,9 +589,18 @@ async fn forced_full_sync_keeps_persisted_bootstrap_query() {
 
     assert_eq!(report.mode, store::mailbox::SyncMode::Full);
     assert!(!report.fallback_from_history);
-    assert_eq!(report.bootstrap_query, "newer_than:7d");
+    assert_eq!(report.bootstrap_query, requested_bootstrap_query);
     assert_eq!(report.messages_upserted, 1);
     assert_eq!(report.cursor_history_id, "700");
+
+    let stored_state = store::mailbox::get_sync_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored_state.bootstrap_query, requested_bootstrap_query);
 }
 
 #[tokio::test]
@@ -637,6 +655,92 @@ async fn label_refresh_failure_marks_existing_sync_state_as_failed() {
             .as_deref()
             .is_some_and(|message| message.contains("users/me/labels"))
     );
+}
+
+#[tokio::test]
+async fn full_sync_failure_keeps_cached_labels_until_mailbox_changes_commit() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "700").await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/labels"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "labels": [{
+                "id": "Label_1",
+                "name": "Project/New",
+                "type": "user"
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("transient messages failure"))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    seed_existing_mailbox_with_custom_labels(
+        &config_report,
+        "250",
+        "cached-1",
+        "Existing cached message",
+        "newer_than:7d",
+        SeededMailboxLabels {
+            labels: vec![crate::gmail::GmailLabel {
+                id: String::from("Label_1"),
+                name: String::from("Project/Old"),
+                label_type: String::from("user"),
+                message_list_visibility: None,
+                label_list_visibility: None,
+                messages_total: None,
+                messages_unread: None,
+                threads_total: None,
+                threads_unread: None,
+            }],
+            label_ids: vec![String::from("Label_1")],
+            label_names_text: String::from("Project/Old"),
+        },
+    );
+
+    let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("users/me/messages"));
+
+    let old_label_results = store::mailbox::search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::mailbox::SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("Existing"),
+            label: Some(String::from("Project/Old")),
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(old_label_results.len(), 1);
+    assert_eq!(old_label_results[0].label_names, vec!["Project/Old"]);
+
+    let new_label_results = store::mailbox::search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::mailbox::SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("Existing"),
+            label: Some(String::from("Project/New")),
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert!(new_label_results.is_empty());
 }
 
 #[tokio::test]
@@ -1023,12 +1127,27 @@ fn seed_existing_mailbox(
     message_id: &str,
     subject: &str,
 ) {
-    seed_existing_mailbox_with_bootstrap_query(
+    seed_existing_mailbox_with_custom_labels(
         config_report,
         history_id,
         message_id,
         subject,
         "newer_than:90d",
+        SeededMailboxLabels {
+            labels: vec![crate::gmail::GmailLabel {
+                id: String::from("INBOX"),
+                name: String::from("INBOX"),
+                label_type: String::from("system"),
+                message_list_visibility: None,
+                label_list_visibility: None,
+                messages_total: None,
+                messages_unread: None,
+                threads_total: None,
+                threads_unread: None,
+            }],
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+        },
     );
 }
 
@@ -1038,6 +1157,38 @@ fn seed_existing_mailbox_with_bootstrap_query(
     message_id: &str,
     subject: &str,
     bootstrap_query: &str,
+) {
+    seed_existing_mailbox_with_custom_labels(
+        config_report,
+        history_id,
+        message_id,
+        subject,
+        bootstrap_query,
+        SeededMailboxLabels {
+            labels: vec![crate::gmail::GmailLabel {
+                id: String::from("INBOX"),
+                name: String::from("INBOX"),
+                label_type: String::from("system"),
+                message_list_visibility: None,
+                label_list_visibility: None,
+                messages_total: None,
+                messages_unread: None,
+                threads_total: None,
+                threads_unread: None,
+            }],
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+        },
+    );
+}
+
+fn seed_existing_mailbox_with_custom_labels(
+    config_report: &ConfigReport,
+    history_id: &str,
+    message_id: &str,
+    subject: &str,
+    bootstrap_query: &str,
+    seeded_labels: SeededMailboxLabels,
 ) {
     store::init(config_report).unwrap();
     accounts::upsert_active(
@@ -1057,17 +1208,7 @@ fn seed_existing_mailbox_with_bootstrap_query(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         "gmail:operator@example.com",
-        &[crate::gmail::GmailLabel {
-            id: String::from("INBOX"),
-            name: String::from("INBOX"),
-            label_type: String::from("system"),
-            message_list_visibility: None,
-            label_list_visibility: None,
-            messages_total: None,
-            messages_unread: None,
-            threads_total: None,
-            threads_unread: None,
-        }],
+        &seeded_labels.labels,
         100,
     )
     .unwrap();
@@ -1090,8 +1231,8 @@ fn seed_existing_mailbox_with_bootstrap_query(
             bcc_header: String::new(),
             reply_to_header: String::new(),
             size_estimate: 123,
-            label_ids: vec![String::from("INBOX")],
-            label_names_text: String::from("INBOX"),
+            label_ids: seeded_labels.label_ids,
+            label_names_text: seeded_labels.label_names_text,
         }],
         100,
     )

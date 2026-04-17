@@ -8,6 +8,15 @@ use std::path::Path;
 
 const DELETE_BATCH_SIZE: usize = 400;
 
+pub(crate) struct IncrementalSyncCommit<'a> {
+    pub(crate) labels: &'a [GmailLabel],
+    pub(crate) messages_to_upsert: &'a [GmailMessageUpsertInput],
+    pub(crate) message_ids_to_delete: &'a [String],
+    pub(crate) updated_at_epoch_s: i64,
+    pub(crate) sync_state_update: &'a SyncStateUpdate,
+}
+
+#[cfg(test)]
 pub(crate) fn replace_labels(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -17,50 +26,62 @@ pub(crate) fn replace_labels(
 ) -> Result<usize> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
-    transaction.execute(
-        "DELETE FROM gmail_labels WHERE account_id = ?1",
-        [account_id],
-    )?;
-
-    let mut insert = transaction.prepare_cached(
-        "INSERT INTO gmail_labels (
-             account_id,
-             label_id,
-             name,
-             label_type,
-             message_list_visibility,
-             label_list_visibility,
-             messages_total,
-             messages_unread,
-             threads_total,
-             threads_unread,
-             updated_at_epoch_s
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-    )?;
-
-    for label in labels {
-        insert.execute(params![
-            account_id,
-            &label.id,
-            &label.name,
-            &label.label_type,
-            &label.message_list_visibility,
-            &label.label_list_visibility,
-            label.messages_total,
-            label.messages_unread,
-            label.threads_total,
-            label.threads_unread,
-            updated_at_epoch_s,
-        ])?;
-    }
-
-    drop(insert);
-    reindex_message_search_for_account(&transaction, account_id)?;
+    replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
     transaction.commit()?;
     Ok(labels.len())
 }
 
+pub(crate) fn commit_full_sync(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    labels: &[GmailLabel],
+    messages: &[GmailMessageUpsertInput],
+    updated_at_epoch_s: i64,
+    sync_state_update: &SyncStateUpdate,
+) -> Result<SyncStateRecord> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let transaction = connection.transaction()?;
+
+    replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
+    delete_account_messages(&transaction, account_id)?;
+    write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
+    let record = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
+
+    transaction.commit()?;
+    Ok(record)
+}
+
+pub(crate) fn commit_incremental_sync(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    commit: &IncrementalSyncCommit<'_>,
+) -> Result<(SyncStateRecord, usize)> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let transaction = connection.transaction()?;
+
+    replace_labels_in_transaction(
+        &transaction,
+        account_id,
+        commit.labels,
+        commit.updated_at_epoch_s,
+    )?;
+    let deleted =
+        delete_messages_in_transaction(&transaction, account_id, commit.message_ids_to_delete)?;
+    write_messages(
+        &transaction,
+        account_id,
+        commit.messages_to_upsert,
+        commit.updated_at_epoch_s,
+    )?;
+    let record = upsert_sync_state_in_transaction(&transaction, commit.sync_state_update)?;
+
+    transaction.commit()?;
+    Ok((record, deleted))
+}
+
+#[cfg(test)]
 pub(crate) fn replace_messages(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -94,6 +115,7 @@ pub(crate) fn upsert_messages(
     Ok(updated)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_incremental_changes(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -203,9 +225,67 @@ pub(crate) fn upsert_sync_state(
 ) -> Result<SyncStateRecord> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
-    let message_count = count_messages(&transaction, Some(&update.account_id))?;
-    let label_count = count_labels(&transaction, Some(&update.account_id))?;
-    let indexed_message_count = count_indexed_messages(&transaction, Some(&update.account_id))?;
+    let record = upsert_sync_state_in_transaction(&transaction, update)?;
+    transaction.commit()?;
+    Ok(record)
+}
+
+fn replace_labels_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    labels: &[GmailLabel],
+    updated_at_epoch_s: i64,
+) -> Result<usize> {
+    transaction.execute(
+        "DELETE FROM gmail_labels WHERE account_id = ?1",
+        [account_id],
+    )?;
+
+    let mut insert = transaction.prepare_cached(
+        "INSERT INTO gmail_labels (
+             account_id,
+             label_id,
+             name,
+             label_type,
+             message_list_visibility,
+             label_list_visibility,
+             messages_total,
+             messages_unread,
+             threads_total,
+             threads_unread,
+             updated_at_epoch_s
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+
+    for label in labels {
+        insert.execute(params![
+            account_id,
+            &label.id,
+            &label.name,
+            &label.label_type,
+            &label.message_list_visibility,
+            &label.label_list_visibility,
+            label.messages_total,
+            label.messages_unread,
+            label.threads_total,
+            label.threads_unread,
+            updated_at_epoch_s,
+        ])?;
+    }
+
+    drop(insert);
+    reindex_message_search_for_account(transaction, account_id)?;
+    Ok(labels.len())
+}
+
+fn upsert_sync_state_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    update: &SyncStateUpdate,
+) -> Result<SyncStateRecord> {
+    let message_count = count_messages(transaction, Some(&update.account_id))?;
+    let label_count = count_labels(transaction, Some(&update.account_id))?;
+    let indexed_message_count = count_indexed_messages(transaction, Some(&update.account_id))?;
 
     transaction.execute(
         "INSERT INTO gmail_sync_state (
@@ -257,9 +337,8 @@ pub(crate) fn upsert_sync_state(
         ],
     )?;
 
-    let record = read_sync_state(&transaction, &update.account_id)?
+    let record = read_sync_state(transaction, &update.account_id)?
         .ok_or_else(|| anyhow!("failed to read sync state for {}", update.account_id))?;
-    transaction.commit()?;
     Ok(record)
 }
 

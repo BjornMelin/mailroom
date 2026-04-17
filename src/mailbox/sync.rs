@@ -27,7 +27,7 @@ pub async fn sync_run(
     let account = crate::refresh_active_account_record(config_report).await?;
     let gmail_client = crate::gmail_client_for_config(config_report)?;
     let store_handle = MailboxStoreHandle::new(config_report, &account.account_id);
-    let bootstrap_query = bootstrap_query(recent_days);
+    let requested_bootstrap_query = bootstrap_query(recent_days);
     let existing_sync_state = load_sync_state(&store_handle).await?;
     let initial_mode = sync_mode(force_full, existing_sync_state.as_ref());
     let mut failure_mode = initial_mode;
@@ -37,13 +37,15 @@ pub async fn sync_run(
     let persisted_bootstrap_query = existing_sync_state
         .as_ref()
         .map(|state| state.bootstrap_query.as_str())
-        .unwrap_or(bootstrap_query.as_str());
+        .unwrap_or(requested_bootstrap_query.as_str());
+    let initial_bootstrap_query = match initial_mode {
+        store::mailbox::SyncMode::Full => requested_bootstrap_query.as_str(),
+        store::mailbox::SyncMode::Incremental => persisted_bootstrap_query,
+    };
+    let mut failure_bootstrap_query = initial_bootstrap_query;
 
     let result = async {
         let labels = gmail_client.list_labels().await?;
-        let labels_synced = store_handle
-            .replace_labels(&labels, current_epoch_seconds()?)
-            .await?;
         let label_names_by_id = labels_by_id(&labels);
 
         match initial_mode {
@@ -52,9 +54,9 @@ pub async fn sync_run(
                     &store_handle,
                     &gmail_client,
                     &account,
-                    persisted_bootstrap_query,
+                    &labels,
+                    initial_bootstrap_query,
                     &label_names_by_id,
-                    labels_synced,
                     false,
                 )
                 .await
@@ -67,9 +69,9 @@ pub async fn sync_run(
                     &store_handle,
                     &gmail_client,
                     &account,
+                    &labels,
                     persisted_bootstrap_query,
                     &label_names_by_id,
-                    labels_synced,
                     sync_state.cursor_history_id.clone(),
                 )
                 .await
@@ -78,13 +80,14 @@ pub async fn sync_run(
                     Err(error) if is_stale_history_error(&error) => {
                         failure_mode = store::mailbox::SyncMode::Full;
                         failure_cursor_history_id = None;
+                        failure_bootstrap_query = persisted_bootstrap_query;
                         run_full_sync(
                             &store_handle,
                             &gmail_client,
                             &account,
+                            &labels,
                             persisted_bootstrap_query,
                             &label_names_by_id,
-                            labels_synced,
                             true,
                         )
                         .await
@@ -102,7 +105,7 @@ pub async fn sync_run(
             let persist_result = persist_sync_state_failure(
                 &store_handle,
                 &account,
-                persisted_bootstrap_query,
+                failure_bootstrap_query,
                 failure_mode,
                 failure_cursor_history_id,
                 sync_error.to_string(),
@@ -132,9 +135,9 @@ async fn run_full_sync(
     store_handle: &MailboxStoreHandle,
     gmail_client: &GmailClient,
     account: &AccountRecord,
+    labels: &[GmailLabel],
     bootstrap_query: &str,
     label_names_by_id: &BTreeMap<String, String>,
-    labels_synced: usize,
     fallback_from_history: bool,
 ) -> Result<SyncRunReport> {
     let mut page_token = None;
@@ -191,35 +194,36 @@ async fn run_full_sync(
         }
     }
 
-    store_handle
-        .replace_messages(upserts, current_epoch_seconds()?)
+    let finalize_input = FinalizeSyncInput {
+        mode: store::mailbox::SyncMode::Full,
+        fallback_from_history,
+        cursor_history_id,
+        pages_fetched,
+        messages_listed,
+        messages_upserted,
+        messages_deleted: 0,
+        labels_synced: labels.len(),
+    };
+    let now_epoch_s = current_epoch_seconds()?;
+    let sync_state = store_handle
+        .commit_full_sync(
+            labels,
+            upserts,
+            now_epoch_s,
+            success_sync_state_update(account, bootstrap_query, &finalize_input, now_epoch_s),
+        )
         .await?;
 
-    finalize_sync(
-        store_handle,
-        account,
-        bootstrap_query,
-        FinalizeSyncInput {
-            mode: store::mailbox::SyncMode::Full,
-            fallback_from_history,
-            cursor_history_id,
-            pages_fetched,
-            messages_listed,
-            messages_upserted,
-            messages_deleted: 0,
-            labels_synced,
-        },
-    )
-    .await
+    finalize_sync(sync_state, bootstrap_query, finalize_input)
 }
 
 async fn run_incremental_sync(
     store_handle: &MailboxStoreHandle,
     gmail_client: &GmailClient,
     account: &AccountRecord,
+    labels: &[GmailLabel],
     bootstrap_query: &str,
     label_names_by_id: &BTreeMap<String, String>,
-    labels_synced: usize,
     cursor_history_id: Option<String>,
 ) -> Result<SyncRunReport> {
     let cursor_history_id =
@@ -265,52 +269,68 @@ async fn run_incremental_sync(
         .chain(excluded_message_ids)
         .collect::<Vec<_>>();
     let messages_upserted = upserts.len();
-    let messages_deleted = store_handle
-        .apply_incremental_changes(upserts, &message_ids_to_delete, current_epoch_seconds()?)
+    let now_epoch_s = current_epoch_seconds()?;
+    let sync_update = store::mailbox::SyncStateUpdate {
+        account_id: account.account_id.clone(),
+        cursor_history_id: Some(latest_history_id.clone()),
+        bootstrap_query: bootstrap_query.to_owned(),
+        last_sync_mode: store::mailbox::SyncMode::Incremental,
+        last_sync_status: store::mailbox::SyncStatus::Ok,
+        last_error: None,
+        last_sync_epoch_s: now_epoch_s,
+        last_full_sync_success_epoch_s: None,
+        last_incremental_sync_success_epoch_s: Some(now_epoch_s),
+    };
+    let (sync_state, messages_deleted) = store_handle
+        .commit_incremental_sync(store::mailbox::IncrementalSyncCommit {
+            labels,
+            messages_to_upsert: &upserts,
+            message_ids_to_delete: &message_ids_to_delete,
+            updated_at_epoch_s: now_epoch_s,
+            sync_state_update: &sync_update,
+        })
         .await?;
+    let finalize_input = FinalizeSyncInput {
+        mode: store::mailbox::SyncMode::Incremental,
+        fallback_from_history: false,
+        cursor_history_id: Some(latest_history_id),
+        pages_fetched,
+        messages_listed,
+        messages_upserted,
+        messages_deleted,
+        labels_synced: labels.len(),
+    };
 
-    finalize_sync(
-        store_handle,
-        account,
-        bootstrap_query,
-        FinalizeSyncInput {
-            mode: store::mailbox::SyncMode::Incremental,
-            fallback_from_history: false,
-            cursor_history_id: Some(latest_history_id),
-            pages_fetched,
-            messages_listed,
-            messages_upserted,
-            messages_deleted,
-            labels_synced,
-        },
-    )
-    .await
+    finalize_sync(sync_state, bootstrap_query, finalize_input)
 }
 
-async fn finalize_sync(
-    store_handle: &MailboxStoreHandle,
+fn success_sync_state_update(
     account: &AccountRecord,
+    bootstrap_query: &str,
+    input: &FinalizeSyncInput,
+    now_epoch_s: i64,
+) -> store::mailbox::SyncStateUpdate {
+    store::mailbox::SyncStateUpdate {
+        account_id: account.account_id.clone(),
+        cursor_history_id: input.cursor_history_id.clone(),
+        bootstrap_query: bootstrap_query.to_owned(),
+        last_sync_mode: input.mode,
+        last_sync_status: store::mailbox::SyncStatus::Ok,
+        last_error: None,
+        last_sync_epoch_s: now_epoch_s,
+        last_full_sync_success_epoch_s: (input.mode == store::mailbox::SyncMode::Full)
+            .then_some(now_epoch_s),
+        last_incremental_sync_success_epoch_s: (input.mode
+            == store::mailbox::SyncMode::Incremental)
+            .then_some(now_epoch_s),
+    }
+}
+
+fn finalize_sync(
+    sync_state: store::mailbox::SyncStateRecord,
     bootstrap_query: &str,
     input: FinalizeSyncInput,
 ) -> Result<SyncRunReport> {
-    let now_epoch_s = current_epoch_seconds()?;
-    let sync_state = store_handle
-        .upsert_sync_state(store::mailbox::SyncStateUpdate {
-            account_id: account.account_id.clone(),
-            cursor_history_id: input.cursor_history_id,
-            bootstrap_query: bootstrap_query.to_owned(),
-            last_sync_mode: input.mode,
-            last_sync_status: store::mailbox::SyncStatus::Ok,
-            last_error: None,
-            last_sync_epoch_s: now_epoch_s,
-            last_full_sync_success_epoch_s: (input.mode == store::mailbox::SyncMode::Full)
-                .then_some(now_epoch_s),
-            last_incremental_sync_success_epoch_s: (input.mode
-                == store::mailbox::SyncMode::Incremental)
-                .then_some(now_epoch_s),
-        })
-        .await?;
-
     Ok(SyncRunReport {
         mode: input.mode,
         fallback_from_history: input.fallback_from_history,
@@ -505,65 +525,55 @@ impl MailboxStoreHandle {
         .await?
     }
 
-    async fn replace_labels(
+    async fn commit_full_sync(
         &self,
         labels: &[GmailLabel],
+        messages: Vec<store::mailbox::GmailMessageUpsertInput>,
         updated_at_epoch_s: i64,
-    ) -> Result<usize> {
+        sync_state_update: store::mailbox::SyncStateUpdate,
+    ) -> Result<store::mailbox::SyncStateRecord> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
         let labels = labels.to_vec();
         spawn_blocking(move || {
-            store::mailbox::replace_labels(
+            store::mailbox::commit_full_sync(
                 &database_path,
                 busy_timeout_ms,
                 &account_id,
                 &labels,
-                updated_at_epoch_s,
-            )
-        })
-        .await?
-    }
-
-    async fn replace_messages(
-        &self,
-        messages: Vec<store::mailbox::GmailMessageUpsertInput>,
-        updated_at_epoch_s: i64,
-    ) -> Result<usize> {
-        let database_path = self.database_path.clone();
-        let busy_timeout_ms = self.busy_timeout_ms;
-        let account_id = self.account_id.clone();
-        spawn_blocking(move || {
-            store::mailbox::replace_messages(
-                &database_path,
-                busy_timeout_ms,
-                &account_id,
                 &messages,
                 updated_at_epoch_s,
+                &sync_state_update,
             )
         })
         .await?
     }
 
-    async fn apply_incremental_changes(
+    async fn commit_incremental_sync(
         &self,
-        messages_to_upsert: Vec<store::mailbox::GmailMessageUpsertInput>,
-        message_ids_to_delete: &[String],
-        updated_at_epoch_s: i64,
-    ) -> Result<usize> {
+        commit: store::mailbox::IncrementalSyncCommit<'_>,
+    ) -> Result<(store::mailbox::SyncStateRecord, usize)> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
-        let message_ids_to_delete = message_ids_to_delete.to_vec();
+        let labels = commit.labels.to_vec();
+        let messages_to_upsert = commit.messages_to_upsert.to_vec();
+        let message_ids_to_delete = commit.message_ids_to_delete.to_vec();
+        let updated_at_epoch_s = commit.updated_at_epoch_s;
+        let sync_state_update = commit.sync_state_update.clone();
         spawn_blocking(move || {
-            store::mailbox::apply_incremental_changes(
+            store::mailbox::commit_incremental_sync(
                 &database_path,
                 busy_timeout_ms,
                 &account_id,
-                &messages_to_upsert,
-                &message_ids_to_delete,
-                updated_at_epoch_s,
+                &store::mailbox::IncrementalSyncCommit {
+                    labels: &labels,
+                    messages_to_upsert: &messages_to_upsert,
+                    message_ids_to_delete: &message_ids_to_delete,
+                    updated_at_epoch_s,
+                    sync_state_update: &sync_state_update,
+                },
             )
         })
         .await?

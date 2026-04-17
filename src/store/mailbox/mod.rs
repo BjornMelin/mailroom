@@ -12,10 +12,12 @@ pub(crate) use types::{
     SyncStateRecord, SyncStateUpdate, SyncStatus,
 };
 pub(crate) use write::{
-    apply_incremental_changes, replace_labels, replace_messages, upsert_sync_state,
+    IncrementalSyncCommit, commit_full_sync, commit_incremental_sync, upsert_sync_state,
 };
 #[cfg(test)]
-pub(crate) use write::{delete_messages, upsert_messages};
+pub(crate) use write::{
+    apply_incremental_changes, delete_messages, replace_labels, replace_messages, upsert_messages,
+};
 
 use std::collections::BTreeSet;
 

@@ -4,6 +4,7 @@ use crate::config::GmailConfig;
 use anyhow::{Context, Result};
 use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenUrl, basic::BasicClient};
 use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::time::Duration;
@@ -481,10 +482,11 @@ impl GmailClient {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
                     let status = response.status();
+                    let retry_delay = retry_delay_duration(response.headers(), retry_delay_ms);
                     let body = response.text().await.unwrap_or_default();
                     if is_retryable_status(status) && attempt + 1 < GMAIL_MAX_RETRY_ATTEMPTS {
-                        sleep(Duration::from_millis(retry_delay_ms)).await;
-                        retry_delay_ms *= 2;
+                        sleep(retry_delay).await;
+                        retry_delay_ms = duration_to_retry_delay_ms(retry_delay).saturating_mul(2);
                         continue;
                     }
 
@@ -610,6 +612,20 @@ fn is_retryable_status(status: StatusCode) -> bool {
 
 fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_timeout()
+}
+
+fn retry_delay_duration(headers: &HeaderMap, default_delay_ms: u64) -> Duration {
+    retry_after_delay(headers).unwrap_or_else(|| Duration::from_millis(default_delay_ms))
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let seconds = value.trim().parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+fn duration_to_retry_delay_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn header_value(headers: &[GmailHeader], name: &str) -> Option<String> {
@@ -744,10 +760,15 @@ fn build_gmail_http_client(config: &GmailConfig) -> Result<reqwest::Client> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GmailClient, GmailProfile, extract_email_address};
+    use super::{
+        GmailClient, GmailProfile, duration_to_retry_delay_ms, extract_email_address,
+        retry_after_delay,
+    };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::{GmailConfig, WorkspaceConfig};
+    use reqwest::header::HeaderMap;
     use secrecy::{ExposeSecret, SecretString};
+    use std::time::Duration;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -888,6 +909,76 @@ mod tests {
             refreshed.refresh_token.as_ref().unwrap().expose_secret(),
             "rotated-refresh-token"
         );
+    }
+
+    #[test]
+    fn retry_after_delay_reads_delta_seconds_header_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "7".parse().unwrap());
+
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn duration_to_retry_delay_ms_scales_seconds_to_millis() {
+        assert_eq!(duration_to_retry_delay_ms(Duration::from_secs(7)), 7_000);
+    }
+
+    #[tokio::test]
+    async fn list_labels_waits_for_retry_after_before_retrying_throttled_requests() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .append_header("Retry-After", "2")
+                    .set_body_string("slow down"),
+            )
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "labels": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = workspace_for(&temp_dir);
+        let store = FileCredentialStore::new(temp_dir.path().join("gmail-credentials.json"));
+        store
+            .save(&StoredCredentials {
+                account_id: String::from("gmail:operator@example.com"),
+                access_token: SecretString::from(String::from("access-token")),
+                refresh_token: Some(SecretString::from(String::from("refresh-token"))),
+                expires_at_epoch_s: Some(u64::MAX),
+                scopes: vec![String::from("scope:a")],
+            })
+            .unwrap();
+
+        let client = GmailClient::new(
+            GmailConfig {
+                client_id: Some(String::from("client-id")),
+                client_secret: None,
+                auth_url: format!("{}/oauth2/auth", mock_server.uri()),
+                token_url: format!("{}/oauth2/token", mock_server.uri()),
+                api_base_url: format!("{}/gmail/v1", mock_server.uri()),
+                listen_host: String::from("127.0.0.1"),
+                listen_port: 0,
+                open_browser: false,
+                request_timeout_secs: 30,
+                scopes: vec![String::from("scope:a")],
+            },
+            workspace,
+            store,
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(800), client.list_labels()).await;
+
+        assert!(result.is_err(), "client retried before Retry-After elapsed");
     }
 
     #[test]
