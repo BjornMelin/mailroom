@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS gmail_message_search;
+DROP TABLE IF EXISTS gmail_sync_state;
+DROP INDEX IF EXISTS gmail_message_labels_label_idx;
+DROP TABLE IF EXISTS gmail_message_labels;
+DROP INDEX IF EXISTS gmail_messages_account_from_address_idx;
+DROP INDEX IF EXISTS gmail_messages_account_thread_idx;
+DROP INDEX IF EXISTS gmail_messages_account_internal_date_idx;
+DROP TABLE IF EXISTS gmail_messages;
+DROP INDEX IF EXISTS gmail_labels_account_name_idx;
+DROP TABLE IF EXISTS gmail_labels;

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod doctor;
 mod gmail;
+mod mailbox;
 mod store;
 mod time;
 mod workspace;
@@ -11,7 +12,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     AccountCommand, AuthCommand, Cli, Commands, ConfigCommand, GmailCommand, GmailLabelsCommand,
-    StoreCommand, WorkspaceCommand,
+    SearchArgs, StoreCommand, SyncCommand, WorkspaceCommand,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -24,92 +25,149 @@ pub async fn run() -> Result<()> {
     let paths = workspace::WorkspacePaths::from_repo_root(repo_root);
 
     match cli.command {
-        Commands::Auth {
-            command:
-                AuthCommand::Setup {
-                    credentials_file,
-                    json,
-                    no_browser,
-                },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = auth::setup(&config_report, credentials_file, no_browser, json).await?;
-            report.print(json)?;
+        Commands::Auth { command } => handle_auth_command(&paths, command).await?,
+        Commands::Account { command } => handle_account_command(&paths, command).await?,
+        Commands::Config { command } => handle_config_command(&paths, command)?,
+        Commands::Paths { json } => paths.print(json)?,
+        Commands::Doctor { json } => handle_doctor_command(&paths, json)?,
+        Commands::Gmail { command } => handle_gmail_command(&paths, command).await?,
+        Commands::Roadmap => print_roadmap(),
+        Commands::Search(args) => handle_search_command(&paths, args).await?,
+        Commands::Sync { command } => handle_sync_command(&paths, command).await?,
+        Commands::Workspace { command } => handle_workspace_command(&paths, command)?,
+        Commands::Store { command } => handle_store_command(&paths, command)?,
+    }
+
+    Ok(())
+}
+
+async fn handle_auth_command(
+    paths: &workspace::WorkspacePaths,
+    command: AuthCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        AuthCommand::Setup {
+            credentials_file,
+            json,
+            no_browser,
+        } => auth::setup(&config_report, credentials_file, no_browser, json)
+            .await?
+            .print(json)?,
+        AuthCommand::Login { json, no_browser } => auth::login(&config_report, no_browser, json)
+            .await?
+            .print(json)?,
+        AuthCommand::Status { json } => auth::status(&config_report)?.print(json)?,
+        AuthCommand::Logout { json } => auth::logout(&config_report)?.print(json)?,
+    }
+
+    Ok(())
+}
+
+async fn handle_account_command(
+    paths: &workspace::WorkspacePaths,
+    command: AccountCommand,
+) -> Result<()> {
+    match command {
+        AccountCommand::Show { json } => {
+            refresh_active_account(&config::resolve(paths)?)
+                .await?
+                .print(json)?;
         }
-        Commands::Auth {
-            command: AuthCommand::Login { json, no_browser },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = auth::login(&config_report, no_browser, json).await?;
-            report.print(json)?;
+    }
+
+    Ok(())
+}
+
+fn handle_config_command(paths: &workspace::WorkspacePaths, command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Show { json } => config::resolve(paths)?.print(json)?,
+    }
+
+    Ok(())
+}
+
+fn handle_doctor_command(paths: &workspace::WorkspacePaths, json: bool) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+    let configured_paths = configured_paths(&config_report)?;
+    doctor::DoctorReport::inspect(&configured_paths, config_report)?.print(json)?;
+    Ok(())
+}
+
+async fn handle_gmail_command(
+    paths: &workspace::WorkspacePaths,
+    command: GmailCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        GmailCommand::Labels {
+            command: GmailLabelsCommand::List { json },
+        } => GmailLabelsReport {
+            labels: gmail_client(&config_report)?.list_labels().await?,
         }
-        Commands::Auth {
-            command: AuthCommand::Status { json },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = auth::status(&config_report)?;
-            report.print(json)?;
-        }
-        Commands::Auth {
-            command: AuthCommand::Logout { json },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = auth::logout(&config_report)?;
-            report.print(json)?;
-        }
-        Commands::Account {
-            command: AccountCommand::Show { json },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = refresh_active_account(&config_report).await?;
-            report.print(json)?;
-        }
-        Commands::Config {
-            command: ConfigCommand::Show { json },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            config_report.print(json)?;
-        }
-        Commands::Paths { json } => {
-            paths.print(json)?;
-        }
-        Commands::Doctor { json } => {
-            let config_report = config::resolve(&paths)?;
-            let configured_paths = workspace::WorkspacePaths::from_config(
-                paths.repo_root.clone(),
-                &config_report.config.workspace,
-            );
-            let report = doctor::DoctorReport::inspect(&configured_paths, config_report)?;
-            report.print(json)?;
-        }
-        Commands::Gmail {
-            command:
-                GmailCommand::Labels {
-                    command: GmailLabelsCommand::List { json },
-                },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = GmailLabelsReport {
-                labels: gmail_client(&config_report)?.list_labels().await?,
-            };
-            report.print(json)?;
-        }
-        Commands::Roadmap => {
-            println!(
-                "v1 milestone: search + triage + draft queue\n\
-                 docs: docs/roadmap/v1-search-triage-draft-queue.md\n\
-                 architecture: docs/architecture/system-overview.md\n\
-                 plugin-assisted ops: docs/operations/plugin-assisted-workflows.md"
-            );
-        }
-        Commands::Workspace {
-            command: WorkspaceCommand::Init,
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let configured_paths = workspace::WorkspacePaths::from_config(
-                paths.repo_root.clone(),
-                &config_report.config.workspace,
-            );
+        .print(json)?,
+    }
+
+    Ok(())
+}
+
+fn print_roadmap() {
+    println!(
+        "v1 milestone: search + triage + draft queue\n\
+         docs: docs/roadmap/v1-search-triage-draft-queue.md\n\
+         architecture: docs/architecture/system-overview.md\n\
+         plugin-assisted ops: docs/operations/plugin-assisted-workflows.md"
+    );
+}
+
+async fn handle_search_command(paths: &workspace::WorkspacePaths, args: SearchArgs) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+    mailbox::search(
+        &config_report,
+        mailbox::SearchRequest {
+            terms: args.terms,
+            label: args.label,
+            from_address: args.from_address,
+            after: args.after,
+            before: args.before,
+            limit: args.limit,
+        },
+    )
+    .await?
+    .print(args.json)?;
+
+    Ok(())
+}
+
+async fn handle_sync_command(
+    paths: &workspace::WorkspacePaths,
+    command: SyncCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        SyncCommand::Run {
+            full,
+            recent_days,
+            json,
+        } => mailbox::sync_run(&config_report, full, recent_days)
+            .await?
+            .print(json)?,
+    }
+
+    Ok(())
+}
+
+fn handle_workspace_command(
+    paths: &workspace::WorkspacePaths,
+    command: WorkspaceCommand,
+) -> Result<()> {
+    match command {
+        WorkspaceCommand::Init => {
+            let config_report = config::resolve(paths)?;
+            let configured_paths = configured_paths(&config_report)?;
             let created = configured_paths.ensure_runtime_dirs()?;
             println!(
                 "initialized {} new runtime paths under {}",
@@ -120,31 +178,33 @@ pub async fn run() -> Result<()> {
                 println!("{}", path.display());
             }
         }
-        Commands::Store {
-            command: StoreCommand::Init { json },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let configured_paths = workspace::WorkspacePaths::from_config(
-                paths.repo_root.clone(),
-                &config_report.config.workspace,
-            );
+    }
+
+    Ok(())
+}
+
+fn handle_store_command(paths: &workspace::WorkspacePaths, command: StoreCommand) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        StoreCommand::Init { json } => {
+            let configured_paths = configured_paths(&config_report)?;
             configured_paths.ensure_runtime_dirs()?;
-            let report = store::init(&config_report)?;
-            report.print(json)?;
+            store::init(&config_report)?.print(json)?;
         }
-        Commands::Store {
-            command: StoreCommand::Doctor { json },
-        } => {
-            let config_report = config::resolve(&paths)?;
-            let report = store::inspect(config_report)?;
-            report.print(json)?;
-        }
+        StoreCommand::Doctor { json } => store::inspect(config_report)?.print(json)?,
     }
 
     Ok(())
 }
 
 fn gmail_client(config_report: &config::ConfigReport) -> Result<gmail::GmailClient> {
+    gmail_client_for_config(config_report)
+}
+
+pub(crate) fn gmail_client_for_config(
+    config_report: &config::ConfigReport,
+) -> Result<gmail::GmailClient> {
     gmail::GmailClient::new(
         config_report.config.gmail.clone(),
         config_report.config.workspace.clone(),
@@ -157,16 +217,26 @@ fn gmail_client(config_report: &config::ConfigReport) -> Result<gmail::GmailClie
     )
 }
 
-async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<AccountShowReport> {
+pub(crate) fn configured_paths(
+    config_report: &config::ConfigReport,
+) -> Result<workspace::WorkspacePaths> {
     let repo_root =
         workspace::configured_repo_root_from_locations(&config_report.locations.repo_config_path)?;
-    let configured_paths =
-        workspace::WorkspacePaths::from_config(repo_root, &config_report.config.workspace);
-    let gmail_client = gmail_client(config_report)?;
+    Ok(workspace::WorkspacePaths::from_config(
+        repo_root,
+        &config_report.config.workspace,
+    ))
+}
+
+pub(crate) async fn refresh_active_account_record(
+    config_report: &config::ConfigReport,
+) -> Result<store::accounts::AccountRecord> {
+    let configured_paths = configured_paths(config_report)?;
+    let gmail_client = gmail_client_for_config(config_report)?;
     let (profile, access_scope) = gmail_client.get_profile_with_access_scope().await?;
     configured_paths.ensure_runtime_dirs()?;
     store::init(config_report)?;
-    let account = store::accounts::upsert_active(
+    store::accounts::upsert_active(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         &store::accounts::UpsertAccountInput {
@@ -177,7 +247,11 @@ async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<
             access_scope,
             refreshed_at_epoch_s: current_epoch_seconds()?,
         },
-    )?;
+    )
+}
+
+async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<AccountShowReport> {
+    let account = refresh_active_account_record(config_report).await?;
 
     Ok(AccountShowReport { account })
 }

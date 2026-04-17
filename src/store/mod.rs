@@ -1,5 +1,6 @@
 pub mod accounts;
 mod connection;
+pub mod mailbox;
 mod migrations;
 
 use crate::config::ConfigReport;
@@ -30,6 +31,7 @@ pub struct StoreDoctorReport {
     pub schema_version: Option<i64>,
     pub pending_migrations: Option<usize>,
     pub pragmas: Option<StorePragmas>,
+    pub mailbox: Option<mailbox::MailboxDoctorReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +105,40 @@ impl StoreDoctorReport {
             if let Some(pragmas) = &self.pragmas {
                 print_pragmas(pragmas);
             }
+            if let Some(mailbox) = &self.mailbox {
+                println!("mailbox_message_count={}", mailbox.message_count);
+                println!("mailbox_label_count={}", mailbox.label_count);
+                println!(
+                    "mailbox_indexed_message_count={}",
+                    mailbox.indexed_message_count
+                );
+                match &mailbox.sync_state {
+                    Some(sync_state) => {
+                        println!("mailbox_sync_status={}", sync_state.last_sync_status);
+                        println!("mailbox_sync_mode={}", sync_state.last_sync_mode);
+                        println!("mailbox_sync_epoch_s={}", sync_state.last_sync_epoch_s);
+                        match sync_state.last_full_sync_success_epoch_s {
+                            Some(epoch) => {
+                                println!("mailbox_last_full_sync_success_epoch_s={epoch}")
+                            }
+                            None => println!("mailbox_last_full_sync_success_epoch_s=<none>"),
+                        }
+                        match sync_state.last_incremental_sync_success_epoch_s {
+                            Some(epoch) => {
+                                println!("mailbox_last_incremental_sync_success_epoch_s={epoch}")
+                            }
+                            None => {
+                                println!("mailbox_last_incremental_sync_success_epoch_s=<none>")
+                            }
+                        }
+                        match &sync_state.cursor_history_id {
+                            Some(history_id) => println!("mailbox_cursor_history_id={history_id}"),
+                            None => println!("mailbox_cursor_history_id=<none>"),
+                        }
+                    }
+                    None => println!("mailbox_sync_status=<never-run>"),
+                }
+            }
         }
 
         Ok(())
@@ -152,6 +188,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
             schema_version: None,
             pending_migrations: None,
             pragmas: None,
+            mailbox: None,
         });
     }
 
@@ -161,6 +198,8 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
     )?;
     let pragmas = read_pragmas(&connection)?;
     let pending_migrations = pending_migrations(known_migrations, pragmas.user_version)?;
+    let mailbox =
+        mailbox::inspect_mailbox(&database_path, config_report.config.store.busy_timeout_ms)?;
 
     Ok(StoreDoctorReport {
         config: config_report,
@@ -170,6 +209,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
         schema_version: Some(pragmas.user_version),
         pending_migrations: Some(pending_migrations),
         pragmas: Some(pragmas),
+        mailbox,
     })
 }
 
@@ -291,7 +331,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.schema_version, 3);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -299,12 +339,19 @@ mod tests {
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
                  WHERE type = 'table'
-                   AND name IN ('app_metadata', 'accounts')",
+                   AND name IN (
+                       'app_metadata',
+                       'accounts',
+                       'gmail_labels',
+                       'gmail_messages',
+                       'gmail_message_labels',
+                       'gmail_sync_state'
+                   )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 2);
+        assert_eq!(substrate_tables, 6);
 
         fs::remove_dir_all(repo_root).unwrap();
     }

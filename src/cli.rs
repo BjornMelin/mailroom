@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -44,6 +44,13 @@ pub enum Commands {
     },
     /// Show the current milestone and key docs
     Roadmap,
+    /// Search the local mailbox index
+    Search(SearchArgs),
+    /// Synchronize mailbox metadata into the local index
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
     /// Manage the repo-local runtime workspace
     Workspace {
         #[command(subcommand)]
@@ -118,6 +125,46 @@ pub enum AccountCommand {
 pub enum ConfigCommand {
     /// Print resolved configuration and source locations
     Show {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Full-text terms to match against the local mailbox index
+    pub terms: String,
+    /// Restrict matches to a specific Gmail label name
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Restrict matches to an exact sender email address
+    #[arg(long = "from")]
+    pub from_address: Option<String>,
+    /// Restrict matches to messages on or after this UTC date (YYYY-MM-DD)
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Restrict matches to messages before this UTC date (YYYY-MM-DD)
+    #[arg(long)]
+    pub before: Option<String>,
+    /// Maximum number of search hits to return
+    #[arg(long, default_value_t = crate::mailbox::DEFAULT_SEARCH_LIMIT)]
+    pub limit: usize,
+    /// Emit JSON instead of plain text
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncCommand {
+    /// Run a one-shot mailbox sync into the local metadata index
+    Run {
+        /// Force a full recent-window resync instead of using the stored history cursor
+        #[arg(long)]
+        full: bool,
+        /// Recent-window size in days for full bootstrap syncs
+        #[arg(long, default_value_t = crate::mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS)]
+        recent_days: u32,
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,
