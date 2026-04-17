@@ -25,11 +25,14 @@ pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Res
     if terms.is_empty() {
         return Err(anyhow!("search terms cannot be empty"));
     }
+    let limit = request.limit;
+    if limit == 0 {
+        return Err(anyhow!("search limit must be greater than zero"));
+    }
     let report_terms = terms.clone();
     let account_id = resolve_search_account_id(config_report)?;
     let label = request.label.clone();
     let from_address = request.from_address.clone();
-    let limit = request.limit;
     let results = spawn_blocking(move || {
         store::mailbox::search_messages(
             &database_path,

@@ -82,7 +82,7 @@ pub async fn sync_run(
                             &store_handle,
                             &gmail_client,
                             &account,
-                            &bootstrap_query,
+                            persisted_bootstrap_query,
                             &label_names_by_id,
                             labels_synced,
                             true,

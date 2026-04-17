@@ -73,6 +73,29 @@ async fn search_rejects_whitespace_only_terms() {
 }
 
 #[tokio::test]
+async fn search_rejects_zero_limit_before_account_resolution() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+    let config_report = resolve(&paths).unwrap();
+
+    let error = search(
+        &config_report,
+        SearchRequest {
+            terms: String::from("alpha"),
+            label: None,
+            from_address: None,
+            after: None,
+            before: None,
+            limit: 0,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "search limit must be greater than zero");
+}
+
+#[tokio::test]
 async fn search_before_date_excludes_that_day() {
     let temp_dir = TempDir::new().unwrap();
     let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
@@ -460,6 +483,62 @@ async fn stale_history_failure_clears_cursor_before_retrying_full_sync() {
     assert_eq!(report.mode, store::mailbox::SyncMode::Full);
     assert!(!report.fallback_from_history);
     assert_eq!(report.cursor_history_id, "700");
+}
+
+#[tokio::test]
+async fn stale_history_retry_keeps_persisted_bootstrap_query() {
+    let stale_server = MockServer::start().await;
+    mount_profile(&stale_server, "350").await;
+    mount_labels(&stale_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/history"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": {
+                "code": 404,
+                "message": "Requested entity was not found.",
+                "status": "NOT_FOUND"
+            }
+        })))
+        .mount(&stale_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("q", "newer_than:7d"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-recovered", "threadId": "t-recovered"}],
+            "resultSizeEstimate": 1
+        })))
+        .mount(&stale_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("q", "newer_than:90d"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_string("stale-history retry widened bootstrap query"),
+        )
+        .mount(&stale_server)
+        .await;
+    mount_message_metadata(&stale_server, "m-recovered", "650", "Recovered message").await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &stale_server);
+    seed_credentials(&config_report);
+    seed_existing_mailbox_with_bootstrap_query(
+        &config_report,
+        "250",
+        "cached-1",
+        "Existing cached message",
+        "newer_than:7d",
+    );
+
+    let report = sync_run(&config_report, false, 90).await.unwrap();
+
+    assert_eq!(report.mode, store::mailbox::SyncMode::Full);
+    assert!(report.fallback_from_history);
+    assert_eq!(report.bootstrap_query, "newer_than:7d");
+    assert_eq!(report.messages_upserted, 1);
+    assert_eq!(report.cursor_history_id, "650");
 }
 
 #[tokio::test]

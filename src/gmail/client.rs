@@ -673,7 +673,11 @@ fn extract_email_address(value: &str) -> Option<String> {
         let display_name = value[..open_index].trim();
         let candidate = value[open_index + 1..close_index].trim();
         let suffix = value[close_index + 1..].trim();
-        if display_name.is_empty() || !suffix.is_empty() {
+        if !suffix.is_empty() {
+            return None;
+        }
+
+        if display_name.is_empty() && matches!(candidate.chars().next(), Some('"')) {
             return None;
         }
 
@@ -907,6 +911,10 @@ mod tests {
         assert_eq!(
             extract_email_address("bob@example.com"),
             Some(String::from("bob@example.com"))
+        );
+        assert_eq!(
+            extract_email_address("<alerts@example.com>"),
+            Some(String::from("alerts@example.com"))
         );
     }
 
