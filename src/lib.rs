@@ -28,7 +28,10 @@ pub async fn run() -> Result<()> {
         Commands::Auth { command } => handle_auth_command(&paths, command).await?,
         Commands::Account { command } => handle_account_command(&paths, command).await?,
         Commands::Config { command } => handle_config_command(&paths, command)?,
-        Commands::Paths { json } => paths.print(json)?,
+        Commands::Paths { json } => {
+            let config_report = config::resolve(&paths)?;
+            configured_paths(&config_report)?.print(json)?;
+        }
         Commands::Doctor { json } => handle_doctor_command(&paths, json)?,
         Commands::Gmail { command } => handle_gmail_command(&paths, command).await?,
         Commands::Roadmap => print_roadmap(),

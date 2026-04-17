@@ -6,7 +6,6 @@ use anyhow::{Result, anyhow};
 use tokio::task::spawn_blocking;
 
 pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Result<SearchReport> {
-    let account_id = resolve_search_account_id(config_report)?;
     store::init(config_report)?;
 
     let after_epoch_ms = request
@@ -23,6 +22,11 @@ pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Res
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let terms = request.terms.trim().to_owned();
+    if terms.is_empty() {
+        return Err(anyhow!("search terms cannot be empty"));
+    }
+    let report_terms = terms.clone();
+    let account_id = resolve_search_account_id(config_report)?;
     let label = request.label.clone();
     let from_address = request.from_address.clone();
     let limit = request.limit;
@@ -44,7 +48,7 @@ pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Res
     .await??;
 
     Ok(SearchReport {
-        terms: request.terms,
+        terms: report_terms,
         label: request.label,
         from_address: request.from_address,
         after_epoch_ms,

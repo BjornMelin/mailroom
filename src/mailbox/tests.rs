@@ -20,6 +20,8 @@ fn parses_yyyy_mm_dd_date_bounds() {
         parse_start_of_day_epoch_ms("1970-01-02").unwrap(),
         86_400_000
     );
+    assert!(parse_start_of_day_epoch_ms("1970-1-01").is_err());
+    assert!(parse_start_of_day_epoch_ms("12345-01-01").is_err());
     assert!(parse_start_of_day_epoch_ms("1970-13-01").is_err());
 }
 
@@ -43,6 +45,31 @@ fn search_request_default_limit_is_nonzero() {
     };
 
     assert!(request.limit > 0);
+}
+
+#[tokio::test]
+async fn search_rejects_whitespace_only_terms() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    store::init(&config_report).unwrap();
+
+    let error = search(
+        &config_report,
+        SearchRequest {
+            terms: String::from("   "),
+            label: None,
+            from_address: None,
+            after: None,
+            before: None,
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("search terms cannot be empty"));
 }
 
 #[tokio::test]
@@ -139,7 +166,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
 }
 
 #[tokio::test]
-async fn search_without_active_account_does_not_create_runtime_state() {
+async fn search_without_active_account_initializes_store_before_failing() {
     let temp_dir = TempDir::new().unwrap();
     let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
     let config_report = resolve(&paths).unwrap();
@@ -162,8 +189,8 @@ async fn search_without_active_account_does_not_create_runtime_state() {
         error.to_string(),
         "no active Gmail account found; run `mailroom auth login` first"
     );
-    assert!(!config_report.config.store.database_path.exists());
-    assert!(!config_report.config.workspace.runtime_root.exists());
+    assert!(config_report.config.store.database_path.exists());
+    assert!(config_report.config.workspace.runtime_root.exists());
 }
 
 #[tokio::test]

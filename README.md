@@ -115,8 +115,8 @@ Advanced manual overrides still work:
 
 ## Near-term build plan
 
-1. Add triage state and durable workflow queues on top of the synced message store.
-2. Add draft/reply queue records and operator notes.
+1. Introduce triage state and durable workflow queues on top of the synced message store.
+2. Implement draft/reply queue records and operator notes.
 3. Add attachment catalog and intentional export flows.
-4. Add safe reviewed mailbox mutations such as archive, label, and trash.
-5. Add a TUI over the native command core.
+4. Provide safe reviewed mailbox mutations such as archive, label, and trash.
+5. Build a TUI over the native command core.

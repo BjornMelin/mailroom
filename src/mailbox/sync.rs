@@ -361,11 +361,7 @@ async fn persist_sync_state_failure(
 }
 
 fn preserve_sync_error(sync_error: anyhow::Error, persist_result: Result<()>) -> anyhow::Error {
-    if let Err(persist_error) = persist_result {
-        eprintln!(
-            "mailroom: failed to persist mailbox sync failure state: sync_error={sync_error:#}; persist_error={persist_error:#}"
-        );
-    }
+    let _ = persist_result;
     sync_error
 }
 

@@ -47,12 +47,12 @@ impl SearchReport {
     }
 
     fn render_plain(&self) -> String {
-        let mut lines = vec![format!("terms={}", self.terms)];
+        let mut lines = vec![format!("terms={}", sanitize_plain_field(&self.terms))];
         if let Some(label) = &self.label {
-            lines.push(format!("label={label}"));
+            lines.push(format!("label={}", sanitize_plain_field(label)));
         }
         if let Some(from_address) = &self.from_address {
-            lines.push(format!("from={from_address}"));
+            lines.push(format!("from={}", sanitize_plain_field(from_address)));
         }
         if let Some(after_epoch_ms) = self.after_epoch_ms {
             lines.push(format!("after_epoch_ms={after_epoch_ms}"));
@@ -79,6 +79,10 @@ impl SearchReport {
 }
 
 fn sanitize_tsv_field(value: &str) -> String {
+    sanitize_plain_field(value)
+}
+
+fn sanitize_plain_field(value: &str) -> String {
     value
         .chars()
         .map(|character| match character {
@@ -131,9 +135,9 @@ mod tests {
     #[test]
     fn render_plain_search_report_sanitizes_tsv_control_characters() {
         let report = SearchReport {
-            terms: String::from("alpha"),
-            label: None,
-            from_address: None,
+            terms: String::from("al\tpha\n"),
+            label: Some(String::from("INBOX\r")),
+            from_address: Some(String::from("alice@example.com\n")),
             after_epoch_ms: None,
             before_epoch_ms: None,
             limit: 1,
@@ -154,8 +158,10 @@ mod tests {
 
         let rendered = report.render_plain();
 
-        assert!(!rendered.contains('\r'));
-        assert_eq!(rendered.lines().count(), 5);
+        assert!(rendered.contains("terms=al pha "));
+        assert!(rendered.contains("label=INBOX "));
+        assert!(rendered.contains("from=alice@example.com "));
+        assert_eq!(rendered.lines().count(), 7);
         assert!(rendered.contains("m- 1\t123\tAlice  Example <alice@example.com>\tAlpha launch"));
     }
 }

@@ -65,26 +65,33 @@ pub(crate) fn is_stale_history_error(error: &anyhow::Error) -> bool {
 
 pub(crate) fn parse_start_of_day_epoch_ms(value: &str) -> Result<i64> {
     let (year, month, day) = parse_yyyy_mm_dd(value)?;
-    Ok(days_from_civil(year, month, day) * 86_400_000)
+    days_from_civil(year, month, day)
+        .checked_mul(86_400_000)
+        .ok_or_else(|| anyhow!("date `{value}` is out of range"))
 }
 
 fn parse_yyyy_mm_dd(value: &str) -> Result<(i64, u32, u32)> {
     let mut parts = value.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| anyhow!("date `{value}` must be in YYYY-MM-DD format"))?
-        .parse::<i64>()?;
+        .ok_or_else(|| anyhow!("date `{value}` must be in YYYY-MM-DD format"))?;
     let month = parts
         .next()
-        .ok_or_else(|| anyhow!("date `{value}` must be in YYYY-MM-DD format"))?
-        .parse::<u32>()?;
+        .ok_or_else(|| anyhow!("date `{value}` must be in YYYY-MM-DD format"))?;
     let day = parts
         .next()
-        .ok_or_else(|| anyhow!("date `{value}` must be in YYYY-MM-DD format"))?
-        .parse::<u32>()?;
-    if parts.next().is_some() {
+        .ok_or_else(|| anyhow!("date `{value}` must be in YYYY-MM-DD format"))?;
+    if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
         return Err(anyhow!("date `{value}` must be in YYYY-MM-DD format"));
     }
+
+    let year = year.parse::<i64>()?;
+    if !(0..=9999).contains(&year) {
+        return Err(anyhow!("date `{value}` has an invalid year"));
+    }
+
+    let month = month.parse::<u32>()?;
+    let day = day.parse::<u32>()?;
     if !(1..=12).contains(&month) {
         return Err(anyhow!("date `{value}` has an invalid month"));
     }
