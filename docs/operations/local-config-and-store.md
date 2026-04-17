@@ -92,6 +92,7 @@ This command:
 - applies embedded SQL migrations through `rusqlite_migration`
 - hardens the database connection defaults
 - reports schema version, migration counts, and active pragma values
+- creates mailbox sync/search tables once the current migration set is applied
 
 Inspect store state without creating the database with:
 
@@ -102,6 +103,17 @@ cargo run -- store doctor --json
 `store doctor` opens an existing database read-only, applies the non-persistent
 connection hardening settings used by `store init`, and reports the effective
 pragma state without rewriting persisted database settings.
+
+When mailbox sync has run at least once, `doctor` and `store doctor` also
+report:
+
+- mailbox message count
+- label count
+- indexed message count
+- latest stored sync cursor and status
+- last attempted sync epoch
+- last successful full-sync epoch
+- last successful incremental-sync epoch
 
 ## Hardening defaults
 
@@ -134,3 +146,11 @@ directory loading rules:
 
 `build.rs` marks `migrations/` as a rebuild trigger so embedded migration state
 stays current when SQL files change.
+
+The current mailbox-oriented schema adds:
+
+- `gmail_messages`
+- `gmail_labels`
+- `gmail_message_labels`
+- `gmail_sync_state`
+- `gmail_message_search`

@@ -22,8 +22,10 @@ The native Rust core owns:
 - Gmail OAuth login, credential persistence, and token refresh
 - active account verification against Gmail profile data
 - live label reads used for operator inspection and future sync validation
+- mailbox metadata sync and cursor management
 - mailbox state modeling
-- search, triage, and draft queue workflows
+- local search over synced mailbox state
+- future triage and draft queue workflows
 - structured CLI output
 
 ### TUI layer
@@ -34,7 +36,7 @@ The TUI should be a thin operator shell over the native core. It must not create
 
 Codex Gmail and GitHub capabilities remain useful for:
 
-- live mailbox inspection before native sync tooling is complete
+- live mailbox inspection beyond the current native metadata surface
 - reply drafting and thread understanding
 - repo and PR workflows
 - comparing native behavior against a known-good operator loop
@@ -66,14 +68,22 @@ The current native substrate is intentionally narrow but now usable:
 - repo-local credential storage under `.mailroom/auth/`
 - active account persistence in SQLite
 - live Gmail profile and label inspection through the native client
+- one-shot mailbox sync over Gmail message metadata and history replay
+- local SQLite FTS5 search over metadata and snippet text
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
 This substrate exists to support later search, sync, triage, and draft
 workflows without inventing a second config, auth, or storage path later.
 
+Detailed sync/search ownership, including the “last attempt” versus “last successful
+full or incremental sync” contract, is defined in
+`docs/decisions/0003-message-canonical-sync.md` and
+`docs/operations/mailbox-sync-and-search.md`.
+
 ## Non-goals for v1
 
 - full mailbox mirroring by default
+- full body and MIME indexing in the first native search slice
 - immediate unsubscribe automation as the primary feature
 - external search infrastructure
 - shared multi-user collaboration

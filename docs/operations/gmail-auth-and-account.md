@@ -13,8 +13,9 @@ The current native flow owns:
 - live profile verification
 - live label reads
 
-It does not yet own full mailbox sync, search indexing, or destructive mailbox
-operations.
+It owns authentication and live Gmail reads that feed the native mailbox sync
+and local search commands.
+It does not own triage queues, draft queues, or destructive mailbox operations.
 
 ## Required config
 

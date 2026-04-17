@@ -17,7 +17,8 @@ Deliver the first complete operational slice:
 - SQLite schema ownership
 - SQLite bootstrap and diagnostics
 - mailbox/account modeling
-- search primitives
+- mailbox metadata sync
+- local search primitives
 - triage queues and status tracking
 - draft queue records and operator notes
 - plugin-assisted operator documentation
@@ -34,8 +35,10 @@ The substrate layer is in place:
 - repo-local Gmail credential storage under `.mailroom/auth/`
 - active account persistence from `users.getProfile`
 - native Gmail label reads for live mailbox verification
+- one-shot mailbox sync with recent-window bootstrap and incremental history replay
+- local SQLite FTS5 search over subject, sender, recipients, snippet, and labels
 
-The next implementation slice should start at search primitives and mailbox sync/update flows, not re-open auth, account, config, or store ownership.
+The next implementation slice should start at triage queues and durable follow-up state, not re-open auth, account, config, store, or mailbox sync ownership.
 
 ## Deferred
 
@@ -48,4 +51,4 @@ The next implementation slice should start at search primitives and mailbox sync
 
 ## Success condition
 
-An operator can set up the workspace, inspect mailbox-derived state, search it quickly, classify work for follow-up, and stage reply/draft actions in a durable local system.
+An operator can set up the workspace, sync mailbox metadata locally, search it quickly, classify work for follow-up, and stage reply/draft actions in a durable local system.
