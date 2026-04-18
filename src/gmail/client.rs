@@ -73,7 +73,7 @@ pub(crate) struct GmailMessageListPage {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct GmailMessageListItem {
+pub(crate) struct GmailMessageListItem {
     pub id: String,
     #[serde(rename = "threadId")]
     pub thread_id: String,
