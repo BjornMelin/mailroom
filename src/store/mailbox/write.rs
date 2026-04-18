@@ -59,7 +59,8 @@ pub(crate) fn commit_full_sync(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
 
-    replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
+    let _should_reindex_search =
+        replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
     delete_account_messages(&transaction, account_id)?;
     write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
     let record = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
@@ -77,7 +78,7 @@ pub(crate) fn commit_incremental_sync(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
 
-    replace_labels_in_transaction(
+    let should_reindex_search = replace_labels_in_transaction(
         &transaction,
         account_id,
         commit.labels,
@@ -91,6 +92,9 @@ pub(crate) fn commit_incremental_sync(
         commit.messages_to_upsert,
         commit.updated_at_epoch_s,
     )?;
+    if should_reindex_search {
+        reindex_message_search_for_account(&transaction, account_id)?;
+    }
     let record = upsert_sync_state_in_transaction(&transaction, commit.sync_state_update)?;
 
     transaction.commit()?;
@@ -292,9 +296,6 @@ fn replace_labels_in_transaction(
     }
 
     drop(insert);
-    if should_reindex_search {
-        reindex_message_search_for_account(transaction, account_id)?;
-    }
     Ok(should_reindex_search)
 }
 

@@ -1,7 +1,8 @@
 use super::{
-    GmailMessageUpsertInput, SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, get_sync_state,
-    inspect_mailbox, replace_labels, replace_labels_and_report_reindex, replace_messages,
-    search::build_plain_fts5_query, search_messages, upsert_messages, upsert_sync_state,
+    GmailMessageUpsertInput, IncrementalSyncCommit, SearchQuery, SyncMode, SyncStateUpdate,
+    SyncStatus, commit_incremental_sync, get_sync_state, inspect_mailbox, replace_labels,
+    replace_labels_and_report_reindex, replace_messages, search::build_plain_fts5_query,
+    search_messages, upsert_messages, upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -261,15 +262,30 @@ fn replace_labels_reindexes_search_label_names() {
     )
     .unwrap();
 
-    replace_labels(
+    commit_incremental_sync(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         "gmail:operator@example.com",
-        &[
-            gmail_label("INBOX", "INBOX", "system"),
-            gmail_label("Label_1", "ProjectBeta", "user"),
-        ],
-        121,
+        &IncrementalSyncCommit {
+            labels: &[
+                gmail_label("INBOX", "INBOX", "system"),
+                gmail_label("Label_1", "ProjectBeta", "user"),
+            ],
+            messages_to_upsert: &[],
+            message_ids_to_delete: &[],
+            updated_at_epoch_s: 121,
+            sync_state_update: &SyncStateUpdate {
+                account_id: String::from("gmail:operator@example.com"),
+                cursor_history_id: Some(String::from("121")),
+                bootstrap_query: String::from("newer_than:90d"),
+                last_sync_mode: SyncMode::Incremental,
+                last_sync_status: SyncStatus::Ok,
+                last_error: None,
+                last_sync_epoch_s: 121,
+                last_full_sync_success_epoch_s: None,
+                last_incremental_sync_success_epoch_s: Some(121),
+            },
+        },
     )
     .unwrap();
 
