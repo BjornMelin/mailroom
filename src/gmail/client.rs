@@ -7,7 +7,7 @@ use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::time::sleep;
 
@@ -468,8 +468,10 @@ impl GmailClient {
             path
         );
         let mut retry_delay_ms = GMAIL_INITIAL_RETRY_DELAY_MS;
+        let mut attempt = 0usize;
 
-        for attempt in 0..GMAIL_MAX_RETRY_ATTEMPTS {
+        loop {
+            attempt += 1;
             let response = self
                 .http
                 .get(&url)
@@ -484,7 +486,7 @@ impl GmailClient {
                     let status = response.status();
                     let retry_delay = retry_delay_duration(response.headers(), retry_delay_ms);
                     let body = response.text().await.unwrap_or_default();
-                    if is_retryable_status(status) && attempt + 1 < GMAIL_MAX_RETRY_ATTEMPTS {
+                    if is_retryable_status(status) && attempt < GMAIL_MAX_RETRY_ATTEMPTS {
                         sleep(retry_delay).await;
                         retry_delay_ms = duration_to_retry_delay_ms(retry_delay).saturating_mul(2);
                         continue;
@@ -498,9 +500,7 @@ impl GmailClient {
                     .into());
                 }
                 Err(error) => {
-                    if is_retryable_transport_error(&error)
-                        && attempt + 1 < GMAIL_MAX_RETRY_ATTEMPTS
-                    {
+                    if is_retryable_transport_error(&error) && attempt < GMAIL_MAX_RETRY_ATTEMPTS {
                         sleep(Duration::from_millis(retry_delay_ms)).await;
                         retry_delay_ms *= 2;
                         continue;
@@ -511,10 +511,6 @@ impl GmailClient {
                 }
             }
         }
-
-        Err(anyhow::anyhow!(
-            "exhausted retry attempts for Gmail API path {path}"
-        ))
     }
 }
 
@@ -620,8 +616,17 @@ fn retry_delay_duration(headers: &HeaderMap, default_delay_ms: u64) -> Duration 
 
 fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    let seconds = value.trim().parse::<u64>().ok()?;
-    Some(Duration::from_secs(seconds))
+    let value = value.trim();
+
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    match retry_at.duration_since(SystemTime::now()) {
+        Ok(duration) => Some(duration),
+        Err(_) => Some(Duration::ZERO),
+    }
 }
 
 fn duration_to_retry_delay_ms(duration: Duration) -> u64 {
@@ -708,9 +713,7 @@ fn extract_email_address(value: &str) -> Option<String> {
 }
 
 fn normalize_email_candidate(candidate: &str) -> Option<String> {
-    let candidate = candidate
-        .trim()
-        .trim_matches(|character: char| matches!(character, '"' | '\''));
+    let candidate = candidate.trim().trim_matches('"');
     if candidate.is_empty()
         || candidate.contains(char::is_whitespace)
         || candidate.matches('@').count() != 1
@@ -768,7 +771,7 @@ mod tests {
     use crate::config::{GmailConfig, WorkspaceConfig};
     use reqwest::header::HeaderMap;
     use secrecy::{ExposeSecret, SecretString};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -920,6 +923,20 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_delay_reads_http_date_header_values() {
+        let mut headers = HeaderMap::new();
+        let retry_at = SystemTime::now() + Duration::from_secs(2);
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            httpdate::fmt_http_date(retry_at).parse().unwrap(),
+        );
+
+        let delay = retry_after_delay(&headers).unwrap();
+        assert!(delay <= Duration::from_secs(2));
+        assert!(delay >= Duration::from_secs(1));
+    }
+
+    #[test]
     fn duration_to_retry_delay_ms_scales_seconds_to_millis() {
         assert_eq!(duration_to_retry_delay_ms(Duration::from_secs(7)), 7_000);
     }
@@ -1002,6 +1019,10 @@ mod tests {
         assert_eq!(
             extract_email_address("<alerts@example.com>"),
             Some(String::from("alerts@example.com"))
+        );
+        assert_eq!(
+            extract_email_address("\"o'hara@example.com\""),
+            Some(String::from("o'hara@example.com"))
         );
     }
 

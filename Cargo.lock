@@ -1137,6 +1137,7 @@ dependencies = [
  "dialoguer",
  "directories",
  "figment",
+ "httpdate",
  "include_dir",
  "oauth2",
  "reqwest",

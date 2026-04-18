@@ -9,6 +9,7 @@ clap = { version = "4.5.39", features = ["derive", "wrap_help"] }
 dialoguer = "0.12.0"
 directories = "6.0.0"
 figment = { version = "0.10.19", features = ["env", "toml"] }
+httpdate = "1.0.3"
 include_dir = "0.7.4"
 oauth2 = { version = "5.0.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["gzip", "json", "rustls-tls"] }
