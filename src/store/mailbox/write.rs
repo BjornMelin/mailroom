@@ -31,6 +31,22 @@ pub(crate) fn replace_labels(
     Ok(labels.len())
 }
 
+#[cfg(test)]
+pub(crate) fn replace_labels_and_report_reindex(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    labels: &[GmailLabel],
+    updated_at_epoch_s: i64,
+) -> Result<bool> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let transaction = connection.transaction()?;
+    let reindexed =
+        replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
+    transaction.commit()?;
+    Ok(reindexed)
+}
+
 pub(crate) fn commit_full_sync(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -235,7 +251,8 @@ fn replace_labels_in_transaction(
     account_id: &str,
     labels: &[GmailLabel],
     updated_at_epoch_s: i64,
-) -> Result<usize> {
+) -> Result<bool> {
+    let should_reindex_search = label_names_changed(transaction, account_id, labels)?;
     transaction.execute(
         "DELETE FROM gmail_labels WHERE account_id = ?1",
         [account_id],
@@ -275,8 +292,36 @@ fn replace_labels_in_transaction(
     }
 
     drop(insert);
-    reindex_message_search_for_account(transaction, account_id)?;
-    Ok(labels.len())
+    if should_reindex_search {
+        reindex_message_search_for_account(transaction, account_id)?;
+    }
+    Ok(should_reindex_search)
+}
+
+fn label_names_changed(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    labels: &[GmailLabel],
+) -> Result<bool> {
+    let existing_labels = {
+        let mut query = transaction.prepare_cached(
+            "SELECT label_id, name
+             FROM gmail_labels
+             WHERE account_id = ?1
+             ORDER BY label_id, name",
+        )?;
+        query
+            .query_map([account_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()?
+    };
+
+    let mut next_labels = labels
+        .iter()
+        .map(|label| (label.id.clone(), label.name.clone()))
+        .collect::<Vec<_>>();
+    next_labels.sort_unstable();
+
+    Ok(existing_labels != next_labels)
 }
 
 fn upsert_sync_state_in_transaction(

@@ -1,7 +1,7 @@
 use super::{
     GmailMessageUpsertInput, SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, get_sync_state,
-    inspect_mailbox, replace_labels, replace_messages, search::build_plain_fts5_query,
-    search_messages, upsert_messages, upsert_sync_state,
+    inspect_mailbox, replace_labels, replace_labels_and_report_reindex, replace_messages,
+    search::build_plain_fts5_query, search_messages, upsert_messages, upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -290,6 +290,102 @@ fn replace_labels_reindexes_search_label_names() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].label_names, vec!["INBOX", "ProjectBeta"]);
+}
+
+#[test]
+fn replace_labels_skips_search_reindex_when_label_names_are_unchanged() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-label-refresh");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("120"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 120,
+        },
+    )
+    .unwrap();
+
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[
+            gmail_label("INBOX", "INBOX", "system"),
+            gmail_label("Label_1", "ProjectAlpha", "user"),
+        ],
+        120,
+    )
+    .unwrap();
+
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("121"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Mailbox cleanup plan"),
+            subject: String::from("Cleanup"),
+            from_header: String::from("Alice <alice@example.com>"),
+            from_address: Some(String::from("alice@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX"), String::from("Label_1")],
+            label_names_text: String::from("INBOX ProjectAlpha"),
+        }],
+        120,
+    )
+    .unwrap();
+
+    let mut inbox = gmail_label("INBOX", "INBOX", "system");
+    inbox.messages_total = Some(99);
+    inbox.messages_unread = Some(5);
+    let mut project = gmail_label("Label_1", "ProjectAlpha", "user");
+    project.messages_total = Some(42);
+    project.messages_unread = Some(2);
+
+    let reindexed = replace_labels_and_report_reindex(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[inbox, project],
+        121,
+    )
+    .unwrap();
+
+    assert!(!reindexed);
+
+    let results = search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("ProjectAlpha"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label_names, vec!["INBOX", "ProjectAlpha"]);
 }
 
 #[test]

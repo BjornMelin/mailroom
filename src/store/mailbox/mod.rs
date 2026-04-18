@@ -16,7 +16,8 @@ pub(crate) use write::{
 };
 #[cfg(test)]
 pub(crate) use write::{
-    apply_incremental_changes, delete_messages, replace_labels, replace_messages, upsert_messages,
+    apply_incremental_changes, delete_messages, replace_labels, replace_labels_and_report_reindex,
+    replace_messages, upsert_messages,
 };
 
 use std::collections::BTreeSet;
