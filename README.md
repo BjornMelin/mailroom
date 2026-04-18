@@ -6,8 +6,8 @@
 
 - Primary stack: Rust + `clap`
 - Planned operator surfaces: CLI first, TUI second
-- Local operational store: SQLite with migration-owned schema and future FTS5 search
-- Native Gmail foundation: OAuth login, active account persistence, and live profile/label reads
+- Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
+- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, and local search
 - Versioned content: code, docs, examples, plans
 - Ignored runtime content: `.mailroom/` state, caches, exports, secrets, and attachment vaults
 - V1 milestone: search + triage + draft queue
@@ -43,7 +43,7 @@ Repo-local overrides also live under `.mailroom/`:
 
 ## Native commands
 
-The current binary can now resolve config, bootstrap the local store, manage Gmail auth, and inspect the authenticated mailbox:
+The current binary can now resolve config, bootstrap the local store, manage Gmail auth, sync mailbox metadata, and search the local cache:
 
 ```bash
 cargo run -- workspace init
@@ -59,8 +59,16 @@ cargo run -- account show --json
 cargo run -- gmail labels list --json
 cargo run -- store init --json
 cargo run -- store doctor --json
+cargo run -- sync run --json
+cargo run -- sync run --full --recent-days 30 --json
+cargo run -- search "project alpha" --label INBOX --limit 10 --json
 cargo run -- roadmap
 ```
+
+Mailbox sync/search behavior, cursor fallback rules, and `doctor` field meanings
+live in [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md).
+Durable architectural ownership for the sync/search slice lives in
+[`docs/decisions/0003-message-canonical-sync.md`](docs/decisions/0003-message-canonical-sync.md).
 
 Config precedence is:
 
@@ -98,15 +106,17 @@ Advanced manual overrides still work:
 - [`docs/README.md`](docs/README.md): doc index
 - [`docs/decisions/0001-foundation.md`](docs/decisions/0001-foundation.md): foundational architecture decision
 - [`docs/architecture/system-overview.md`](docs/architecture/system-overview.md): system boundaries and responsibilities
+- [`docs/decisions/0003-message-canonical-sync.md`](docs/decisions/0003-message-canonical-sync.md): mailbox sync and search design
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
 - [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
+- [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md): sync commands, search filters, and cursor behavior
 - [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
 - [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 
 ## Near-term build plan
 
-1. Build local search primitives over the SQLite store.
-2. Add triage state and durable workflow queues.
-3. Add draft/reply queue records and operator notes.
-4. Layer in sync/update flows over the active Gmail account.
-5. Add a TUI over the native command core.
+1. Introduce triage state and durable workflow queues on top of the synced message store.
+2. Implement draft/reply queue records and operator notes.
+3. Add attachment catalog and intentional export flows.
+4. Provide safe reviewed mailbox mutations such as archive, label, and trash.
+5. Build a TUI over the native command core.
