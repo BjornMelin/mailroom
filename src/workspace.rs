@@ -63,7 +63,7 @@ impl WorkspacePaths {
 
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("repo_root={}", self.repo_root.display());
             println!("runtime_root={}", self.runtime_root.display());

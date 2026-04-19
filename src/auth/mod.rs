@@ -40,7 +40,7 @@ pub struct AuthStatusReport {
 impl AuthStatusReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("configured={}", self.configured);
             println!("oauth_client_source={}", self.oauth_client_source);
@@ -77,7 +77,7 @@ pub struct SetupReport {
 impl SetupReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("oauth_client_imported={}", self.imported_client.is_some());
             if let Some(imported_client) = &self.imported_client {
@@ -124,7 +124,7 @@ pub struct LoginReport {
 impl LoginReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("opened_browser={}", self.opened_browser);
             println!("credential_path={}", self.credential_path.display());
@@ -152,7 +152,7 @@ pub struct LogoutReport {
 impl LogoutReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("credential_path={}", self.credential_path.display());
             println!("credential_removed={}", self.credential_removed);

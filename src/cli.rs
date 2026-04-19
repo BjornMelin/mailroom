@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -50,6 +50,26 @@ pub enum Commands {
     Sync {
         #[command(subcommand)]
         command: SyncCommand,
+    },
+    /// List, inspect, and move thread-scoped workflow items
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommand,
+    },
+    /// Set thread triage state
+    Triage {
+        #[command(subcommand)]
+        command: TriageCommand,
+    },
+    /// Manage reply/draft workflow items
+    Draft {
+        #[command(subcommand)]
+        command: DraftCommand,
+    },
+    /// Preview and execute reviewed cleanup actions
+    Cleanup {
+        #[command(subcommand)]
+        command: CleanupCommand,
     },
     /// Manage the repo-local runtime workspace
     Workspace {
@@ -204,4 +224,210 @@ pub enum GmailLabelsCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// List workflow items
+    List {
+        /// Restrict results to a specific workflow stage
+        #[arg(long)]
+        stage: Option<WorkflowStageArg>,
+        /// Restrict results to a specific triage bucket
+        #[arg(long)]
+        triage_bucket: Option<TriageBucketArg>,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single workflow item in detail
+    Show {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote a workflow item to a new stage
+    Promote {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Target stage
+        #[arg(long)]
+        to: WorkflowPromoteTargetArg,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Snooze or clear snooze on a workflow item
+    Snooze {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Snooze until YYYY-MM-DD; omit together with --clear to clear the snooze
+        #[arg(long)]
+        until: Option<String>,
+        /// Clear the current snooze
+        #[arg(long)]
+        clear: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TriageCommand {
+    /// Set the triage bucket for a thread
+    Set {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Triage bucket to assign
+        #[arg(long)]
+        bucket: TriageBucketArg,
+        /// Optional operator note
+        #[arg(long)]
+        note: Option<String>,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DraftCommand {
+    /// Start a reply or reply-all draft for a thread
+    Start {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Use reply-all recipients instead of reply-to sender only
+        #[arg(long)]
+        reply_all: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace the current draft body text
+    Body {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Inline body text
+        #[arg(long)]
+        text: Option<String>,
+        /// Read body text from a local file
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Read body text from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage draft attachments
+    Attach {
+        #[command(subcommand)]
+        command: DraftAttachmentCommand,
+    },
+    /// Send the current Gmail-backed draft
+    Send {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DraftAttachmentCommand {
+    /// Add an attachment to the current draft revision
+    Add {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Attachment path
+        #[arg(long)]
+        path: PathBuf,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an attachment from the current draft revision by path or filename
+    Remove {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Attachment path or filename
+        #[arg(long)]
+        path: String,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CleanupCommand {
+    /// Archive a thread by removing INBOX after review
+    Archive {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Execute the cleanup action; omit for preview only
+        #[arg(long)]
+        execute: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add and/or remove thread labels after review
+    Label {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Label names to add
+        #[arg(long = "add")]
+        add_labels: Vec<String>,
+        /// Label names to remove
+        #[arg(long = "remove")]
+        remove_labels: Vec<String>,
+        /// Execute the cleanup action; omit for preview only
+        #[arg(long)]
+        execute: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move a thread to trash after review
+    Trash {
+        /// Gmail thread ID for the workflow item
+        thread_id: String,
+        /// Execute the cleanup action; omit for preview only
+        #[arg(long)]
+        execute: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WorkflowStageArg {
+    Triage,
+    FollowUp,
+    Drafting,
+    ReadyToSend,
+    Sent,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum WorkflowPromoteTargetArg {
+    FollowUp,
+    ReadyToSend,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum TriageBucketArg {
+    Urgent,
+    NeedsReplySoon,
+    Waiting,
+    Fyi,
 }

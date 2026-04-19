@@ -1,0 +1,340 @@
+use crate::auth::{self, oauth_client::OAuthClientError};
+use crate::gmail::GmailClientError;
+use crate::store::{
+    mailbox::MailboxReadError,
+    workflows::{WorkflowStoreReadError, WorkflowStoreWriteError},
+};
+use crate::workflows::WorkflowServiceError;
+use anyhow::Error as AnyhowError;
+use serde::Serialize;
+use std::process::ExitCode;
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ErrorCode {
+    ValidationFailed,
+    AuthRequired,
+    NotFound,
+    Conflict,
+    Timeout,
+    RateLimited,
+    RemoteFailure,
+    StorageFailure,
+    InternalFailure,
+}
+
+impl ErrorCode {
+    fn exit_code(self) -> u8 {
+        match self {
+            Self::ValidationFailed => 2,
+            Self::AuthRequired => 3,
+            Self::NotFound => 4,
+            Self::Conflict => 5,
+            Self::Timeout | Self::RateLimited | Self::RemoteFailure => 6,
+            Self::StorageFailure => 7,
+            Self::InternalFailure => 10,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct JsonSuccessEnvelope<'a, T> {
+    success: bool,
+    data: &'a T,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct JsonErrorBody {
+    code: ErrorCode,
+    message: String,
+    kind: String,
+    operation: String,
+    causes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonFailureEnvelope<'a> {
+    success: bool,
+    error: &'a JsonErrorBody,
+}
+
+pub(crate) fn print_json_success<T: Serialize>(data: &T) -> anyhow::Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json_success_value(data))?
+    );
+    Ok(())
+}
+
+pub(crate) fn print_json_failure(error: &JsonErrorBody) -> anyhow::Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json_failure_value(error))?
+    );
+    Ok(())
+}
+
+pub(crate) fn describe_error(error: &AnyhowError, operation: &str) -> JsonErrorBody {
+    let (code, kind) = classify_error(error);
+    let message = error.to_string();
+    let causes = error
+        .chain()
+        .skip(1)
+        .map(|cause| cause.to_string())
+        .filter(|cause| !cause.is_empty() && cause != &message)
+        .fold(Vec::<String>::new(), |mut acc, cause| {
+            if !acc.iter().any(|existing| existing == &cause) {
+                acc.push(cause);
+            }
+            acc
+        });
+
+    JsonErrorBody {
+        code,
+        message,
+        kind: kind.to_owned(),
+        operation: operation.to_owned(),
+        causes,
+    }
+}
+
+pub(crate) fn exit_code(error: &JsonErrorBody) -> ExitCode {
+    ExitCode::from(error.code.exit_code())
+}
+
+fn json_success_value<T: Serialize>(data: &T) -> JsonSuccessEnvelope<'_, T> {
+    JsonSuccessEnvelope {
+        success: true,
+        data,
+    }
+}
+
+fn json_failure_value(error: &JsonErrorBody) -> JsonFailureEnvelope<'_> {
+    JsonFailureEnvelope {
+        success: false,
+        error,
+    }
+}
+
+fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
+    if let Some(workflow_error) = find_cause::<WorkflowServiceError>(error) {
+        match workflow_error {
+            WorkflowServiceError::WorkflowNotFound { .. }
+            | WorkflowServiceError::CurrentDraftNotFound { .. }
+            | WorkflowServiceError::RemoteDraftNotFound { .. }
+            | WorkflowServiceError::LocalSnapshotMissing { .. }
+            | WorkflowServiceError::ThreadHasNoMessages { .. }
+            | WorkflowServiceError::SourceMessageMissing { .. }
+            | WorkflowServiceError::DraftAttachmentNotFound { .. } => {
+                return (ErrorCode::NotFound, "workflow.not_found");
+            }
+            WorkflowServiceError::NoActiveAccount => {
+                return (ErrorCode::AuthRequired, "workflow.account.required");
+            }
+            WorkflowServiceError::ReplyRecipientUndetermined
+            | WorkflowServiceError::ReplyDraftWithoutRecipients
+            | WorkflowServiceError::DraftWithoutToRecipients
+            | WorkflowServiceError::CleanupLabelsRequired
+            | WorkflowServiceError::AddLabelsNotFoundLocally
+            | WorkflowServiceError::RemoveLabelsNotFoundLocally
+            | WorkflowServiceError::AttachmentNotFile { .. }
+            | WorkflowServiceError::AttachmentFileName { .. }
+            | WorkflowServiceError::InvalidDateFormat { .. }
+            | WorkflowServiceError::InvalidDateMonth { .. }
+            | WorkflowServiceError::InvalidDateDay { .. } => {
+                return (ErrorCode::ValidationFailed, "workflow.validation");
+            }
+            WorkflowServiceError::BlockingTask { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.blocking_join");
+            }
+            WorkflowServiceError::LabelCleanupInvariant => {
+                return (ErrorCode::InternalFailure, "workflow.invariant");
+            }
+            WorkflowServiceError::AttachmentMetadata { .. }
+            | WorkflowServiceError::AttachmentNormalize { .. }
+            | WorkflowServiceError::AttachmentRead { .. }
+            | WorkflowServiceError::MessageBuild { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.message_build");
+            }
+            WorkflowServiceError::Gmail(_)
+            | WorkflowServiceError::WorkflowStoreRead(_)
+            | WorkflowServiceError::WorkflowStoreWrite(_)
+            | WorkflowServiceError::MailboxRead(_)
+            | WorkflowServiceError::StoreInit { .. }
+            | WorkflowServiceError::ActiveAccountRefresh { .. }
+            | WorkflowServiceError::AccountState { .. }
+            | WorkflowServiceError::Json(_)
+            | WorkflowServiceError::IntConversion(_)
+            | WorkflowServiceError::Unexpected(_) => {}
+        }
+    }
+
+    if let Some(workflow_write_error) = find_cause::<WorkflowStoreWriteError>(error) {
+        return match workflow_write_error {
+            WorkflowStoreWriteError::MissingWorkflow { .. } => {
+                (ErrorCode::NotFound, "store.workflow.write.missing_workflow")
+            }
+            WorkflowStoreWriteError::ReadyToSendRequiresSendableDraft => {
+                (ErrorCode::Conflict, "store.workflow.write.ready_to_send")
+            }
+            WorkflowStoreWriteError::Read(_)
+            | WorkflowStoreWriteError::OpenDatabase { .. }
+            | WorkflowStoreWriteError::ReloadWorkflow { .. }
+            | WorkflowStoreWriteError::Query(_)
+            | WorkflowStoreWriteError::Serialization(_) => {
+                (ErrorCode::StorageFailure, "store.workflow.write")
+            }
+        };
+    }
+
+    if find_cause::<WorkflowStoreReadError>(error).is_some() {
+        return (ErrorCode::StorageFailure, "store.workflow.read");
+    }
+
+    if find_cause::<MailboxReadError>(error).is_some() {
+        return (ErrorCode::StorageFailure, "store.mailbox.read");
+    }
+
+    if let Some(gmail_error) = find_cause::<GmailClientError>(error) {
+        return match gmail_error {
+            GmailClientError::MissingCredentials | GmailClientError::MissingRefreshToken => {
+                (ErrorCode::AuthRequired, "gmail.credentials")
+            }
+            GmailClientError::CredentialLoad { .. } | GmailClientError::CredentialSave { .. } => {
+                (ErrorCode::StorageFailure, "gmail.credentials.store")
+            }
+            GmailClientError::OAuthClient { .. } => {
+                (ErrorCode::ValidationFailed, "gmail.oauth_client")
+            }
+            GmailClientError::TokenRefresh { .. } => {
+                (ErrorCode::AuthRequired, "gmail.token_refresh")
+            }
+            GmailClientError::Clock { .. } | GmailClientError::HttpClientBuild { .. } => {
+                (ErrorCode::InternalFailure, "gmail.client")
+            }
+            GmailClientError::Transport { source, .. } if source.is_timeout() => {
+                (ErrorCode::Timeout, "gmail.transport")
+            }
+            GmailClientError::Transport { .. } => (ErrorCode::RemoteFailure, "gmail.transport"),
+            GmailClientError::ResponseDecode { .. } => {
+                (ErrorCode::RemoteFailure, "gmail.response_decode")
+            }
+            GmailClientError::Api { status, .. }
+                if *status == reqwest::StatusCode::UNAUTHORIZED =>
+            {
+                (ErrorCode::AuthRequired, "gmail.api_status")
+            }
+            GmailClientError::Api { status, .. } if *status == reqwest::StatusCode::NOT_FOUND => {
+                (ErrorCode::NotFound, "gmail.api_status")
+            }
+            GmailClientError::Api { status, .. }
+                if *status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+            {
+                (ErrorCode::RateLimited, "gmail.api_status")
+            }
+            GmailClientError::Api { status, .. }
+                if *status == reqwest::StatusCode::REQUEST_TIMEOUT =>
+            {
+                (ErrorCode::Timeout, "gmail.api_status")
+            }
+            GmailClientError::Api { status, .. } if status.is_server_error() => {
+                (ErrorCode::RemoteFailure, "gmail.api_status")
+            }
+            GmailClientError::Api { .. } => (ErrorCode::RemoteFailure, "gmail.api_status"),
+        };
+    }
+
+    if let Some(auth_error) = find_cause::<auth::AuthError>(error) {
+        return match auth_error {
+            auth::AuthError::CallbackTimedOut => (ErrorCode::Timeout, "auth.callback"),
+            auth::AuthError::MalformedCallbackRequest
+            | auth::AuthError::MissingAuthorizationCode
+            | auth::AuthError::OAuthCallback(_)
+            | auth::AuthError::StateMismatch
+            | auth::AuthError::InvalidRedirectUrl
+            | auth::AuthError::BrowserOpen(_) => (ErrorCode::ValidationFailed, "auth.callback"),
+            auth::AuthError::CallbackIo(_) => (ErrorCode::InternalFailure, "auth.callback"),
+        };
+    }
+
+    if find_cause::<OAuthClientError>(error).is_some() {
+        return (ErrorCode::ValidationFailed, "auth.oauth_client");
+    }
+
+    if find_cause::<rusqlite::Error>(error).is_some() {
+        return (ErrorCode::StorageFailure, "store.sqlite");
+    }
+
+    if let Some(reqwest_error) = find_cause::<reqwest::Error>(error) {
+        if reqwest_error.is_timeout() {
+            return (ErrorCode::Timeout, "http.transport");
+        }
+        return (ErrorCode::RemoteFailure, "http.transport");
+    }
+
+    (ErrorCode::InternalFailure, "internal.unclassified")
+}
+
+fn find_cause<T>(error: &AnyhowError) -> Option<&T>
+where
+    T: std::error::Error + Send + Sync + 'static,
+{
+    error.chain().find_map(|cause| cause.downcast_ref::<T>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{describe_error, exit_code, json_failure_value, json_success_value};
+    use crate::gmail::GmailClientError;
+    use crate::workflows::WorkflowServiceError;
+    use anyhow::anyhow;
+    use reqwest::StatusCode;
+    use serde_json::{json, to_value};
+
+    #[test]
+    fn json_success_envelope_wraps_payload_in_success_and_data() {
+        let value = to_value(json_success_value(&json!({ "thread_id": "thread-1" }))).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "success": true,
+                "data": {
+                    "thread_id": "thread-1"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_not_found_uses_not_found_code_and_exit_bucket() {
+        let error = anyhow!(WorkflowServiceError::WorkflowNotFound {
+            thread_id: String::from("thread-1"),
+        });
+
+        let report = describe_error(&error, "workflow.show");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["success"], json!(false));
+        assert_eq!(value["error"]["code"], json!("not_found"));
+        assert_eq!(value["error"]["kind"], json!("workflow.not_found"));
+        assert_eq!(value["error"]["operation"], json!("workflow.show"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(4));
+    }
+
+    #[test]
+    fn gmail_rate_limit_maps_to_rate_limited_code() {
+        let error = anyhow!(GmailClientError::Api {
+            path: String::from("users/me/labels"),
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: String::from("slow down"),
+        });
+
+        let report = describe_error(&error, "gmail.labels.list");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("rate_limited"));
+        assert_eq!(value["error"]["kind"], json!("gmail.api_status"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(6));
+    }
+}
