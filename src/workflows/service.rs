@@ -607,10 +607,10 @@ pub async fn draft_start(
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
     let account = resolve_active_account(config_report).await?;
-    let snapshot = latest_thread_snapshot(config_report, &account.account_id, &thread_id).await?;
     let gmail_client = crate::gmail_client_for_config(config_report)?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
     let latest_message = latest_thread_message(&thread)?;
+    let snapshot = workflow_snapshot_from_message(latest_message);
     let recipients = build_reply_recipients(&account.email_address, latest_message, reply_mode)?;
     let subject = normalize_reply_subject(&latest_message.subject);
     let draft_input = store::workflows::UpsertDraftRevisionInput {
@@ -703,10 +703,17 @@ pub async fn draft_attach_remove(
     thread_id: String,
     path_or_name: String,
 ) -> WorkflowResult<WorkflowActionReport> {
+    let repo_root = crate::workspace::configured_repo_root_from_locations(
+        &config_report.locations.repo_config_path,
+    )?;
     update_draft_revision(
         config_report,
         thread_id,
-        |draft| match remove_attachment_by_path_or_name(&mut draft.attachments, &path_or_name) {
+        |draft| match remove_attachment_by_path_or_name(
+            &mut draft.attachments,
+            &path_or_name,
+            &repo_root,
+        ) {
             AttachmentRemovalResult::Removed => Ok(()),
             AttachmentRemovalResult::NotFound => {
                 Err(WorkflowServiceError::DraftAttachmentNotFound {
@@ -991,8 +998,9 @@ where
             })?;
     let gmail_client = crate::gmail_client_for_config(config_report)?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
+    let latest_message = latest_thread_message(&thread)?;
     let source_message = thread_message_by_id(&thread, &current_draft.revision.source_message_id)?;
-    let snapshot = latest_thread_snapshot(config_report, &account.account_id, &thread_id).await?;
+    let snapshot = workflow_snapshot_from_message(latest_message);
 
     let mut draft = DraftRevisionMutation {
         reply_mode: current_draft.revision.reply_mode,
@@ -1145,6 +1153,18 @@ async fn latest_thread_snapshot(
         from_header: snapshot.from_header,
         snippet: snapshot.snippet,
     })
+}
+
+fn workflow_snapshot_from_message(
+    message: &GmailThreadMessage,
+) -> store::workflows::WorkflowMessageSnapshot {
+    store::workflows::WorkflowMessageSnapshot {
+        message_id: message.id.clone(),
+        internal_date_epoch_ms: message.internal_date_epoch_ms,
+        subject: message.subject.clone(),
+        from_header: message.from_header.clone(),
+        snippet: message.snippet.clone(),
+    }
 }
 
 fn build_reply_recipients(
@@ -1586,6 +1606,7 @@ enum AttachmentRemovalResult {
 fn remove_attachment_by_path_or_name(
     attachments: &mut Vec<store::workflows::AttachmentInput>,
     path_or_name: &str,
+    repo_root: &Path,
 ) -> AttachmentRemovalResult {
     if let Some(index) = attachments
         .iter()
@@ -1595,8 +1616,8 @@ fn remove_attachment_by_path_or_name(
         return AttachmentRemovalResult::Removed;
     }
 
-    let normalized_path =
-        normalize_attachment_match_path(path_or_name).map(|path| path.display().to_string());
+    let normalized_path = normalize_attachment_match_path(path_or_name, repo_root)
+        .map(|path| path.display().to_string());
     if let Some(normalized_path) = normalized_path.as_deref()
         && let Some(index) = attachments
             .iter()
@@ -1623,15 +1644,15 @@ fn remove_attachment_by_path_or_name(
     }
 }
 
-fn normalize_attachment_match_path(path_or_name: &str) -> Option<PathBuf> {
-    lexical_absolute_path(Path::new(path_or_name)).ok()
+fn normalize_attachment_match_path(path_or_name: &str, repo_root: &Path) -> Option<PathBuf> {
+    lexical_absolute_path(Path::new(path_or_name), repo_root).ok()
 }
 
-fn lexical_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+fn lexical_absolute_path(path: &Path, base_dir: &Path) -> std::io::Result<PathBuf> {
     let absolute_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()?.join(path)
+        base_dir.join(path)
     };
     Ok(normalize_absolute_path_components(absolute_path))
 }
@@ -1765,6 +1786,107 @@ mod tests {
 
         assert_eq!(create_count, 1);
         assert_eq!(update_count, 1);
+    }
+
+    #[tokio::test]
+    async fn draft_start_and_body_set_persist_live_thread_metadata_when_local_snapshot_is_stale() {
+        let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/threads/thread-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "thread-1",
+                "historyId": "500",
+                "messages": [
+                    {
+                        "id": "m-2",
+                        "threadId": "thread-1",
+                        "historyId": "401",
+                        "internalDate": "200",
+                        "snippet": "Fresh status",
+                        "payload": {
+                            "headers": [
+                                {"name": "Subject", "value": "Project updated"},
+                                {"name": "From", "value": "\"Alice Example\" <alice@example.com>"},
+                                {"name": "To", "value": "operator@example.com"},
+                                {"name": "Message-ID", "value": "<m-2@example.com>"}
+                            ]
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/drafts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "draft-1",
+                "message": {
+                    "id": "draft-message-1",
+                    "threadId": "thread-1"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/gmail/v1/users/me/drafts/draft-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "draft-1",
+                "message": {
+                    "id": "draft-message-2",
+                    "threadId": "thread-1"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, &mock_server);
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot_with_message(
+            &config_report,
+            "m-1",
+            100,
+            "Project",
+            "Alice <alice@example.com>",
+            Some("alice@example.com"),
+            "Stale status",
+        );
+
+        let report = draft_start(&config_report, String::from("thread-1"), ReplyMode::Reply)
+            .await
+            .unwrap();
+        draft_body_set(
+            &config_report,
+            String::from("thread-1"),
+            String::from("Updated body"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.workflow.latest_message_id.as_deref(), Some("m-2"));
+        assert_eq!(
+            report.workflow.latest_message_internal_date_epoch_ms,
+            Some(200)
+        );
+        assert_eq!(report.workflow.latest_message_subject, "Project updated");
+        assert_eq!(
+            report.workflow.latest_message_from_header,
+            "\"Alice Example\" <alice@example.com>"
+        );
+        assert_eq!(report.workflow.latest_message_snippet, "Fresh status");
+
+        let detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(detail.workflow.latest_message_id.as_deref(), Some("m-2"));
+        assert_eq!(detail.workflow.latest_message_subject, "Project updated");
+        assert_eq!(detail.workflow.latest_message_snippet, "Fresh status");
     }
 
     #[tokio::test]
@@ -2197,7 +2319,8 @@ mod tests {
             sample_attachment("/tmp/two.txt", "two.txt"),
         ];
 
-        let removed = remove_attachment_by_path_or_name(&mut attachments, "two.txt");
+        let removed =
+            remove_attachment_by_path_or_name(&mut attachments, "two.txt", Path::new("/tmp"));
 
         assert_eq!(removed, AttachmentRemovalResult::Removed);
         assert_eq!(attachments.len(), 1);
@@ -2208,7 +2331,8 @@ mod tests {
     fn remove_attachment_by_path_or_name_reports_when_nothing_matches() {
         let mut attachments = vec![sample_attachment("/tmp/one.txt", "one.txt")];
 
-        let removed = remove_attachment_by_path_or_name(&mut attachments, "missing.txt");
+        let removed =
+            remove_attachment_by_path_or_name(&mut attachments, "missing.txt", Path::new("/tmp"));
 
         assert_eq!(removed, AttachmentRemovalResult::NotFound);
         assert_eq!(attachments.len(), 1);
@@ -2216,15 +2340,11 @@ mod tests {
     }
 
     #[test]
-    fn remove_attachment_by_path_or_name_removes_matching_relative_path() {
-        let current_dir = std::env::current_dir().unwrap();
-        let temp_dir = tempfile::Builder::new()
-            .prefix("mailroom-remove-attachment-")
-            .tempdir_in(&current_dir)
-            .unwrap();
-        let relative_dir = temp_dir.path().strip_prefix(&current_dir).unwrap();
-        let relative_path = relative_dir.join("note.txt");
-        let full_path = current_dir.join(&relative_path);
+    fn remove_attachment_by_path_or_name_resolves_relative_path_from_repo_root() {
+        let repo_root = TempDir::new().unwrap();
+        let relative_path = Path::new("notes").join("note.txt");
+        let full_path = repo_root.path().join(&relative_path);
+        fs::create_dir_all(full_path.parent().unwrap()).unwrap();
         fs::write(&full_path, "hello").unwrap();
 
         let mut attachments = vec![sample_attachment(
@@ -2232,8 +2352,11 @@ mod tests {
             "note.txt",
         )];
 
-        let removed =
-            remove_attachment_by_path_or_name(&mut attachments, relative_path.to_str().unwrap());
+        let removed = remove_attachment_by_path_or_name(
+            &mut attachments,
+            relative_path.to_str().unwrap(),
+            repo_root.path(),
+        );
 
         assert_eq!(removed, AttachmentRemovalResult::Removed);
         assert!(attachments.is_empty());
@@ -2241,14 +2364,10 @@ mod tests {
 
     #[test]
     fn remove_attachment_by_path_or_name_matches_relative_path_after_file_is_deleted() {
-        let current_dir = std::env::current_dir().unwrap();
-        let temp_dir = tempfile::Builder::new()
-            .prefix("mailroom-remove-attachment-deleted-")
-            .tempdir_in(&current_dir)
-            .unwrap();
-        let relative_dir = temp_dir.path().strip_prefix(&current_dir).unwrap();
-        let relative_path = relative_dir.join("note.txt");
-        let full_path = current_dir.join(&relative_path);
+        let repo_root = TempDir::new().unwrap();
+        let relative_path = Path::new("notes").join("note.txt");
+        let full_path = repo_root.path().join(&relative_path);
+        fs::create_dir_all(full_path.parent().unwrap()).unwrap();
         fs::write(&full_path, "hello").unwrap();
 
         let mut attachments = vec![sample_attachment(
@@ -2257,8 +2376,11 @@ mod tests {
         )];
         fs::remove_file(&full_path).unwrap();
 
-        let removed =
-            remove_attachment_by_path_or_name(&mut attachments, relative_path.to_str().unwrap());
+        let removed = remove_attachment_by_path_or_name(
+            &mut attachments,
+            relative_path.to_str().unwrap(),
+            repo_root.path(),
+        );
 
         assert_eq!(removed, AttachmentRemovalResult::Removed);
         assert!(attachments.is_empty());
@@ -2271,7 +2393,8 @@ mod tests {
             sample_attachment("/tmp/b/report.pdf", "report.pdf"),
         ];
 
-        let removed = remove_attachment_by_path_or_name(&mut attachments, "report.pdf");
+        let removed =
+            remove_attachment_by_path_or_name(&mut attachments, "report.pdf", Path::new("/tmp"));
 
         assert_eq!(removed, AttachmentRemovalResult::AmbiguousFileName);
         assert_eq!(attachments.len(), 2);
@@ -3287,6 +3410,26 @@ mod tests {
     }
 
     fn seed_local_thread_snapshot(config_report: &ConfigReport) {
+        seed_local_thread_snapshot_with_message(
+            config_report,
+            "m-1",
+            1_700_000_000_000,
+            "Project",
+            "Alice <alice@example.com>",
+            Some("alice@example.com"),
+            "Project status",
+        );
+    }
+
+    fn seed_local_thread_snapshot_with_message(
+        config_report: &ConfigReport,
+        message_id: &str,
+        internal_date_epoch_ms: i64,
+        subject: &str,
+        from_header: &str,
+        from_address: Option<&str>,
+        snippet: &str,
+    ) {
         init(config_report).unwrap();
         accounts::upsert_active(
             &config_report.config.store.database_path,
@@ -3306,14 +3449,14 @@ mod tests {
             config_report.config.store.busy_timeout_ms,
             &[GmailMessageUpsertInput {
                 account_id: String::from("gmail:operator@example.com"),
-                message_id: String::from("m-1"),
+                message_id: String::from(message_id),
                 thread_id: String::from("thread-1"),
                 history_id: String::from("101"),
-                internal_date_epoch_ms: 1_700_000_000_000,
-                snippet: String::from("Project status"),
-                subject: String::from("Project"),
-                from_header: String::from("Alice <alice@example.com>"),
-                from_address: Some(String::from("alice@example.com")),
+                internal_date_epoch_ms,
+                snippet: String::from(snippet),
+                subject: String::from(subject),
+                from_header: String::from(from_header),
+                from_address: from_address.map(String::from),
                 recipient_headers: String::from("operator@example.com"),
                 to_header: String::from("operator@example.com"),
                 cc_header: String::new(),
