@@ -42,6 +42,9 @@ All workflow commands with `--json` return the normalized Mailroom envelope:
 - success: `{ "success": true, "data": ... }`
 - failure: `{ "success": false, "error": { code, message, kind, operation, causes } }`
 
+For the workflow surface, operator input problems should return
+`error.code = validation_failed` / exit code `2`, not `internal_failure`.
+
 ## Workflow stages
 
 - `triage`
@@ -98,6 +101,8 @@ cargo run -- workflow snooze thread-123 --until 2026-04-25 --json
 cargo run -- workflow snooze thread-123 --clear --json
 ```
 
+`workflow snooze` requires exactly one of `--until` or `--clear`.
+
 ## Draft workflow
 
 Start a reply draft:
@@ -136,6 +141,14 @@ Add or remove attachments:
 cargo run -- draft attach add thread-123 --path ./notes/reply.txt --json
 cargo run -- draft attach remove thread-123 --path ./notes/reply.txt --json
 ```
+
+Attachment notes:
+
+- `draft body` requires exactly one of `--text`, `--file`, or `--stdin`
+- `draft attach add` treats missing or unreadable files as validation failures
+- `draft attach remove` removes one attachment only; if multiple attachments
+  share the same filename, use the stored attachment path instead of the bare
+  filename
 
 Send the active draft:
 

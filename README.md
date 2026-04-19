@@ -94,6 +94,15 @@ All `--json` commands now use one normalized envelope:
 - `7`: local storage failure
 - `10`: internal failure
 
+Operator input mistakes on the workflow surface now stay in the validation
+bucket. Examples:
+
+- `workflow snooze` requires exactly one of `--until` or `--clear`
+- `draft body` requires exactly one of `--text`, `--file`, or `--stdin`
+- `draft attach add` treats missing attachment files as validation failures
+- `draft attach remove` rejects ambiguous filename-only matches; use the stored
+  attachment path when multiple attachments share a filename
+
 Mailbox sync/search behavior, cursor fallback rules, and `doctor` field meanings
 live in [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md).
 Durable architectural ownership for the sync/search slice lives in
