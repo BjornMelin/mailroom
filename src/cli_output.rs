@@ -1,3 +1,4 @@
+use crate::CliInputError;
 use crate::auth::{self, oauth_client::OAuthClientError};
 use crate::gmail::GmailClientError;
 use crate::store::{
@@ -137,6 +138,7 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | WorkflowServiceError::CleanupLabelsRequired
             | WorkflowServiceError::AddLabelsNotFoundLocally
             | WorkflowServiceError::RemoveLabelsNotFoundLocally
+            | WorkflowServiceError::DraftAttachmentNameAmbiguous { .. }
             | WorkflowServiceError::AttachmentNotFile { .. }
             | WorkflowServiceError::AttachmentFileName { .. }
             | WorkflowServiceError::InvalidDateFormat { .. }
@@ -144,16 +146,24 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | WorkflowServiceError::InvalidDateDay { .. } => {
                 return (ErrorCode::ValidationFailed, "workflow.validation");
             }
+            WorkflowServiceError::RemoteDraftMissingBeforeSend { .. } => {
+                return (ErrorCode::Conflict, "workflow.remote_draft.send_guard");
+            }
             WorkflowServiceError::BlockingTask { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.blocking_join");
             }
             WorkflowServiceError::LabelCleanupInvariant => {
                 return (ErrorCode::InternalFailure, "workflow.invariant");
             }
+            WorkflowServiceError::RemoteDraftRollback { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.remote_draft.rollback");
+            }
             WorkflowServiceError::AttachmentMetadata { .. }
             | WorkflowServiceError::AttachmentNormalize { .. }
-            | WorkflowServiceError::AttachmentRead { .. }
-            | WorkflowServiceError::MessageBuild { .. } => {
+            | WorkflowServiceError::AttachmentRead { .. } => {
+                return (ErrorCode::ValidationFailed, "workflow.validation");
+            }
+            WorkflowServiceError::MessageBuild { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.message_build");
             }
             WorkflowServiceError::Gmail(_)
@@ -261,6 +271,10 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
         return (ErrorCode::ValidationFailed, "auth.oauth_client");
     }
 
+    if find_cause::<CliInputError>(error).is_some() {
+        return (ErrorCode::ValidationFailed, "cli.validation");
+    }
+
     if find_cause::<rusqlite::Error>(error).is_some() {
         return (ErrorCode::StorageFailure, "store.sqlite");
     }
@@ -285,11 +299,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::{describe_error, exit_code, json_failure_value, json_success_value};
+    use crate::CliInputError;
     use crate::gmail::GmailClientError;
     use crate::workflows::WorkflowServiceError;
     use anyhow::anyhow;
     use reqwest::StatusCode;
     use serde_json::{json, to_value};
+    use std::io::ErrorKind;
 
     #[test]
     fn json_success_envelope_wraps_payload_in_success_and_data() {
@@ -336,5 +352,69 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("rate_limited"));
         assert_eq!(value["error"]["kind"], json!("gmail.api_status"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(6));
+    }
+
+    #[test]
+    fn remote_draft_send_guard_maps_to_conflict_code() {
+        let error = anyhow!(WorkflowServiceError::RemoteDraftMissingBeforeSend {
+            thread_id: String::from("thread-1"),
+            draft_id: String::from("draft-1"),
+        });
+
+        let report = describe_error(&error, "workflow.draft.send");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("conflict"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("workflow.remote_draft.send_guard")
+        );
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(5));
+    }
+
+    #[test]
+    fn remote_draft_rollback_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::RemoteDraftRollback {
+            thread_id: String::from("thread-1"),
+            draft_id: String::from("draft-1"),
+            source: anyhow!("rollback failed"),
+        });
+
+        let report = describe_error(&error, "workflow.draft.start");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("workflow.remote_draft.rollback")
+        );
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
+    fn local_cli_input_errors_map_to_validation_failed_code() {
+        let error = anyhow!(CliInputError::DraftBodyInputSourceConflict);
+
+        let report = describe_error(&error, "draft.body.set");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("cli.validation"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn attachment_file_errors_map_to_validation_failed_code() {
+        let error = anyhow!(WorkflowServiceError::AttachmentRead {
+            path: String::from("/tmp/report.pdf"),
+            source: std::io::Error::new(ErrorKind::NotFound, "missing attachment"),
+        });
+
+        let report = describe_error(&error, "draft.send");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("workflow.validation"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
     }
 }

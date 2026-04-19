@@ -10,7 +10,7 @@ mod time;
 mod workflows;
 mod workspace;
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::Result;
 use clap::Parser;
 use cli::{
     AccountCommand, AuthCommand, CleanupCommand, Cli, Commands, ConfigCommand,
@@ -22,7 +22,29 @@ use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use thiserror::Error;
 use time::current_epoch_seconds;
+
+#[derive(Debug, Error)]
+pub(crate) enum CliInputError {
+    #[error("use --until YYYY-MM-DD or --clear")]
+    SnoozeRequiresUntilOrClear,
+    #[error("use either --until or --clear, not both")]
+    SnoozeUntilConflict,
+    #[error("use exactly one of --text, --file, or --stdin")]
+    DraftBodyInputSourceConflict,
+    #[error("failed to read {path}: {source}")]
+    DraftBodyFileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read draft body from stdin: {source}")]
+    DraftBodyStdinRead {
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 pub async fn run() -> ExitCode {
     let cli = Cli::parse();
@@ -82,14 +104,12 @@ fn handle_paths_command(paths: &workspace::WorkspacePaths, json: bool) -> Result
 }
 
 fn resolve_snooze_until(until: Option<String>, clear: bool) -> Result<Option<String>> {
-    ensure!(
-        clear || until.is_some(),
-        "use --until YYYY-MM-DD or --clear"
-    );
-    ensure!(
-        !(clear && until.is_some()),
-        "use either --until or --clear, not both"
-    );
+    if !clear && until.is_none() {
+        return Err(CliInputError::SnoozeRequiresUntilOrClear.into());
+    }
+    if clear && until.is_some() {
+        return Err(CliInputError::SnoozeUntilConflict.into());
+    }
 
     if clear { Ok(None) } else { Ok(until) }
 }
@@ -554,10 +574,9 @@ fn resolve_draft_body_input(
     stdin: bool,
 ) -> Result<String> {
     let selected = usize::from(text.is_some()) + usize::from(file.is_some()) + usize::from(stdin);
-    ensure!(
-        selected == 1,
-        "use exactly one of --text, --file, or --stdin"
-    );
+    if selected != 1 {
+        return Err(CliInputError::DraftBodyInputSourceConflict.into());
+    }
 
     if let Some(text) = text {
         return Ok(text);
@@ -565,13 +584,13 @@ fn resolve_draft_body_input(
 
     if let Some(file) = file {
         return std::fs::read_to_string(&file)
-            .map_err(|error| anyhow!("failed to read {}: {error}", file.display()));
+            .map_err(|source| CliInputError::DraftBodyFileRead { path: file, source }.into());
     }
 
     let mut buffer = String::new();
     std::io::stdin()
         .read_to_string(&mut buffer)
-        .map_err(|error| anyhow!("failed to read draft body from stdin: {error}"))?;
+        .map_err(|source| CliInputError::DraftBodyStdinRead { source })?;
     Ok(buffer)
 }
 
@@ -648,7 +667,8 @@ fn is_repo_root(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_repo_root, handle_paths_command, refresh_active_account, resolve_snooze_until,
+        CliInputError, discover_repo_root, handle_paths_command, refresh_active_account,
+        resolve_draft_body_input, resolve_snooze_until,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::resolve;
@@ -886,6 +906,36 @@ runtime_root = "{}"
         let error = resolve_snooze_until(Some(String::from("2026-05-01")), true).unwrap_err();
 
         assert_eq!(error.to_string(), "use either --until or --clear, not both");
+    }
+
+    #[test]
+    fn resolve_draft_body_input_requires_exactly_one_source() {
+        let error = resolve_draft_body_input(None, None, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "use exactly one of --text, --file, or --stdin"
+        );
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::DraftBodyInputSourceConflict)
+        ));
+    }
+
+    #[test]
+    fn resolve_draft_body_input_reports_file_read_as_typed_validation_error() {
+        let missing_path = PathBuf::from("/definitely/missing/mailroom-draft-body.txt");
+        let error = resolve_draft_body_input(None, Some(missing_path.clone()), false).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("failed to read /definitely/missing/mailroom-draft-body.txt:")
+        );
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::DraftBodyFileRead { path, .. }) if path == &missing_path
+        ));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

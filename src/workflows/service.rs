@@ -53,6 +53,10 @@ pub(crate) enum WorkflowServiceError {
     CurrentDraftNotFound { thread_id: String },
     #[error("no remote Gmail draft is associated with thread {thread_id}")]
     RemoteDraftNotFound { thread_id: String },
+    #[error(
+        "stored Gmail draft {draft_id} for thread {thread_id} no longer exists; refusing to recreate it during send because the previous send may have already succeeded; run `mailroom sync run` and inspect the thread before retrying"
+    )]
+    RemoteDraftMissingBeforeSend { thread_id: String, draft_id: String },
     #[error("no active Gmail account found; run `mailroom auth login` first")]
     NoActiveAccount,
     #[error(
@@ -82,6 +86,10 @@ pub(crate) enum WorkflowServiceError {
     LabelCleanupInvariant,
     #[error("no draft attachment matched `{path_or_name}`")]
     DraftAttachmentNotFound { path_or_name: String },
+    #[error(
+        "attachment name `{file_name}` matches multiple draft attachments; use the stored attachment path instead"
+    )]
+    DraftAttachmentNameAmbiguous { file_name: String },
     #[error("failed to read attachment metadata for {path}")]
     AttachmentMetadata {
         path: String,
@@ -119,8 +127,25 @@ pub(crate) enum WorkflowServiceError {
         #[source]
         source: anyhow::Error,
     },
+    #[error(
+        "created Gmail draft {draft_id} for thread {thread_id} but could not persist or roll it back locally"
+    )]
+    RemoteDraftRollback {
+        thread_id: String,
+        draft_id: String,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
+}
+
+#[derive(Debug, Clone)]
+struct RemoteDraftUpsert {
+    gmail_draft_id: String,
+    gmail_draft_message_id: String,
+    gmail_draft_thread_id: String,
+    created_new: bool,
 }
 
 async fn join_blocking<T, E>(
@@ -167,34 +192,122 @@ async fn upsert_remote_draft(
     gmail_draft_id: Option<&str>,
     raw_message: &str,
     thread_id: &str,
-) -> WorkflowResult<(String, String, String)> {
-    let gmail_draft = match gmail_draft_id {
+) -> WorkflowResult<RemoteDraftUpsert> {
+    let (gmail_draft, created_new) = match gmail_draft_id {
         Some(gmail_draft_id) => {
             match gmail_client
                 .update_draft(gmail_draft_id, raw_message, Some(thread_id))
                 .await
             {
-                Ok(gmail_draft) => gmail_draft,
-                Err(error) if matches_missing_draft_error(&error, gmail_draft_id) => {
+                Ok(gmail_draft) => (gmail_draft, false),
+                Err(error) if matches_missing_draft_error(&error, gmail_draft_id) => (
                     gmail_client
                         .create_draft(raw_message, Some(thread_id))
-                        .await?
-                }
+                        .await?,
+                    true,
+                ),
                 Err(error) => return Err(error.into()),
             }
         }
-        None => {
+        None => (
             gmail_client
                 .create_draft(raw_message, Some(thread_id))
-                .await?
-        }
+                .await?,
+            true,
+        ),
     };
 
-    Ok((
-        gmail_draft.id,
-        gmail_draft.message_id,
-        gmail_draft.thread_id,
-    ))
+    Ok(RemoteDraftUpsert {
+        gmail_draft_id: gmail_draft.id,
+        gmail_draft_message_id: gmail_draft.message_id,
+        gmail_draft_thread_id: gmail_draft.thread_id,
+        created_new,
+    })
+}
+
+async fn update_remote_draft_for_send(
+    gmail_client: &crate::gmail::GmailClient,
+    gmail_draft_id: &str,
+    raw_message: &str,
+    thread_id: &str,
+) -> WorkflowResult<RemoteDraftUpsert> {
+    let gmail_draft = gmail_client
+        .update_draft(gmail_draft_id, raw_message, Some(thread_id))
+        .await
+        .map_err(|error| {
+            if matches_missing_draft_error(&error, gmail_draft_id) {
+                WorkflowServiceError::RemoteDraftMissingBeforeSend {
+                    thread_id: thread_id.to_owned(),
+                    draft_id: gmail_draft_id.to_owned(),
+                }
+            } else {
+                error.into()
+            }
+        })?;
+
+    Ok(RemoteDraftUpsert {
+        gmail_draft_id: gmail_draft.id,
+        gmail_draft_message_id: gmail_draft.message_id,
+        gmail_draft_thread_id: gmail_draft.thread_id,
+        created_new: false,
+    })
+}
+
+async fn persist_remote_draft_state(
+    config_report: &ConfigReport,
+    workflow: store::workflows::WorkflowRecord,
+    remote_draft: &RemoteDraftUpsert,
+    gmail_client: &crate::gmail::GmailClient,
+    operation: &'static str,
+) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let account_id = workflow.account_id.clone();
+    let thread_id = workflow.thread_id.clone();
+    let gmail_draft_id = remote_draft.gmail_draft_id.clone();
+    let gmail_draft_message_id = remote_draft.gmail_draft_message_id.clone();
+    let gmail_draft_thread_id = remote_draft.gmail_draft_thread_id.clone();
+
+    let persisted = join_blocking(
+        spawn_blocking(move || {
+            store::workflows::set_remote_draft_state(
+                &database_path,
+                busy_timeout_ms,
+                &store::workflows::RemoteDraftStateInput {
+                    account_id,
+                    thread_id,
+                    gmail_draft_id: Some(gmail_draft_id),
+                    gmail_draft_message_id: Some(gmail_draft_message_id),
+                    gmail_draft_thread_id: Some(gmail_draft_thread_id),
+                    updated_at_epoch_s,
+                },
+            )
+        }),
+        operation,
+    )
+    .await;
+
+    match persisted {
+        Ok(workflow) => Ok(workflow),
+        Err(error) if !remote_draft.created_new => Err(error),
+        Err(error) => {
+            let rollback_result =
+                delete_remote_draft_if_present(gmail_client, Some(&remote_draft.gmail_draft_id))
+                    .await;
+            match rollback_result {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(WorkflowServiceError::RemoteDraftRollback {
+                    thread_id: workflow.thread_id,
+                    draft_id: remote_draft.gmail_draft_id.clone(),
+                    source: anyhow::Error::new(error).context(format!(
+                        "failed to delete Gmail draft {} after local state persistence failed: {rollback_error}",
+                        remote_draft.gmail_draft_id
+                    )),
+                }),
+            }
+        }
+    }
 }
 
 pub async fn list_workflows(
@@ -417,31 +530,18 @@ pub async fn draft_start(
     .await?;
     let raw_message =
         build_raw_message(&account.email_address, latest_message, &draft_revision, &[])?;
-    let (gmail_draft_id, gmail_draft_message_id, gmail_draft_thread_id) = upsert_remote_draft(
+    let remote_draft = upsert_remote_draft(
         &gmail_client,
         workflow.gmail_draft_id.as_deref(),
         &raw_message,
         &workflow.thread_id,
     )
     .await?;
-    let database_path = config_report.config.store.database_path.clone();
-    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
-    let workflow = join_blocking(
-        spawn_blocking(move || {
-            store::workflows::set_remote_draft_state(
-                &database_path,
-                busy_timeout_ms,
-                &store::workflows::RemoteDraftStateInput {
-                    account_id: workflow.account_id,
-                    thread_id: workflow.thread_id,
-                    gmail_draft_id: Some(gmail_draft_id),
-                    gmail_draft_message_id: Some(gmail_draft_message_id),
-                    gmail_draft_thread_id: Some(gmail_draft_thread_id),
-                    updated_at_epoch_s,
-                },
-            )
-        }),
+    let workflow = persist_remote_draft_state(
+        config_report,
+        workflow,
+        &remote_draft,
+        &gmail_client,
         "draft.start.remote_state",
     )
     .await?;
@@ -498,13 +598,18 @@ pub async fn draft_attach_remove(
     update_draft_revision(
         config_report,
         thread_id,
-        |draft| {
-            if !remove_attachment_by_path_or_name(&mut draft.attachments, &path_or_name) {
-                return Err(WorkflowServiceError::DraftAttachmentNotFound {
+        |draft| match remove_attachment_by_path_or_name(&mut draft.attachments, &path_or_name) {
+            AttachmentRemovalResult::Removed => Ok(()),
+            AttachmentRemovalResult::NotFound => {
+                Err(WorkflowServiceError::DraftAttachmentNotFound {
                     path_or_name: path_or_name.clone(),
-                });
+                })
             }
-            Ok(())
+            AttachmentRemovalResult::AmbiguousFileName => {
+                Err(WorkflowServiceError::DraftAttachmentNameAmbiguous {
+                    file_name: path_or_name.clone(),
+                })
+            }
         },
         "draft_attachment_removed",
     )
@@ -537,38 +642,20 @@ pub async fn draft_send(
         &draft.revision,
         &draft.attachments,
     )?;
-    let (gmail_draft_id, gmail_draft_message_id, gmail_draft_thread_id) = upsert_remote_draft(
+    let remote_draft =
+        update_remote_draft_for_send(&gmail_client, &gmail_draft_id, &raw_message, &thread_id)
+            .await?;
+    persist_remote_draft_state(
+        config_report,
+        detail.workflow.clone(),
+        &remote_draft,
         &gmail_client,
-        Some(&gmail_draft_id),
-        &raw_message,
-        &thread_id,
-    )
-    .await?;
-    let database_path = config_report.config.store.database_path.clone();
-    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let remote_state_account_id = detail.workflow.account_id.clone();
-    let remote_state_thread_id = detail.workflow.thread_id.clone();
-    let remote_state_updated_at_epoch_s = crate::time::current_epoch_seconds()?;
-    let send_draft_id = gmail_draft_id.clone();
-    join_blocking(
-        spawn_blocking(move || {
-            store::workflows::set_remote_draft_state(
-                &database_path,
-                busy_timeout_ms,
-                &store::workflows::RemoteDraftStateInput {
-                    account_id: remote_state_account_id,
-                    thread_id: remote_state_thread_id,
-                    gmail_draft_id: Some(gmail_draft_id),
-                    gmail_draft_message_id: Some(gmail_draft_message_id),
-                    gmail_draft_thread_id: Some(gmail_draft_thread_id),
-                    updated_at_epoch_s: remote_state_updated_at_epoch_s,
-                },
-            )
-        }),
         "draft.send.remote_state",
     )
     .await?;
-    let sent = gmail_client.send_draft(&send_draft_id).await?;
+    let sent = gmail_client
+        .send_draft(&remote_draft.gmail_draft_id)
+        .await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
@@ -726,29 +813,6 @@ async fn cleanup_impl(
     if detail.workflow.gmail_draft_id.is_some() {
         delete_remote_draft_if_present(&gmail_client, detail.workflow.gmail_draft_id.as_deref())
             .await?;
-        let database_path = config_report.config.store.database_path.clone();
-        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-        let account_id = detail.workflow.account_id.clone();
-        let thread_id = detail.workflow.thread_id.clone();
-        let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
-        join_blocking(
-            spawn_blocking(move || {
-                store::workflows::set_remote_draft_state(
-                    &database_path,
-                    busy_timeout_ms,
-                    &store::workflows::RemoteDraftStateInput {
-                        account_id,
-                        thread_id,
-                        gmail_draft_id: None,
-                        gmail_draft_message_id: None,
-                        gmail_draft_thread_id: None,
-                        updated_at_epoch_s,
-                    },
-                )
-            }),
-            "cleanup.clear_remote_draft",
-        )
-        .await?;
     }
 
     match action {
@@ -888,31 +952,18 @@ where
         &draft_revision,
         &attachments,
     )?;
-    let (gmail_draft_id, gmail_draft_message_id, gmail_draft_thread_id) = upsert_remote_draft(
+    let remote_draft = upsert_remote_draft(
         &gmail_client,
         detail.workflow.gmail_draft_id.as_deref(),
         &raw_message,
         &thread_id,
     )
     .await?;
-    let database_path = config_report.config.store.database_path.clone();
-    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
-    let workflow = join_blocking(
-        spawn_blocking(move || {
-            store::workflows::set_remote_draft_state(
-                &database_path,
-                busy_timeout_ms,
-                &store::workflows::RemoteDraftStateInput {
-                    account_id: workflow.account_id,
-                    thread_id: workflow.thread_id,
-                    gmail_draft_id: Some(gmail_draft_id),
-                    gmail_draft_message_id: Some(gmail_draft_message_id),
-                    gmail_draft_thread_id: Some(gmail_draft_thread_id),
-                    updated_at_epoch_s,
-                },
-            )
-        }),
+    let workflow = persist_remote_draft_state(
+        config_report,
+        workflow,
+        &remote_draft,
+        &gmail_client,
         "draft.update.remote_state",
     )
     .await?;
@@ -1425,21 +1476,51 @@ struct DraftRevisionMutation {
     attachments: Vec<store::workflows::AttachmentInput>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentRemovalResult {
+    Removed,
+    NotFound,
+    AmbiguousFileName,
+}
+
 fn remove_attachment_by_path_or_name(
     attachments: &mut Vec<store::workflows::AttachmentInput>,
     path_or_name: &str,
-) -> bool {
+) -> AttachmentRemovalResult {
+    if let Some(index) = attachments
+        .iter()
+        .position(|attachment| attachment.path == path_or_name)
+    {
+        attachments.remove(index);
+        return AttachmentRemovalResult::Removed;
+    }
+
     let normalized_path =
         normalize_attachment_match_path(path_or_name).map(|path| path.display().to_string());
-    let original_len = attachments.len();
-    attachments.retain(|attachment| {
-        attachment.file_name != path_or_name
-            && attachment.path != path_or_name
-            && normalized_path
-                .as_deref()
-                .is_none_or(|path| attachment.path != path)
-    });
-    attachments.len() != original_len
+    if let Some(normalized_path) = normalized_path.as_deref()
+        && let Some(index) = attachments
+            .iter()
+            .position(|attachment| attachment.path == normalized_path)
+    {
+        attachments.remove(index);
+        return AttachmentRemovalResult::Removed;
+    }
+
+    let mut matching_indexes = attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, attachment)| attachment.file_name == path_or_name)
+        .map(|(index, _)| index);
+
+    match (matching_indexes.next(), matching_indexes.next()) {
+        (Some(index), None) => {
+            attachments.remove(index);
+            AttachmentRemovalResult::Removed
+        }
+        (Some(_), Some(_)) => AttachmentRemovalResult::AmbiguousFileName,
+        (None, None) => AttachmentRemovalResult::NotFound,
+        (None, Some(_)) => unreachable!("iterator cannot yield a second value without a first"),
+    }
 }
 
 fn normalize_attachment_match_path(path_or_name: &str) -> Option<PathBuf> {
@@ -1449,8 +1530,9 @@ fn normalize_attachment_match_path(path_or_name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        attachment_input_from_path, best_effort_sync_report, build_reply_recipients,
-        cleanup_archive, cleanup_label, draft_body_set, draft_start, list_workflows,
+        AttachmentRemovalResult, RemoteDraftUpsert, attachment_input_from_path,
+        best_effort_sync_report, build_reply_recipients, cleanup_archive, cleanup_label,
+        draft_body_set, draft_send, draft_start, list_workflows, persist_remote_draft_state,
         promote_workflow, remove_attachment_by_path_or_name,
     };
     use crate::auth;
@@ -1472,6 +1554,7 @@ mod tests {
     use secrecy::SecretString;
     use std::fs;
     use std::path::Path;
+    use std::time::Duration;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1660,6 +1743,222 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn persist_remote_draft_state_rolls_back_created_remote_draft_when_local_write_fails() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/drafts/draft-created"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut config_report = config_report_for(&temp_dir, &mock_server);
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot(&config_report);
+        let (workflow, _) = upsert_draft_revision(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &UpsertDraftRevisionInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                reply_mode: ReplyMode::Reply,
+                source_message_id: String::from("m-1"),
+                subject: String::from("Re: Project"),
+                to_addresses: vec![String::from("alice@example.com")],
+                cc_addresses: Vec::new(),
+                bcc_addresses: Vec::new(),
+                body_text: String::from("Draft body"),
+                attachments: Vec::new(),
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-2"),
+                    internal_date_epoch_ms: 101,
+                    subject: String::from("Re: Project"),
+                    from_header: String::from("Operator <operator@example.com>"),
+                    snippet: String::from("Draft body"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
+        let original_database_path = config_report.config.store.database_path.clone();
+        let original_busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+        config_report.config.store.database_path =
+            temp_dir.path().join("missing").join("db.sqlite");
+
+        let error = persist_remote_draft_state(
+            &config_report,
+            workflow,
+            &RemoteDraftUpsert {
+                gmail_draft_id: String::from("draft-created"),
+                gmail_draft_message_id: String::from("draft-message-created"),
+                gmail_draft_thread_id: String::from("thread-1"),
+                created_new: true,
+            },
+            &gmail_client,
+            "draft.test.remote_state",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("failed to open workflow store"),
+            "unexpected error: {error}"
+        );
+
+        let detail = get_workflow_detail(
+            &original_database_path,
+            original_busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(detail.workflow.gmail_draft_id, None);
+        assert!(detail.current_draft.is_some());
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let create_count = requests
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "POST"
+                    && request.url.path() == "/gmail/v1/users/me/drafts"
+            })
+            .count();
+        let delete_count = requests
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "DELETE"
+                    && request.url.path() == "/gmail/v1/users/me/drafts/draft-created"
+            })
+            .count();
+        assert_eq!(create_count, 0);
+        assert_eq!(delete_count, 1);
+    }
+
+    #[tokio::test]
+    async fn draft_send_refuses_to_recreate_missing_remote_draft() {
+        let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
+        mount_thread(&mock_server).await;
+        Mock::given(method("PUT"))
+            .and(path("/gmail/v1/users/me/drafts/draft-1"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/drafts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "draft-2",
+                "message": {
+                    "id": "draft-message-2",
+                    "threadId": "thread-1"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/drafts/send"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(150))
+                    .set_body_json(serde_json::json!({
+                        "id": "sent-message-1",
+                        "threadId": "thread-1",
+                        "historyId": "900"
+                    })),
+            )
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/drafts/send"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sent-message-2",
+                "threadId": "thread-1",
+                "historyId": "901"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, &mock_server);
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot(&config_report);
+        upsert_draft_revision(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &UpsertDraftRevisionInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                reply_mode: ReplyMode::Reply,
+                source_message_id: String::from("m-1"),
+                subject: String::from("Re: Project"),
+                to_addresses: vec![String::from("alice@example.com")],
+                cc_addresses: Vec::new(),
+                bcc_addresses: Vec::new(),
+                body_text: String::from("Draft body"),
+                attachments: Vec::new(),
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-2"),
+                    internal_date_epoch_ms: 101,
+                    subject: String::from("Re: Project"),
+                    from_header: String::from("Operator <operator@example.com>"),
+                    snippet: String::from("Draft body"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        set_remote_draft_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::workflows::RemoteDraftStateInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                gmail_draft_id: Some(String::from("draft-1")),
+                gmail_draft_message_id: Some(String::from("draft-message-1")),
+                gmail_draft_thread_id: Some(String::from("thread-1")),
+                updated_at_epoch_s: 102,
+            },
+        )
+        .unwrap();
+
+        let error = draft_send(&config_report, String::from("thread-1"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "stored Gmail draft draft-1 for thread thread-1 no longer exists; refusing to recreate it during send because the previous send may have already succeeded; run `mailroom sync run` and inspect the thread before retrying"
+        );
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let update_count = requests
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "PUT"
+                    && request.url.path() == "/gmail/v1/users/me/drafts/draft-1"
+            })
+            .count();
+        let create_count = requests
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "POST"
+                    && request.url.path() == "/gmail/v1/users/me/drafts"
+            })
+            .count();
+        let send_count = requests
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "POST"
+                    && request.url.path() == "/gmail/v1/users/me/drafts/send"
+            })
+            .count();
+        assert_eq!(update_count, 1);
+        assert_eq!(create_count, 0);
+        assert_eq!(send_count, 0);
+    }
+
     #[test]
     fn remove_attachment_by_path_or_name_removes_matching_filename() {
         let mut attachments = vec![
@@ -1669,7 +1968,7 @@ mod tests {
 
         let removed = remove_attachment_by_path_or_name(&mut attachments, "two.txt");
 
-        assert!(removed);
+        assert_eq!(removed, AttachmentRemovalResult::Removed);
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].file_name, "one.txt");
     }
@@ -1680,7 +1979,7 @@ mod tests {
 
         let removed = remove_attachment_by_path_or_name(&mut attachments, "missing.txt");
 
-        assert!(!removed);
+        assert_eq!(removed, AttachmentRemovalResult::NotFound);
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].file_name, "one.txt");
     }
@@ -1705,8 +2004,21 @@ mod tests {
         let removed =
             remove_attachment_by_path_or_name(&mut attachments, relative_path.to_str().unwrap());
 
-        assert!(removed);
+        assert_eq!(removed, AttachmentRemovalResult::Removed);
         assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn remove_attachment_by_path_or_name_rejects_ambiguous_filename_matches() {
+        let mut attachments = vec![
+            sample_attachment("/tmp/a/report.pdf", "report.pdf"),
+            sample_attachment("/tmp/b/report.pdf", "report.pdf"),
+        ];
+
+        let removed = remove_attachment_by_path_or_name(&mut attachments, "report.pdf");
+
+        assert_eq!(removed, AttachmentRemovalResult::AmbiguousFileName);
+        assert_eq!(attachments.len(), 2);
     }
 
     #[test]
@@ -2266,6 +2578,104 @@ mod tests {
             .position(|request| {
                 request.method.as_str() == "DELETE"
                     && request.url.path() == "/gmail/v1/users/me/drafts/draft-stale"
+            })
+            .unwrap();
+        let modify_index = requests
+            .iter()
+            .position(|request| {
+                request.method.as_str() == "POST"
+                    && request.url.path() == "/gmail/v1/users/me/threads/thread-1/modify"
+            })
+            .unwrap();
+        assert!(delete_index < modify_index);
+    }
+
+    #[tokio::test]
+    async fn cleanup_archive_keeps_local_remote_draft_state_when_cleanup_mutation_fails() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/drafts/draft-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/threads/thread-1/modify"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("mailbox mutation failed"))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, &mock_server);
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot(&config_report);
+        upsert_draft_revision(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &UpsertDraftRevisionInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                reply_mode: ReplyMode::Reply,
+                source_message_id: String::from("m-1"),
+                subject: String::from("Re: Project"),
+                to_addresses: vec![String::from("alice@example.com")],
+                cc_addresses: Vec::new(),
+                bcc_addresses: Vec::new(),
+                body_text: String::from("Draft body"),
+                attachments: Vec::new(),
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-2"),
+                    internal_date_epoch_ms: 101,
+                    subject: String::from("Re: Project"),
+                    from_header: String::from("Operator <operator@example.com>"),
+                    snippet: String::from("Draft body"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        set_remote_draft_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::workflows::RemoteDraftStateInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                gmail_draft_id: Some(String::from("draft-1")),
+                gmail_draft_message_id: Some(String::from("draft-message-1")),
+                gmail_draft_thread_id: Some(String::from("thread-1")),
+                updated_at_epoch_s: 102,
+            },
+        )
+        .unwrap();
+
+        let error = cleanup_archive(&config_report, String::from("thread-1"), true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "gmail API request to users/me/threads/thread-1/modify failed with status 500 Internal Server Error: mailbox mutation failed"
+        );
+
+        let detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            detail.workflow.current_stage,
+            crate::store::workflows::WorkflowStage::Drafting
+        );
+        assert_eq!(detail.workflow.gmail_draft_id.as_deref(), Some("draft-1"));
+        assert!(detail.current_draft.is_some());
+
+        let requests = mock_server.received_requests().await.unwrap();
+        let delete_index = requests
+            .iter()
+            .position(|request| {
+                request.method.as_str() == "DELETE"
+                    && request.url.path() == "/gmail/v1/users/me/drafts/draft-1"
             })
             .unwrap();
         let modify_index = requests
