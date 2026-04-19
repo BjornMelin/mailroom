@@ -158,6 +158,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowServiceError::RemoteDraftRollback { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.remote_draft.rollback");
             }
+            WorkflowServiceError::RemoteSendStateReconcile { .. } => {
+                return (ErrorCode::StorageFailure, "workflow.send.reconcile");
+            }
             WorkflowServiceError::AttachmentMetadata { .. }
             | WorkflowServiceError::AttachmentNormalize { .. }
             | WorkflowServiceError::AttachmentRead { .. } => {
@@ -416,5 +419,21 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("validation_failed"));
         assert_eq!(value["error"]["kind"], json!("workflow.validation"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn remote_send_state_reconcile_maps_to_storage_failure_code() {
+        let error = anyhow!(WorkflowServiceError::RemoteSendStateReconcile {
+            thread_id: String::from("thread-1"),
+            sent_message_id: String::from("sent-message-1"),
+            source: anyhow!("database is locked"),
+        });
+
+        let report = describe_error(&error, "draft.send");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.send.reconcile"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
     }
 }

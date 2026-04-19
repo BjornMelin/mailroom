@@ -1,9 +1,10 @@
 use super::{
     ApplyCleanupInput, AttachmentInput, CleanupAction, MarkSentInput, PromoteWorkflowInput,
-    RemoteDraftStateInput, ReplyMode, SetTriageStateInput, TriageBucket, UpsertDraftRevisionInput,
-    WorkflowListFilter, WorkflowMessageSnapshot, WorkflowStage, apply_cleanup, get_workflow_detail,
-    inspect_workflows, list_workflows, mark_sent, set_remote_draft_state, set_triage_state,
-    upsert_draft_revision, upsert_stage,
+    RemoteDraftStateInput, ReplyMode, RetireDraftStateInput, SetTriageStateInput, TriageBucket,
+    UpsertDraftRevisionInput, WorkflowListFilter, WorkflowMessageSnapshot, WorkflowStage,
+    apply_cleanup, get_workflow_detail, inspect_workflows, list_workflows, mark_sent,
+    retire_draft_state, set_remote_draft_state, set_triage_state, upsert_draft_revision,
+    upsert_stage,
 };
 use crate::config::resolve;
 use crate::store::{accounts, init};
@@ -525,7 +526,7 @@ fn mark_sent_retires_local_and_remote_draft_state() {
 }
 
 #[test]
-fn cleanup_retires_local_and_remote_draft_state() {
+fn cleanup_marks_closed_while_preserving_draft_state_for_reconciliation() {
     let repo_root = unique_temp_dir("mailroom-workflow-cleanup");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
@@ -562,10 +563,16 @@ fn cleanup_retires_local_and_remote_draft_state() {
     .unwrap();
 
     assert_eq!(workflow.current_stage, WorkflowStage::Closed);
-    assert_eq!(workflow.current_draft_revision_id, None);
-    assert_eq!(workflow.gmail_draft_id, None);
-    assert_eq!(workflow.gmail_draft_message_id, None);
-    assert_eq!(workflow.gmail_draft_thread_id, None);
+    assert!(workflow.current_draft_revision_id.is_some());
+    assert_eq!(workflow.gmail_draft_id.as_deref(), Some("gmail-draft-2"));
+    assert_eq!(
+        workflow.gmail_draft_message_id.as_deref(),
+        Some("gmail-message-2")
+    );
+    assert_eq!(
+        workflow.gmail_draft_thread_id.as_deref(),
+        Some("gmail-thread-2")
+    );
 
     let detail = get_workflow_detail(
         &config_report.config.store.database_path,
@@ -580,7 +587,7 @@ fn cleanup_retires_local_and_remote_draft_state() {
         detail.workflow.last_cleanup_action,
         Some(CleanupAction::Trash)
     );
-    assert_eq!(detail.current_draft, None);
+    assert!(detail.current_draft.is_some());
     assert!(
         detail
             .events
@@ -590,7 +597,7 @@ fn cleanup_retires_local_and_remote_draft_state() {
 }
 
 #[test]
-fn closed_stage_promotion_retires_local_and_remote_draft_state() {
+fn closed_stage_promotion_preserves_draft_state_until_remote_retirement() {
     let repo_root = unique_temp_dir("mailroom-workflow-closed-promotion");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
@@ -627,10 +634,16 @@ fn closed_stage_promotion_retires_local_and_remote_draft_state() {
     .unwrap();
 
     assert_eq!(workflow.current_stage, WorkflowStage::Closed);
-    assert_eq!(workflow.current_draft_revision_id, None);
-    assert_eq!(workflow.gmail_draft_id, None);
-    assert_eq!(workflow.gmail_draft_message_id, None);
-    assert_eq!(workflow.gmail_draft_thread_id, None);
+    assert!(workflow.current_draft_revision_id.is_some());
+    assert_eq!(workflow.gmail_draft_id.as_deref(), Some("gmail-draft-3"));
+    assert_eq!(
+        workflow.gmail_draft_message_id.as_deref(),
+        Some("gmail-message-3")
+    );
+    assert_eq!(
+        workflow.gmail_draft_thread_id.as_deref(),
+        Some("gmail-thread-3")
+    );
 
     let detail = get_workflow_detail(
         &config_report.config.store.database_path,
@@ -641,13 +654,56 @@ fn closed_stage_promotion_retires_local_and_remote_draft_state() {
     .unwrap()
     .unwrap();
     assert_eq!(detail.workflow.current_stage, WorkflowStage::Closed);
-    assert_eq!(detail.current_draft, None);
+    assert!(detail.current_draft.is_some());
     assert!(
         detail
             .events
             .iter()
             .any(|event| event.event_kind == "stage_promoted")
     );
+}
+
+#[test]
+fn retire_draft_state_clears_local_and_remote_draft_fields() {
+    let repo_root = unique_temp_dir("mailroom-workflow-retire-draft-state");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    seed_drafting_workflow(&config_report, &account.account_id, "thread-retire");
+    set_remote_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RemoteDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-retire"),
+            gmail_draft_id: Some(String::from("gmail-draft-4")),
+            gmail_draft_message_id: Some(String::from("gmail-message-4")),
+            gmail_draft_thread_id: Some(String::from("gmail-thread-4")),
+            updated_at_epoch_s: 201,
+        },
+    )
+    .unwrap();
+
+    let workflow = retire_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RetireDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-retire"),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(workflow.current_stage, WorkflowStage::Drafting);
+    assert_eq!(workflow.current_draft_revision_id, None);
+    assert_eq!(workflow.gmail_draft_id, None);
+    assert_eq!(workflow.gmail_draft_message_id, None);
+    assert_eq!(workflow.gmail_draft_thread_id, None);
+    assert_eq!(workflow.last_remote_sync_epoch_s, Some(300));
 }
 
 fn seed_account(config_report: &crate::config::ConfigReport) -> accounts::AccountRecord {

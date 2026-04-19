@@ -1,9 +1,9 @@
 use super::read::load_workflow;
 use super::{
     ApplyCleanupInput, AttachmentInput, CleanupAction, DraftRevisionRecord, MarkSentInput,
-    PromoteWorkflowInput, RemoteDraftStateInput, SetTriageStateInput, SnoozeWorkflowInput,
-    TriageBucket, UpsertDraftRevisionInput, WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage,
-    WorkflowStoreWriteError,
+    PromoteWorkflowInput, RemoteDraftStateInput, RetireDraftStateInput, SetTriageStateInput,
+    SnoozeWorkflowInput, TriageBucket, UpsertDraftRevisionInput, WorkflowMessageSnapshot,
+    WorkflowRecord, WorkflowStage, WorkflowStoreWriteError,
 };
 use crate::store::connection;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -93,9 +93,6 @@ pub(crate) fn upsert_stage(
         return Err(WorkflowStoreWriteError::ReadyToSendRequiresSendableDraft);
     }
     workflow.current_stage = input.to_stage;
-    if input.to_stage == WorkflowStage::Closed {
-        retire_draft_state(&mut workflow);
-    }
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
     apply_snapshot(&mut workflow, &input.snapshot);
 
@@ -277,7 +274,7 @@ pub(crate) fn mark_sent(
     let from_stage = Some(workflow.current_stage);
 
     workflow.current_stage = WorkflowStage::Sent;
-    retire_draft_state(&mut workflow);
+    clear_draft_state(&mut workflow);
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.last_sent_message_id = Some(input.sent_message_id.clone());
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
@@ -319,7 +316,6 @@ pub(crate) fn apply_cleanup(
     let from_stage = Some(workflow.current_stage);
 
     workflow.current_stage = WorkflowStage::Closed;
-    retire_draft_state(&mut workflow);
     workflow.last_cleanup_action = Some(input.cleanup_action);
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
@@ -342,7 +338,29 @@ pub(crate) fn apply_cleanup(
     Ok(workflow)
 }
 
-fn retire_draft_state(workflow: &mut WorkflowRecord) {
+pub(crate) fn retire_draft_state(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    input: &RetireDraftStateInput,
+) -> Result<WorkflowRecord, WorkflowStoreWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction()?;
+    let mut workflow = load_workflow(&transaction, &input.account_id, &input.thread_id)?
+        .ok_or_else(|| WorkflowStoreWriteError::MissingWorkflow {
+            thread_id: input.thread_id.clone(),
+        })?;
+
+    clear_draft_state(&mut workflow);
+    workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
+    workflow.updated_at_epoch_s = input.updated_at_epoch_s;
+
+    let workflow = persist_workflow(&transaction, workflow)?;
+    transaction.commit()?;
+    Ok(workflow)
+}
+
+fn clear_draft_state(workflow: &mut WorkflowRecord) {
     workflow.current_draft_revision_id = None;
     workflow.gmail_draft_id = None;
     workflow.gmail_draft_message_id = None;

@@ -338,6 +338,13 @@ pub(crate) struct ApplyCleanupInput {
     pub(crate) updated_at_epoch_s: i64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RetireDraftStateInput {
+    pub(crate) account_id: String,
+    pub(crate) thread_id: String,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AttachmentInput {
     pub(crate) path: String,
