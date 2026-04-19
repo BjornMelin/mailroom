@@ -90,8 +90,8 @@ cargo run -- triage set thread-123 --bucket urgent --note "reply before 3pm" --j
 Promote a workflow item:
 
 ```bash
-cargo run -- workflow promote thread-123 --to follow-up --json
-cargo run -- workflow promote thread-123 --to ready-to-send --json
+cargo run -- workflow promote thread-123 --to follow_up --json
+cargo run -- workflow promote thread-123 --to ready_to_send --json
 ```
 
 Snooze or clear snooze:

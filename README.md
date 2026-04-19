@@ -65,7 +65,7 @@ cargo run -- search "project alpha" --label INBOX --limit 10 --json
 cargo run -- workflow list --json
 cargo run -- workflow show thread-123 --json
 cargo run -- triage set thread-123 --bucket urgent --note "reply today" --json
-cargo run -- workflow promote thread-123 --to follow-up --json
+cargo run -- workflow promote thread-123 --to follow_up --json
 cargo run -- workflow snooze thread-123 --until 2026-04-25 --json
 cargo run -- draft start thread-123 --reply-all --json
 cargo run -- draft body thread-123 --text "Thanks, sending details shortly." --json
@@ -74,6 +74,7 @@ cargo run -- draft send thread-123 --json
 cargo run -- cleanup archive thread-123 --json
 cargo run -- cleanup archive thread-123 --execute --json
 cargo run -- cleanup label thread-123 --add 0.To-Reply --remove INBOX --execute --json
+cargo run -- cleanup trash thread-123 --json
 cargo run -- roadmap
 ```
 
@@ -82,7 +83,7 @@ cargo run -- roadmap
 All `--json` commands now use one normalized envelope:
 
 - success: `{ "success": true, "data": ... }`
-- failure: `{ "success": false, "error": { "code", "message", "kind", "operation", "causes" } }`
+- failure: `{ "success": false, "error": { "code": "validation_failed", "message": "use --until YYYY-MM-DD or --clear", "kind": "workflow.validation", "operation": "workflow.snooze", "causes": ["use --until YYYY-MM-DD or --clear"] } }`
 
 `error.code` is stable and operator-oriented. Current exit buckets are:
 

@@ -74,7 +74,7 @@ cargo run -- gmail labels list --json
 All `--json` commands in this slice return the normalized Mailroom envelope:
 
 - success: `{ "success": true, "data": ... }`
-- failure: `{ "success": false, "error": { code, message, kind, operation, causes } }`
+- failure: `{ "success": false, "error": { "code": "validation_failed", "message": "use a downloaded Google Desktop app JSON or paste the Client ID directly", "kind": "gmail.oauth_client", "operation": "auth.setup", "causes": ["failed to parse OAuth client JSON"] } }`
 
 ## Plugin-assisted workflow (Codex)
 

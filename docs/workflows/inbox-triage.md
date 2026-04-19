@@ -21,9 +21,11 @@ The native CLI now supports this flow directly:
 cargo run -- sync run --json
 cargo run -- search "project alpha" --json
 cargo run -- triage set thread-123 --bucket urgent --json
-cargo run -- workflow promote thread-123 --to follow-up --json
+cargo run -- workflow promote thread-123 --to follow_up --json
 cargo run -- draft start thread-123 --json
 cargo run -- cleanup archive thread-123 --json
 ```
 
 The same local workflow state is intended to back the later TUI.
+Codex Gmail/GitHub plugin-assisted reads remain useful for live inspection, but
+keep the write path in the native CLI so the local store stays authoritative.
