@@ -706,13 +706,14 @@ pub async fn draft_attach_remove(
     let repo_root = crate::workspace::configured_repo_root_from_locations(
         &config_report.locations.repo_config_path,
     )?;
+    let invocation_dir = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
     update_draft_revision(
         config_report,
         thread_id,
         |draft| match remove_attachment_by_path_or_name(
             &mut draft.attachments,
             &path_or_name,
-            &repo_root,
+            &invocation_dir,
         ) {
             AttachmentRemovalResult::Removed => Ok(()),
             AttachmentRemovalResult::NotFound => {
@@ -1606,7 +1607,7 @@ enum AttachmentRemovalResult {
 fn remove_attachment_by_path_or_name(
     attachments: &mut Vec<store::workflows::AttachmentInput>,
     path_or_name: &str,
-    repo_root: &Path,
+    base_dir: &Path,
 ) -> AttachmentRemovalResult {
     if let Some(index) = attachments
         .iter()
@@ -1616,7 +1617,7 @@ fn remove_attachment_by_path_or_name(
         return AttachmentRemovalResult::Removed;
     }
 
-    let normalized_path = normalize_attachment_match_path(path_or_name, repo_root)
+    let normalized_path = normalize_attachment_match_path(path_or_name, base_dir)
         .map(|path| path.display().to_string());
     if let Some(normalized_path) = normalized_path.as_deref()
         && let Some(index) = attachments
@@ -1644,8 +1645,8 @@ fn remove_attachment_by_path_or_name(
     }
 }
 
-fn normalize_attachment_match_path(path_or_name: &str, repo_root: &Path) -> Option<PathBuf> {
-    lexical_absolute_path(Path::new(path_or_name), repo_root).ok()
+fn normalize_attachment_match_path(path_or_name: &str, base_dir: &Path) -> Option<PathBuf> {
+    lexical_absolute_path(Path::new(path_or_name), base_dir).ok()
 }
 
 fn lexical_absolute_path(path: &Path, base_dir: &Path) -> std::io::Result<PathBuf> {

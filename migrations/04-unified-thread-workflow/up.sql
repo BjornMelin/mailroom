@@ -14,7 +14,8 @@ CREATE TABLE thread_workflows (
     latest_message_subject TEXT NOT NULL DEFAULT '',
     latest_message_from_header TEXT NOT NULL DEFAULT '',
     latest_message_snippet TEXT NOT NULL DEFAULT '',
-    current_draft_revision_id INTEGER,
+    current_draft_revision_id INTEGER
+        REFERENCES thread_draft_revisions (draft_revision_id) ON DELETE SET NULL,
     gmail_draft_id TEXT,
     gmail_draft_message_id TEXT,
     gmail_draft_thread_id TEXT,
@@ -43,8 +44,10 @@ CREATE TABLE thread_workflow_events (
     account_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     event_kind TEXT NOT NULL,
-    from_stage TEXT,
-    to_stage TEXT,
+    from_stage TEXT
+        CHECK (from_stage IS NULL OR from_stage IN ('triage', 'follow_up', 'drafting', 'ready_to_send', 'sent', 'closed')),
+    to_stage TEXT
+        CHECK (to_stage IS NULL OR to_stage IN ('triage', 'follow_up', 'drafting', 'ready_to_send', 'sent', 'closed')),
     triage_bucket TEXT
         CHECK (triage_bucket IS NULL OR triage_bucket IN ('urgent', 'needs_reply_soon', 'waiting', 'fyi')),
     note TEXT,

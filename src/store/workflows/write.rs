@@ -29,6 +29,7 @@ pub(crate) fn set_triage_state(
         .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
+    let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -38,7 +39,6 @@ pub(crate) fn set_triage_state(
             input.updated_at_epoch_s,
         )
     });
-    let from_stage = Some(workflow.current_stage);
     workflow.triage_bucket = Some(input.triage_bucket);
     if let Some(note) = &input.note {
         workflow.note = note.clone();
@@ -76,6 +76,7 @@ pub(crate) fn upsert_stage(
         .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
+    let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -85,10 +86,10 @@ pub(crate) fn upsert_stage(
             input.updated_at_epoch_s,
         )
     });
-    let from_stage = Some(workflow.current_stage);
 
-    let has_sendable_draft =
-        workflow.current_draft_revision_id.is_some() && workflow.gmail_draft_id.is_some();
+    let has_sendable_draft = workflow.current_draft_revision_id.is_some()
+        && workflow.gmail_draft_id.is_some()
+        && workflow.last_remote_sync_epoch_s.is_some();
     if input.to_stage == WorkflowStage::ReadyToSend && !has_sendable_draft {
         return Err(WorkflowStoreWriteError::ReadyToSendRequiresSendableDraft);
     }
@@ -126,6 +127,7 @@ pub(crate) fn snooze_workflow(
         .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
+    let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -135,7 +137,6 @@ pub(crate) fn snooze_workflow(
             input.updated_at_epoch_s,
         )
     });
-    let from_stage = Some(workflow.current_stage);
 
     workflow.current_stage = WorkflowStage::FollowUp;
     workflow.snoozed_until_epoch_s = input.snoozed_until_epoch_s;
@@ -172,6 +173,7 @@ pub(crate) fn upsert_draft_revision(
         .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
+    let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -181,7 +183,6 @@ pub(crate) fn upsert_draft_revision(
             input.updated_at_epoch_s,
         )
     });
-    let from_stage = Some(workflow.current_stage);
 
     workflow.current_stage = WorkflowStage::Drafting;
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
@@ -190,6 +191,9 @@ pub(crate) fn upsert_draft_revision(
 
     let draft_revision = insert_draft_revision(&transaction, workflow.workflow_id, input)?;
     workflow.current_draft_revision_id = Some(draft_revision.draft_revision_id);
+    workflow.gmail_draft_message_id = None;
+    workflow.gmail_draft_thread_id = None;
+    workflow.last_remote_sync_epoch_s = None;
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
     let workflow = persist_workflow(&transaction, workflow)?;
 
@@ -600,8 +604,8 @@ fn insert_draft_revision(
             super::read::row_to_draft_revision,
         )
         .optional()?
-        .ok_or_else(|| WorkflowStoreWriteError::ReloadWorkflow {
-            thread_id: format!("draft_revision:{draft_revision_id}"),
+        .ok_or_else(|| WorkflowStoreWriteError::ReloadDraftRevision {
+            draft_revision_id: format!("draft_revision:{draft_revision_id}"),
         })
 }
 

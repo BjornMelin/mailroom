@@ -51,6 +51,7 @@ fn set_triage_state_creates_workflow_and_event_log() {
     assert_eq!(detail.workflow.workflow_id, workflow.workflow_id);
     assert_eq!(detail.events.len(), 1);
     assert_eq!(detail.events[0].event_kind, "triage_set");
+    assert_eq!(detail.events[0].from_stage, None);
     assert_eq!(detail.events[0].triage_bucket, Some(TriageBucket::Urgent));
 
     let listed = list_workflows(
@@ -179,6 +180,20 @@ fn upsert_draft_revision_persists_current_draft_and_attachments() {
     )
     .unwrap();
 
+    set_remote_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RemoteDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            gmail_draft_id: Some(String::from("gmail-draft-1")),
+            gmail_draft_message_id: Some(String::from("gmail-message-1")),
+            gmail_draft_thread_id: Some(String::from("gmail-thread-1")),
+            updated_at_epoch_s: 150,
+        },
+    )
+    .unwrap();
+
     let attachment_path = repo_root.path().join("reply.txt");
     std::fs::write(&attachment_path, "hello from attachment").unwrap();
 
@@ -212,6 +227,10 @@ fn upsert_draft_revision_persists_current_draft_and_attachments() {
         workflow.current_draft_revision_id,
         Some(revision.draft_revision_id)
     );
+    assert_eq!(workflow.gmail_draft_id.as_deref(), Some("gmail-draft-1"));
+    assert_eq!(workflow.gmail_draft_message_id, None);
+    assert_eq!(workflow.gmail_draft_thread_id, None);
+    assert_eq!(workflow.last_remote_sync_epoch_s, None);
 
     let detail = get_workflow_detail(
         &config_report.config.store.database_path,
@@ -230,12 +249,18 @@ fn upsert_draft_revision_persists_current_draft_and_attachments() {
     assert_eq!(draft.revision.body_text, "Draft body");
     assert_eq!(draft.attachments.len(), 1);
     assert_eq!(draft.attachments[0].file_name, "reply.txt");
-    assert_eq!(detail.events.len(), 2);
+    assert_eq!(detail.events.len(), 3);
     assert!(
         detail
             .events
             .iter()
             .any(|event| event.event_kind == "draft_revision_upserted")
+    );
+    assert!(
+        detail
+            .events
+            .iter()
+            .any(|event| event.event_kind == "remote_draft_synced")
     );
 }
 
@@ -286,6 +311,21 @@ fn workflow_listing_orders_stage_then_bucket_and_cleanup_closes_flow() {
         },
     )
     .unwrap();
+
+    let promoted_detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-follow-up",
+    )
+    .unwrap()
+    .unwrap();
+    let promoted_event = promoted_detail
+        .events
+        .iter()
+        .find(|event| event.event_kind == "stage_promoted")
+        .unwrap();
+    assert_eq!(promoted_event.from_stage, None);
 
     let listed = list_workflows(
         &config_report.config.store.database_path,

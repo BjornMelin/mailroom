@@ -193,6 +193,7 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowStoreWriteError::Read(_)
             | WorkflowStoreWriteError::OpenDatabase { .. }
             | WorkflowStoreWriteError::ReloadWorkflow { .. }
+            | WorkflowStoreWriteError::ReloadDraftRevision { .. }
             | WorkflowStoreWriteError::Query(_)
             | WorkflowStoreWriteError::Serialization(_) => {
                 (ErrorCode::StorageFailure, "store.workflow.write")

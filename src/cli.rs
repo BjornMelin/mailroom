@@ -408,6 +408,7 @@ pub enum CleanupCommand {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
 pub enum WorkflowStageArg {
     Triage,
     FollowUp,
@@ -418,6 +419,7 @@ pub enum WorkflowStageArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
 pub enum WorkflowPromoteTargetArg {
     FollowUp,
     ReadyToSend,
@@ -425,6 +427,7 @@ pub enum WorkflowPromoteTargetArg {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "snake_case")]
 pub enum TriageBucketArg {
     Urgent,
     NeedsReplySoon,

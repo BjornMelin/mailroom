@@ -404,6 +404,8 @@ pub(crate) enum WorkflowStoreWriteError {
     ReadyToSendRequiresSendableDraft,
     #[error("failed to reload workflow for thread {thread_id}")]
     ReloadWorkflow { thread_id: String },
+    #[error("failed to reload draft revision {draft_revision_id}")]
+    ReloadDraftRevision { draft_revision_id: String },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
     #[error(transparent)]
