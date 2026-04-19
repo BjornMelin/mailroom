@@ -15,7 +15,8 @@ The current native flow owns:
 
 It owns authentication and live Gmail reads that feed the native mailbox sync
 and local search commands.
-It does not own triage queues, draft queues, or destructive mailbox operations.
+Workflow state, draft revisions, and cleanup actions are owned by the thread
+workflow layer, not this auth/account runbook.
 
 ## Required config
 
@@ -70,12 +71,16 @@ cargo run -- account show --json
 cargo run -- gmail labels list --json
 ```
 
+All `--json` commands in this slice return the normalized Mailroom envelope:
+
+- success: `{ "success": true, "data": ... }`
+- failure: `{ "success": false, "error": { code, message, kind, operation, causes } }`
+
 ## Plugin-assisted workflow (Codex)
 
-Codex Gmail capabilities are the operator-assisted inspection path before native
-sync and search workflows are ready.
+Codex Gmail capabilities remain useful as a live inspection and comparison path.
 
-- inspect mailbox and thread context before local sync tooling is complete
+- inspect mailbox and thread context beyond the local sync window
 - compare plugin-assisted reads with `cargo run -- account show --json` and
   `cargo run -- gmail labels list --json`
 - keep final mutation decisions in native Mailroom commands so inspection and
@@ -154,6 +159,5 @@ This path is intentionally secondary and advanced:
 Mailroom defaults to `gmail.modify`.
 
 That scope is intentionally broader than read-only mailbox metadata because the
-long-term product includes search, labeling, archive/delete review workflows,
-and draft/reply operations. The current branch only uses the read side of that
-scope.
+native product now owns search, sync, draft/reply send flows, and reviewed
+archive/label/trash actions.

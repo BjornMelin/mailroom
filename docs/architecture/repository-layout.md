@@ -24,11 +24,12 @@
 - `src/cli.rs`: CLI command surface and flags
 - `src/config.rs`: typed config resolution and source reporting
 - `src/auth/`: Gmail OAuth flow and credential persistence
-- `src/gmail/`: native Gmail HTTP client, label reads, metadata reads, and history replay primitives
+- `src/gmail/`: native Gmail HTTP client, label reads, metadata reads, history replay, and draft/thread mutation primitives
 - `src/mailbox.rs`: sync/search orchestration over Gmail and SQLite
+- `src/workflows/`: thread-scoped triage, draft/send, snooze, and cleanup orchestration
 - `src/doctor.rs`: combined workspace/store/auth health reporting
 - `src/workspace.rs`: repo-root runtime path layout and initialization
-- `src/store/`: SQLite connection policy, embedded migrations, account persistence, mailbox persistence, and store diagnostics
+- `src/store/`: SQLite connection policy, embedded migrations, account persistence, mailbox persistence, workflow persistence, and store diagnostics
 
 ## Expected code evolution
 

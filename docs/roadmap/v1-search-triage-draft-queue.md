@@ -8,6 +8,7 @@ Deliver the first complete operational slice:
 - fast local search
 - triage-oriented workflow state
 - draft/reply queue state
+- reviewed cleanup actions
 - CLI flows first, TUI surfaces second
 
 ## Included
@@ -19,8 +20,9 @@ Deliver the first complete operational slice:
 - mailbox/account modeling
 - mailbox metadata sync
 - local search primitives
-- triage queues and status tracking
-- draft queue records and operator notes
+- thread-scoped triage and status tracking
+- draft queue records, remote Gmail draft sync, and operator notes
+- reviewed archive, label, and trash actions
 - plugin-assisted operator documentation
 
 ## Current status
@@ -38,12 +40,24 @@ The substrate layer is in place:
 - one-shot mailbox sync with recent-window bootstrap and incremental history replay
 - local SQLite FTS5 search over subject, sender, recipients, snippet, and labels
 
-The next implementation slice should start at triage queues and durable follow-up state, not re-open auth, account, config, store, or mailbox sync ownership.
+The first workflow slice is now in place:
+
+- thread-scoped workflow state backed by SQLite
+- fixed triage buckets and stage promotion
+- snooze and follow-up timing fields
+- local draft revisions with file attachments
+- Gmail draft create/update/send integration
+- reviewed archive, label, and trash actions with post-action resync
+
+The next implementation slice should build attachment catalog/export and richer
+operator review ergonomics, not re-open auth, account, config, store, sync, or
+workflow ownership.
 
 ## Deferred
 
 - unsubscribe automation
 - bulk cleanup heuristics
+- attachment catalog and export flows
 - advanced semantic/vector search
 - external search engines
 - multi-account support
@@ -51,4 +65,6 @@ The next implementation slice should start at triage queues and durable follow-u
 
 ## Success condition
 
-An operator can set up the workspace, sync mailbox metadata locally, search it quickly, classify work for follow-up, and stage reply/draft actions in a durable local system.
+An operator can set up the workspace, sync mailbox metadata locally, search it
+quickly, classify thread work for follow-up, stage and send replies in a durable
+local system, and execute reviewed cleanup actions intentionally.
