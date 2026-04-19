@@ -162,6 +162,9 @@ Behavior notes:
 - Gmail draft state is refreshed from the local revision after each edit
 - `draft send` sends the current remote draft, marks the workflow as `sent`, and
   runs a mailbox sync afterward
+- if Gmail accepts the send but Mailroom cannot persist the final local `sent`
+  transition after bounded retries, the command returns `storage_failure`; inspect
+  the thread with `workflow show` or run `mailroom sync run` before retrying send
 
 ## Reviewed cleanup actions
 
@@ -209,6 +212,9 @@ Behavior notes:
 - archive removes `INBOX` at the Gmail thread level
 - label cleanup resolves local label names to synced Gmail label IDs first
 - trash uses Gmail thread trash, not hard delete
+- when a workflow still has a remote Gmail draft, cleanup deletes that draft
+  only after the Gmail archive/label/trash mutation and local workflow close both
+  succeed
 - cleanup execution marks the workflow `closed`, appends an event, and runs a
   mailbox sync afterward
 - post-send and post-cleanup sync failures are reported as warnings while the
