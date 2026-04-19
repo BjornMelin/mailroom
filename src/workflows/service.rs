@@ -4,7 +4,7 @@ use crate::mailbox;
 use crate::store;
 use crate::store::accounts::AccountRecord;
 use crate::workflows::{
-    CleanupPreview, WorkflowActionReport, WorkflowListReport, WorkflowShowReport,
+    CleanupPreview, WorkflowAction, WorkflowActionReport, WorkflowListReport, WorkflowShowReport,
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -492,7 +492,7 @@ pub async fn set_triage(
         "triage.set",
     )
     .await?;
-    action_report(config_report, "triage_set", workflow, None).await
+    action_report(config_report, WorkflowAction::TriageSet, workflow, None).await
 }
 
 pub async fn promote_workflow(
@@ -565,7 +565,13 @@ pub async fn promote_workflow(
         )
         .await?;
     }
-    action_report(config_report, "workflow_promoted", workflow, None).await
+    action_report(
+        config_report,
+        WorkflowAction::WorkflowPromoted,
+        workflow,
+        None,
+    )
+    .await
 }
 
 pub async fn snooze_workflow(
@@ -597,7 +603,13 @@ pub async fn snooze_workflow(
         "workflow.snooze",
     )
     .await?;
-    action_report(config_report, "workflow_snoozed", workflow, None).await
+    action_report(
+        config_report,
+        WorkflowAction::WorkflowSnoozed,
+        workflow,
+        None,
+    )
+    .await
 }
 
 pub async fn draft_start(
@@ -654,7 +666,7 @@ pub async fn draft_start(
     )
     .await?;
 
-    action_report(config_report, "draft_started", workflow, None).await
+    action_report(config_report, WorkflowAction::DraftStarted, workflow, None).await
 }
 
 pub async fn draft_body_set(
@@ -669,7 +681,7 @@ pub async fn draft_body_set(
             draft.body_text = body_text;
             Ok(())
         },
-        "draft_body_set",
+        WorkflowAction::DraftBodySet,
     )
     .await
 }
@@ -693,7 +705,7 @@ pub async fn draft_attach_add(
             }
             Ok(())
         },
-        "draft_attachment_added",
+        WorkflowAction::DraftAttachmentAdded,
     )
     .await
 }
@@ -727,7 +739,7 @@ pub async fn draft_attach_remove(
                 })
             }
         },
-        "draft_attachment_removed",
+        WorkflowAction::DraftAttachmentRemoved,
     )
     .await
 }
@@ -778,7 +790,13 @@ pub async fn draft_send(
         mailbox::sync_run(config_report, false, mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS).await,
         "draft sent but mailbox sync failed; run `mailroom sync run` to refresh local state",
     );
-    action_report(config_report, "draft_sent", workflow, sync_report).await
+    action_report(
+        config_report,
+        WorkflowAction::DraftSent,
+        workflow,
+        sync_report,
+    )
+    .await
 }
 
 pub async fn cleanup_archive(
@@ -854,7 +872,7 @@ async fn cleanup_impl(
 
     if !execute {
         return Ok(WorkflowActionReport {
-            action: String::from("cleanup_preview"),
+            action: WorkflowAction::CleanupPreview,
             workflow: detail.workflow,
             current_draft: detail.current_draft,
             cleanup_preview: Some(cleanup_preview),
@@ -971,7 +989,7 @@ async fn cleanup_impl(
         "cleanup applied but mailbox sync failed; run `mailroom sync run` to refresh local state",
     );
     Ok(WorkflowActionReport {
-        action: String::from("cleanup_applied"),
+        action: WorkflowAction::CleanupApplied,
         workflow,
         current_draft: None,
         cleanup_preview: Some(cleanup_preview),
@@ -983,7 +1001,7 @@ async fn update_draft_revision<F>(
     config_report: &ConfigReport,
     thread_id: String,
     mutate: F,
-    action: &str,
+    action: WorkflowAction,
 ) -> WorkflowResult<WorkflowActionReport>
 where
     F: FnOnce(&mut DraftRevisionMutation) -> WorkflowResult<()>,
@@ -1081,13 +1099,13 @@ where
 
 async fn action_report(
     config_report: &ConfigReport,
-    action: &str,
+    action: WorkflowAction,
     workflow: store::workflows::WorkflowRecord,
     sync_report: Option<mailbox::SyncRunReport>,
 ) -> WorkflowResult<WorkflowActionReport> {
     let detail = workflow_detail(config_report, &workflow.account_id, &workflow.thread_id).await?;
     Ok(WorkflowActionReport {
-        action: action.to_owned(),
+        action,
         workflow,
         current_draft: detail.current_draft,
         cleanup_preview: None,
@@ -1703,6 +1721,7 @@ mod tests {
     use secrecy::SecretString;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc::sync_channel;
     use std::time::Duration;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
@@ -2767,11 +2786,11 @@ mod tests {
             },
         )
         .unwrap();
-        let lock_handle = lock_workflow_store_after_delay(
+        let (lock_handle, lock_ready) = lock_workflow_store_until_locked(
             config_report.config.store.database_path.clone(),
-            Duration::from_millis(0),
             Duration::from_millis(150),
         );
+        lock_ready.recv().unwrap();
 
         let _error = promote_workflow(
             &config_report,
@@ -3536,5 +3555,33 @@ mod tests {
             std::thread::sleep(hold_for);
             connection.execute_batch("ROLLBACK;").unwrap();
         })
+    }
+
+    fn lock_workflow_store_until_locked(
+        database_path: PathBuf,
+        hold_for: Duration,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        let (ready_tx, ready_rx) = sync_channel(1);
+        let handle = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(database_path).unwrap();
+            connection.busy_timeout(Duration::from_millis(1)).unwrap();
+            loop {
+                match connection.execute_batch("BEGIN IMMEDIATE;") {
+                    Ok(()) => {
+                        ready_tx.send(()).unwrap();
+                        break;
+                    }
+                    Err(rusqlite::Error::SqliteFailure(error, _))
+                        if error.code == rusqlite::ErrorCode::DatabaseBusy =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("failed to lock workflow store: {error}"),
+                }
+            }
+            std::thread::sleep(hold_for);
+            connection.execute_batch("ROLLBACK;").unwrap();
+        });
+        (handle, ready_rx)
     }
 }

@@ -2,7 +2,9 @@ mod model;
 mod output;
 mod service;
 
-pub use model::{CleanupPreview, WorkflowActionReport, WorkflowListReport, WorkflowShowReport};
+pub use model::{
+    CleanupPreview, WorkflowAction, WorkflowActionReport, WorkflowListReport, WorkflowShowReport,
+};
 pub(crate) use service::WorkflowServiceError;
 pub use service::{
     cleanup_archive, cleanup_label, cleanup_trash, draft_attach_add, draft_attach_remove,

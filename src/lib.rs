@@ -48,14 +48,13 @@ pub(crate) enum CliInputError {
 
 pub async fn run() -> ExitCode {
     let cli = Cli::parse();
-    let json = command_requests_json(&cli.command);
-    let operation = command_operation(&cli.command);
+    let metadata = command_metadata(&cli.command);
 
     match run_cli(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let report = cli_output::describe_error(&error, operation);
-            if json {
+            let report = cli_output::describe_error(&error, metadata.operation);
+            if metadata.json {
                 if let Err(output_error) = cli_output::print_json_failure(&report) {
                     eprintln!("{output_error:#}");
                     eprintln!("{error:#}");
@@ -114,95 +113,149 @@ fn resolve_snooze_until(until: Option<String>, clear: bool) -> Result<Option<Str
     if clear { Ok(None) } else { Ok(until) }
 }
 
-fn command_requests_json(command: &Commands) -> bool {
-    match command {
-        Commands::Auth { command } => match command {
-            AuthCommand::Setup { json, .. }
-            | AuthCommand::Login { json, .. }
-            | AuthCommand::Status { json }
-            | AuthCommand::Logout { json } => *json,
-        },
-        Commands::Account { command } => matches!(command, AccountCommand::Show { json: true }),
-        Commands::Config { command } => matches!(command, ConfigCommand::Show { json: true }),
-        Commands::Paths { json } | Commands::Doctor { json } => *json,
-        Commands::Roadmap => false,
-        Commands::Search(args) => args.json,
-        Commands::Sync { command } => matches!(command, SyncCommand::Run { json: true, .. }),
-        Commands::Workflow { command } => match command {
-            WorkflowCommand::List { json, .. }
-            | WorkflowCommand::Show { json, .. }
-            | WorkflowCommand::Promote { json, .. }
-            | WorkflowCommand::Snooze { json, .. } => *json,
-        },
-        Commands::Triage { command } => matches!(command, TriageCommand::Set { json: true, .. }),
-        Commands::Draft { command } => match command {
-            DraftCommand::Start { json, .. }
-            | DraftCommand::Body { json, .. }
-            | DraftCommand::Send { json, .. } => *json,
-            DraftCommand::Attach { command } => match command {
-                DraftAttachmentCommand::Add { json, .. }
-                | DraftAttachmentCommand::Remove { json, .. } => *json,
-            },
-        },
-        Commands::Cleanup { command } => match command {
-            CleanupCommand::Archive { json, .. }
-            | CleanupCommand::Label { json, .. }
-            | CleanupCommand::Trash { json, .. } => *json,
-        },
-        Commands::Workspace { .. } => false,
-        Commands::Gmail { command } => matches!(
-            command,
-            GmailCommand::Labels {
-                command: GmailLabelsCommand::List { json: true }
-            }
-        ),
-        Commands::Store { command } => match command {
-            StoreCommand::Init { json } | StoreCommand::Doctor { json } => *json,
-        },
-    }
+#[derive(Clone, Copy)]
+struct CommandMetadata {
+    json: bool,
+    operation: &'static str,
 }
 
-fn command_operation(command: &Commands) -> &'static str {
+fn command_metadata(command: &Commands) -> CommandMetadata {
     match command {
         Commands::Auth { command } => match command {
-            AuthCommand::Setup { .. } => "auth.setup",
-            AuthCommand::Login { .. } => "auth.login",
-            AuthCommand::Status { .. } => "auth.status",
-            AuthCommand::Logout { .. } => "auth.logout",
+            AuthCommand::Setup { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "auth.setup",
+            },
+            AuthCommand::Login { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "auth.login",
+            },
+            AuthCommand::Status { json } => CommandMetadata {
+                json: *json,
+                operation: "auth.status",
+            },
+            AuthCommand::Logout { json } => CommandMetadata {
+                json: *json,
+                operation: "auth.logout",
+            },
         },
-        Commands::Account { .. } => "account.show",
-        Commands::Config { .. } => "config.show",
-        Commands::Paths { .. } => "paths.show",
-        Commands::Doctor { .. } => "doctor.show",
-        Commands::Roadmap => "roadmap.show",
-        Commands::Search(_) => "search.run",
-        Commands::Sync { .. } => "sync.run",
+        Commands::Account { command } => match command {
+            AccountCommand::Show { json } => CommandMetadata {
+                json: *json,
+                operation: "account.show",
+            },
+        },
+        Commands::Config { command } => match command {
+            ConfigCommand::Show { json } => CommandMetadata {
+                json: *json,
+                operation: "config.show",
+            },
+        },
+        Commands::Paths { json } => CommandMetadata {
+            json: *json,
+            operation: "paths.show",
+        },
+        Commands::Doctor { json } => CommandMetadata {
+            json: *json,
+            operation: "doctor.show",
+        },
+        Commands::Roadmap => CommandMetadata {
+            json: false,
+            operation: "roadmap.show",
+        },
+        Commands::Search(args) => CommandMetadata {
+            json: args.json,
+            operation: "search.run",
+        },
+        Commands::Sync { command } => match command {
+            SyncCommand::Run { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "sync.run",
+            },
+        },
         Commands::Workflow { command } => match command {
-            WorkflowCommand::List { .. } => "workflow.list",
-            WorkflowCommand::Show { .. } => "workflow.show",
-            WorkflowCommand::Promote { .. } => "workflow.promote",
-            WorkflowCommand::Snooze { .. } => "workflow.snooze",
+            WorkflowCommand::List { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.list",
+            },
+            WorkflowCommand::Show { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.show",
+            },
+            WorkflowCommand::Promote { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.promote",
+            },
+            WorkflowCommand::Snooze { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.snooze",
+            },
         },
-        Commands::Triage { .. } => "triage.set",
+        Commands::Triage { command } => match command {
+            TriageCommand::Set { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "triage.set",
+            },
+        },
         Commands::Draft { command } => match command {
-            DraftCommand::Start { .. } => "draft.start",
-            DraftCommand::Body { .. } => "draft.body.set",
-            DraftCommand::Send { .. } => "draft.send",
+            DraftCommand::Start { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "draft.start",
+            },
+            DraftCommand::Body { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "draft.body.set",
+            },
+            DraftCommand::Send { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "draft.send",
+            },
             DraftCommand::Attach { command } => match command {
-                DraftAttachmentCommand::Add { .. } => "draft.attachment.add",
-                DraftAttachmentCommand::Remove { .. } => "draft.attachment.remove",
+                DraftAttachmentCommand::Add { json, .. } => CommandMetadata {
+                    json: *json,
+                    operation: "draft.attachment.add",
+                },
+                DraftAttachmentCommand::Remove { json, .. } => CommandMetadata {
+                    json: *json,
+                    operation: "draft.attachment.remove",
+                },
             },
         },
         Commands::Cleanup { command } => match command {
-            CleanupCommand::Archive { .. } => "cleanup.archive",
-            CleanupCommand::Label { .. } => "cleanup.label",
-            CleanupCommand::Trash { .. } => "cleanup.trash",
+            CleanupCommand::Archive { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "cleanup.archive",
+            },
+            CleanupCommand::Label { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "cleanup.label",
+            },
+            CleanupCommand::Trash { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "cleanup.trash",
+            },
         },
-        Commands::Workspace { .. } => "workspace.init",
-        Commands::Gmail { .. } => "gmail.labels.list",
+        Commands::Workspace { .. } => CommandMetadata {
+            json: false,
+            operation: "workspace.init",
+        },
+        Commands::Gmail { command } => match command {
+            GmailCommand::Labels {
+                command: GmailLabelsCommand::List { json },
+            } => CommandMetadata {
+                json: *json,
+                operation: "gmail.labels.list",
+            },
+        },
         Commands::Store { command } => match command {
-            StoreCommand::Init { .. } => "store.init",
-            StoreCommand::Doctor { .. } => "store.doctor",
+            StoreCommand::Init { json } => CommandMetadata {
+                json: *json,
+                operation: "store.init",
+            },
+            StoreCommand::Doctor { json } => CommandMetadata {
+                json: *json,
+                operation: "store.doctor",
+            },
         },
     }
 }
