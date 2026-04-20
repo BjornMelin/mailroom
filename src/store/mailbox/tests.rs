@@ -531,6 +531,178 @@ fn inspect_mailbox_reports_sync_state_and_counts() {
 }
 
 #[test]
+fn inspect_mailbox_tolerates_pre_attachment_schema() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-inspect-pre-attachments");
+    let database_path = repo_root.path().join("mailroom.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE gmail_sync_state (
+                account_id TEXT PRIMARY KEY,
+                cursor_history_id TEXT,
+                bootstrap_query TEXT NOT NULL,
+                last_sync_mode TEXT NOT NULL,
+                last_sync_status TEXT NOT NULL,
+                last_error TEXT,
+                last_sync_epoch_s INTEGER NOT NULL,
+                last_full_sync_success_epoch_s INTEGER,
+                last_incremental_sync_success_epoch_s INTEGER,
+                message_count INTEGER NOT NULL,
+                label_count INTEGER NOT NULL,
+                indexed_message_count INTEGER NOT NULL
+            );
+            CREATE TABLE gmail_messages (
+                message_rowid INTEGER PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                history_id TEXT NOT NULL,
+                internal_date_epoch_ms INTEGER NOT NULL,
+                snippet TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                from_header TEXT NOT NULL,
+                from_address TEXT,
+                recipient_headers TEXT NOT NULL,
+                to_header TEXT NOT NULL,
+                cc_header TEXT NOT NULL,
+                bcc_header TEXT NOT NULL,
+                reply_to_header TEXT NOT NULL,
+                size_estimate INTEGER NOT NULL,
+                label_names_text TEXT NOT NULL
+            );
+            CREATE TABLE gmail_labels (
+                label_rowid INTEGER PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                label_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                label_type TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE gmail_message_search USING fts5(
+                subject,
+                from_header,
+                recipient_headers,
+                snippet,
+                label_names_text
+            );
+            ",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO gmail_sync_state (
+                account_id,
+                cursor_history_id,
+                bootstrap_query,
+                last_sync_mode,
+                last_sync_status,
+                last_error,
+                last_sync_epoch_s,
+                last_full_sync_success_epoch_s,
+                last_incremental_sync_success_epoch_s,
+                message_count,
+                label_count,
+                indexed_message_count
+            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, NULL, ?8, ?9, ?10)",
+            rusqlite::params![
+                "gmail:operator@example.com",
+                "201",
+                "newer_than:90d",
+                "full",
+                "ok",
+                200_i64,
+                200_i64,
+                1_i64,
+                1_i64,
+                1_i64,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO gmail_messages (
+                message_rowid,
+                account_id,
+                message_id,
+                thread_id,
+                history_id,
+                internal_date_epoch_ms,
+                snippet,
+                subject,
+                from_header,
+                from_address,
+                recipient_headers,
+                to_header,
+                cc_header,
+                bcc_header,
+                reply_to_header,
+                size_estimate,
+                label_names_text
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '', '', '', ?13, ?14)",
+            rusqlite::params![
+                1_i64,
+                "gmail:operator@example.com",
+                "m-1",
+                "t-1",
+                "201",
+                1_700_000_000_000_i64,
+                "Project alpha launch checklist",
+                "Alpha launch",
+                "Alice <alice@example.com>",
+                "alice@example.com",
+                "operator@example.com",
+                "operator@example.com",
+                123_i64,
+                "INBOX",
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO gmail_labels (label_rowid, account_id, label_id, name, label_type)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            rusqlite::params!["gmail:operator@example.com", "INBOX", "INBOX", "system",],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO gmail_message_search (
+                rowid,
+                subject,
+                from_header,
+                recipient_headers,
+                snippet,
+                label_names_text
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                1_i64,
+                "Alpha launch",
+                "Alice <alice@example.com>",
+                "operator@example.com",
+                "Project alpha launch checklist",
+                "INBOX",
+            ],
+        )
+        .unwrap();
+
+    let report = inspect_mailbox(&database_path, 5_000).unwrap().unwrap();
+
+    assert_eq!(report.message_count, 1);
+    assert_eq!(report.label_count, 1);
+    assert_eq!(report.indexed_message_count, 1);
+    assert_eq!(report.attachment_count, 0);
+    assert_eq!(report.vaulted_attachment_count, 0);
+    assert_eq!(report.attachment_export_count, 0);
+    assert_eq!(
+        report
+            .sync_state
+            .as_ref()
+            .map(|state| state.account_id.as_str()),
+        Some("gmail:operator@example.com")
+    );
+}
+
+#[test]
 fn replace_messages_rejects_mixed_account_batches() {
     let repo_root = unique_temp_dir("mailroom-mailbox-replace-account-guard");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());

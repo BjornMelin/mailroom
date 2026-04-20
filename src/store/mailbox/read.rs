@@ -37,9 +37,8 @@ pub(crate) fn inspect_mailbox(
     let message_count = count_messages(&connection, None)?;
     let label_count = count_labels(&connection, None)?;
     let indexed_message_count = count_indexed_messages(&connection, None)?;
-    let attachment_count = count_attachments(&connection, None)?;
-    let vaulted_attachment_count = count_vaulted_attachments(&connection, None)?;
-    let attachment_export_count = count_attachment_export_events(&connection, None)?;
+    let (attachment_count, vaulted_attachment_count, attachment_export_count) =
+        attachment_counts(&connection)?;
 
     Ok(Some(MailboxDoctorReport {
         sync_state,
@@ -50,6 +49,14 @@ pub(crate) fn inspect_mailbox(
         vaulted_attachment_count,
         attachment_export_count,
     }))
+}
+
+fn attachment_counts(connection: &Connection) -> Result<(i64, i64, i64), MailboxReadError> {
+    Ok((
+        count_attachments(connection, None)?,
+        count_vaulted_attachments(connection, None)?,
+        count_attachment_export_events(connection, None)?,
+    ))
 }
 
 pub(crate) fn list_attachments(
