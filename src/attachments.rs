@@ -7,7 +7,7 @@ use anyhow::Result;
 use sanitize_filename::sanitize;
 use serde::Serialize;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -398,7 +398,9 @@ pub async fn export(
     .await
     .map_err(|source| AttachmentServiceError::BlockingTask { source })?;
     if let Err(error) = record_result {
-        cleanup_export_file_task(destination_path.clone()).await;
+        if copy_result.copied {
+            cleanup_export_file_task(destination_path.clone()).await;
+        }
         return Err(map_mailbox_write_error(error).into());
     }
 
@@ -899,19 +901,12 @@ fn hash_file_blake3(path: &Path) -> Result<String> {
         source,
     })?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| AttachmentServiceError::ReadFile {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
+    hasher
+        .update_reader(&mut file)
+        .map_err(|source| AttachmentServiceError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -1344,6 +1339,113 @@ mod tests {
             "expected store write error, got {error:#}"
         );
         assert!(!destination_path.exists());
+    }
+
+    #[tokio::test]
+    async fn export_preserves_preexisting_matching_file_when_event_persistence_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+        accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: 1,
+                threads_total: 1,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+        crate::store::mailbox::upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[crate::store::mailbox::GmailMessageUpsertInput {
+                account_id: String::from("gmail:operator@example.com"),
+                message_id: String::from("m-1"),
+                thread_id: String::from("t-1"),
+                history_id: String::from("101"),
+                internal_date_epoch_ms: 1_700_000_000_000,
+                snippet: String::from("Attachment fixture"),
+                subject: String::from("Fixture"),
+                from_header: String::from("Fixture <fixture@example.com>"),
+                from_address: Some(String::from("fixture@example.com")),
+                recipient_headers: String::from("operator@example.com"),
+                to_header: String::from("operator@example.com"),
+                cc_header: String::new(),
+                bcc_header: String::new(),
+                reply_to_header: String::new(),
+                size_estimate: 256,
+                label_ids: vec![String::from("INBOX")],
+                label_names_text: String::from("INBOX"),
+                attachments: vec![GmailAttachmentUpsertInput {
+                    attachment_key: String::from("m-1:1.2"),
+                    part_id: String::from("1.2"),
+                    gmail_attachment_id: Some(String::from("att-1")),
+                    filename: String::from("fixture.bin"),
+                    mime_type: String::from("application/octet-stream"),
+                    size_bytes: 5,
+                    content_disposition: Some(String::from("attachment")),
+                    content_id: None,
+                    is_inline: false,
+                }],
+            }],
+            100,
+        )
+        .unwrap();
+        let vault_bytes = b"hello".to_vec();
+        let vault_write = write_vault_bytes(&paths.vault_dir, vault_bytes.clone()).unwrap();
+        crate::store::mailbox::set_attachment_vault_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::mailbox::AttachmentVaultStateUpdate {
+                account_id: String::from("gmail:operator@example.com"),
+                attachment_key: String::from("m-1:1.2"),
+                content_hash: vault_write.content_hash.clone(),
+                relative_path: vault_write.relative_path,
+                size_bytes: vault_write.size_bytes,
+                fetched_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        let connection =
+            rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TRIGGER fail_attachment_export_event_insert
+                BEFORE INSERT ON attachment_export_events
+                BEGIN
+                    SELECT RAISE(FAIL, 'forced export event failure');
+                END;
+                ",
+            )
+            .unwrap();
+
+        let destination_path = temp_dir.path().join("exports/preexisting.bin");
+        fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
+        fs::write(&destination_path, &vault_bytes).unwrap();
+
+        let error = export(
+            &config_report,
+            String::from("m-1:1.2"),
+            Some(destination_path.clone()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<AttachmentServiceError>(),
+                Some(AttachmentServiceError::StoreWrite { .. })
+            ),
+            "expected store write error, got {error:#}"
+        );
+        assert_eq!(fs::read(&destination_path).unwrap(), vault_bytes);
     }
 
     #[test]
