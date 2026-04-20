@@ -375,6 +375,10 @@ impl GmailClient {
         }
     }
 
+    pub(crate) async fn ensure_authenticated(&self) -> GmailResult<()> {
+        self.active_credentials().await.map(|_| ())
+    }
+
     pub(crate) async fn list_labels(&self) -> GmailResult<Vec<GmailLabel>> {
         let query = [(
             "fields",

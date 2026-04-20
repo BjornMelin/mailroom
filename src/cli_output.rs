@@ -211,8 +211,8 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowStoreWriteError::ReadyToSendRequiresSendableDraft => {
                 (ErrorCode::Conflict, "store.workflow.write.ready_to_send")
             }
-            WorkflowStoreWriteError::Read(_)
-            | WorkflowStoreWriteError::OpenDatabase { .. }
+            WorkflowStoreWriteError::Read(_) => (ErrorCode::StorageFailure, "store.workflow.read"),
+            WorkflowStoreWriteError::OpenDatabase { .. }
             | WorkflowStoreWriteError::ReloadWorkflow { .. }
             | WorkflowStoreWriteError::ReloadDraftRevision { .. }
             | WorkflowStoreWriteError::Query(_)
@@ -326,6 +326,7 @@ mod tests {
     use super::{describe_error, exit_code, json_failure_value, json_success_value};
     use crate::CliInputError;
     use crate::gmail::GmailClientError;
+    use crate::store::workflows::{WorkflowStoreReadError, WorkflowStoreWriteError};
     use crate::workflows::WorkflowServiceError;
     use anyhow::anyhow;
     use reqwest::StatusCode;
@@ -477,7 +478,7 @@ mod tests {
 
     #[test]
     fn workflow_store_write_conflict_maps_to_conflict_code() {
-        let error = anyhow!(crate::store::workflows::WorkflowStoreWriteError::Conflict {
+        let error = anyhow!(WorkflowStoreWriteError::Conflict {
             thread_id: String::from("thread-1"),
         });
 
@@ -491,6 +492,21 @@ mod tests {
         );
         assert_eq!(value["error"]["operation"], json!("workflow.promote"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(5));
+    }
+
+    #[test]
+    fn workflow_store_write_read_passthrough_maps_to_read_kind() {
+        let error = anyhow!(WorkflowStoreWriteError::Read(WorkflowStoreReadError::Io(
+            std::io::Error::new(ErrorKind::NotFound, "missing db"),
+        )));
+
+        let report = describe_error(&error, "workflow.promote");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.workflow.read"));
+        assert_eq!(value["error"]["operation"], json!("workflow.promote"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
     }
 
     #[test]

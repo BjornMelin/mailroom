@@ -566,6 +566,17 @@ pub async fn promote_workflow(
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let mut promoted_close_gmail_client: Option<crate::gmail::GmailClient> = None;
+    if to_stage == store::workflows::WorkflowStage::Closed {
+        let detail = workflow_detail(config_report, &account_id, &thread_id).await?;
+        let needs_draft_retirement = detail.workflow.current_draft_revision_id.is_some()
+            || detail.workflow.gmail_draft_id.is_some();
+        if needs_draft_retirement {
+            let gmail_client = crate::gmail_client_for_config(config_report)?;
+            gmail_client.ensure_authenticated().await?;
+            promoted_close_gmail_client = Some(gmail_client);
+        }
+    }
     let mut workflow = join_blocking(
         spawn_blocking(move || {
             store::workflows::upsert_stage(
@@ -586,7 +597,14 @@ pub async fn promote_workflow(
     if to_stage == store::workflows::WorkflowStage::Closed
         && (workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some())
     {
-        let gmail_client = crate::gmail_client_for_config(config_report)?;
+        let gmail_client = match promoted_close_gmail_client {
+            Some(gmail_client) => gmail_client,
+            None => {
+                let gmail_client = crate::gmail_client_for_config(config_report)?;
+                gmail_client.ensure_authenticated().await?;
+                gmail_client
+            }
+        };
         delete_remote_draft_if_present(&gmail_client, workflow.gmail_draft_id.as_deref()).await?;
         workflow = retire_local_draft_state(
             config_report,
@@ -977,6 +995,8 @@ async fn cleanup_impl(
         "remove_label_names": remove_label_names,
         "execute": execute,
     }))?;
+    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    gmail_client.ensure_authenticated().await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
@@ -997,7 +1017,6 @@ async fn cleanup_impl(
         "cleanup.apply",
     )
     .await?;
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
     match action {
         store::workflows::CleanupAction::Archive => {
             gmail_client
@@ -3037,6 +3056,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn promote_workflow_closed_requires_gmail_auth_before_persisting_close() {
+        let mock_server = MockServer::start().await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, &mock_server);
+        seed_local_thread_snapshot(&config_report);
+        set_triage_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::workflows::SetTriageStateInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                triage_bucket: TriageBucket::NeedsReplySoon,
+                note: None,
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-1"),
+                    internal_date_epoch_ms: 100,
+                    subject: String::from("Project"),
+                    from_header: String::from("Alice <alice@example.com>"),
+                    snippet: String::from("Project status"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        set_remote_draft_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::workflows::RemoteDraftStateInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                gmail_draft_id: Some(String::from("draft-1")),
+                gmail_draft_message_id: Some(String::from("draft-message-1")),
+                gmail_draft_thread_id: Some(String::from("thread-1")),
+                updated_at_epoch_s: 102,
+            },
+        )
+        .unwrap();
+
+        let error = promote_workflow(
+            &config_report,
+            String::from("thread-1"),
+            crate::store::workflows::WorkflowStage::Closed,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mailroom is not authenticated; run `mailroom auth login` first"
+        );
+
+        let detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            detail.workflow.current_stage,
+            crate::store::workflows::WorkflowStage::Triage
+        );
+        assert_eq!(detail.workflow.gmail_draft_id.as_deref(), Some("draft-1"));
+    }
+
+    #[tokio::test]
     async fn promote_workflow_closed_keeps_remote_draft_when_local_close_write_fails() {
         let mock_server = MockServer::start().await;
         Mock::given(method("DELETE"))
@@ -3568,6 +3654,55 @@ mod tests {
             request.method.as_str() == "DELETE"
                 && request.url.path() == "/gmail/v1/users/me/drafts/draft-1"
         }));
+    }
+
+    #[tokio::test]
+    async fn cleanup_archive_requires_gmail_auth_before_persisting_cleanup() {
+        let mock_server = MockServer::start().await;
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, &mock_server);
+        seed_local_thread_snapshot(&config_report);
+        set_triage_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::workflows::SetTriageStateInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                triage_bucket: TriageBucket::NeedsReplySoon,
+                note: None,
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-1"),
+                    internal_date_epoch_ms: 100,
+                    subject: String::from("Project"),
+                    from_header: String::from("Alice <alice@example.com>"),
+                    snippet: String::from("Project status"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+
+        let error = cleanup_archive(&config_report, String::from("thread-1"), true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "mailroom is not authenticated; run `mailroom auth login` first"
+        );
+
+        let detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            detail.workflow.current_stage,
+            crate::store::workflows::WorkflowStage::Triage
+        );
+        assert_eq!(detail.workflow.last_cleanup_action, None);
     }
 
     #[tokio::test]
