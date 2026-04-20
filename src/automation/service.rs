@@ -93,7 +93,12 @@ pub enum AutomationServiceError {
 
 pub async fn validate_rules(config_report: &ConfigReport) -> Result<AutomationRulesValidateReport> {
     ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
-    Ok(validate_rule_file(config_report)?)
+    let config_report = config_report.clone();
+    let report = spawn_blocking(move || validate_rule_file(&config_report))
+        .await
+        .map_err(|source| AutomationServiceError::BlockingTask { source })?;
+    let report = report?;
+    Ok(report)
 }
 
 pub async fn run_preview(
@@ -107,10 +112,17 @@ pub async fn run_preview(
     ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
     init_store_task(config_report).await?;
     let account_id = resolve_automation_account_id_task(config_report).await?;
-    let resolved_rules = resolve_rule_selection(config_report, &request.rule_ids)?;
-    let thread_candidates = list_latest_thread_candidates_task(config_report, &account_id).await?;
+    let config_report = config_report.clone();
+    let rule_ids = request.rule_ids.clone();
+    let blocking_config_report = config_report.clone();
+    let resolved_rules =
+        spawn_blocking(move || resolve_rule_selection(&blocking_config_report, &rule_ids))
+            .await
+            .map_err(|source| AutomationServiceError::BlockingTask { source })?;
+    let resolved_rules = resolved_rules?;
+    let thread_candidates = list_latest_thread_candidates_task(&config_report, &account_id).await?;
     let planned_rules =
-        resolve_rule_actions_task(config_report, &account_id, &resolved_rules).await?;
+        resolve_rule_actions_task(&config_report, &account_id, &resolved_rules).await?;
     let now_epoch_ms = current_epoch_seconds()?.saturating_mul(1_000);
 
     let preview_candidates = build_run_candidates(
@@ -121,7 +133,7 @@ pub async fn run_preview(
     );
     let created_at_epoch_s = current_epoch_seconds()?;
     let detail = create_automation_run_task(
-        config_report,
+        &config_report,
         &CreateAutomationRunInput {
             account_id,
             rule_file_path: resolved_rules.path.display().to_string(),
