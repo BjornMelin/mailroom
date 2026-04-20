@@ -505,37 +505,6 @@ pub async fn promote_workflow(
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let (gmail_draft_id, needs_draft_retirement) =
-        if to_stage == store::workflows::WorkflowStage::Closed {
-            let thread_id_for_query = thread_id.clone();
-            let account_id_for_query = account_id.clone();
-            let existing_workflow = join_blocking(
-                spawn_blocking({
-                    let database_path = database_path.clone();
-                    move || {
-                        store::workflows::get_workflow_detail(
-                            &database_path,
-                            busy_timeout_ms,
-                            &account_id_for_query,
-                            &thread_id_for_query,
-                        )
-                    }
-                }),
-                "workflow.detail",
-            )
-            .await?;
-            (
-                existing_workflow
-                    .as_ref()
-                    .and_then(|detail| detail.workflow.gmail_draft_id.clone()),
-                existing_workflow.as_ref().is_some_and(|detail| {
-                    detail.workflow.current_draft_revision_id.is_some()
-                        || detail.workflow.gmail_draft_id.is_some()
-                }),
-            )
-        } else {
-            (None, false)
-        };
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
     let mut workflow = join_blocking(
         spawn_blocking(move || {
@@ -554,9 +523,11 @@ pub async fn promote_workflow(
         "workflow.promote",
     )
     .await?;
-    if to_stage == store::workflows::WorkflowStage::Closed && needs_draft_retirement {
+    if to_stage == store::workflows::WorkflowStage::Closed
+        && (workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some())
+    {
         let gmail_client = crate::gmail_client_for_config(config_report)?;
-        delete_remote_draft_if_present(&gmail_client, gmail_draft_id.as_deref()).await?;
+        delete_remote_draft_if_present(&gmail_client, workflow.gmail_draft_id.as_deref()).await?;
         workflow = retire_local_draft_state(
             config_report,
             &workflow.account_id,
@@ -986,11 +957,10 @@ async fn cleanup_impl(
         "cleanup.apply",
     )
     .await?;
-    let needs_draft_retirement = detail.workflow.current_draft_revision_id.is_some()
-        || detail.workflow.gmail_draft_id.is_some();
+    let needs_draft_retirement =
+        workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some();
     if needs_draft_retirement {
-        delete_remote_draft_if_present(&gmail_client, detail.workflow.gmail_draft_id.as_deref())
-            .await?;
+        delete_remote_draft_if_present(&gmail_client, workflow.gmail_draft_id.as_deref()).await?;
         workflow = retire_local_draft_state(
             config_report,
             &workflow.account_id,
