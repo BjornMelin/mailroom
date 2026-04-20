@@ -357,13 +357,23 @@ where
 mod tests {
     use super::{describe_error, exit_code, json_failure_value, json_success_value};
     use crate::CliInputError;
+    use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
+    use crate::config::resolve;
     use crate::gmail::GmailClientError;
+    use crate::store;
+    use crate::store::accounts;
+    use crate::store::mailbox::{GmailAttachmentUpsertInput, GmailMessageUpsertInput};
     use crate::store::workflows::{WorkflowStoreReadError, WorkflowStoreWriteError};
     use crate::workflows::WorkflowServiceError;
+    use crate::workspace::WorkspacePaths;
     use anyhow::anyhow;
     use reqwest::StatusCode;
+    use secrecy::SecretString;
     use serde_json::{json, to_value};
+    use std::fs;
     use std::io::ErrorKind;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn json_success_envelope_wraps_payload_in_success_and_data() {
@@ -675,5 +685,144 @@ mod tests {
         let human_stderr_lower = human_stderr.to_lowercase();
         assert!(human_stderr_lower.contains("no active gmail account found"));
         assert!(human_stderr_lower.contains("mailroom auth login"));
+    }
+
+    #[tokio::test]
+    async fn attachment_fetch_cli_contract_maps_zero_row_vault_update_to_not_found() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo"));
+        let manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let repo_root = TempDir::new().unwrap();
+        fs::create_dir(repo_root.path().join(".git")).unwrap();
+        let home_dir = TempDir::new().unwrap();
+        let xdg_config_home = home_dir.path().join(".config");
+
+        let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        store::init(&config_report).unwrap();
+        accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: 1,
+                threads_total: 1,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+        store::mailbox::upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[GmailMessageUpsertInput {
+                account_id: String::from("gmail:operator@example.com"),
+                message_id: String::from("m-1"),
+                thread_id: String::from("t-1"),
+                history_id: String::from("101"),
+                internal_date_epoch_ms: 1_700_000_000_000,
+                snippet: String::from("Attachment fixture"),
+                subject: String::from("Fixture"),
+                from_header: String::from("Fixture <fixture@example.com>"),
+                from_address: Some(String::from("fixture@example.com")),
+                recipient_headers: String::from("operator@example.com"),
+                to_header: String::from("operator@example.com"),
+                cc_header: String::new(),
+                bcc_header: String::new(),
+                reply_to_header: String::new(),
+                size_estimate: 256,
+                label_ids: vec![String::from("INBOX")],
+                label_names_text: String::from("INBOX"),
+                attachments: vec![GmailAttachmentUpsertInput {
+                    attachment_key: String::from("m-1:1.2"),
+                    part_id: String::from("1.2"),
+                    gmail_attachment_id: Some(String::from("att-1")),
+                    filename: String::from("fixture.bin"),
+                    mime_type: String::from("application/octet-stream"),
+                    size_bytes: 5,
+                    content_disposition: Some(String::from("attachment")),
+                    content_id: None,
+                    is_inline: false,
+                }],
+            }],
+            100,
+        )
+        .unwrap();
+
+        let credentials_path = config_report
+            .config
+            .gmail
+            .credential_path(&config_report.config.workspace);
+        FileCredentialStore::new(credentials_path)
+            .save(&StoredCredentials {
+                account_id: String::from("gmail:operator@example.com"),
+                access_token: SecretString::from(String::from("fixture-access-token")),
+                refresh_token: None,
+                expires_at_epoch_s: Some(u64::MAX),
+                scopes: vec![String::from("https://www.googleapis.com/auth/gmail.modify")],
+            })
+            .unwrap();
+
+        let connection =
+            rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER test_ignore_attachment_vault_update
+                 BEFORE UPDATE OF
+                     vault_content_hash,
+                     vault_relative_path,
+                     vault_size_bytes,
+                     vault_fetched_at_epoch_s
+                 ON gmail_message_attachments
+                 FOR EACH ROW
+                 BEGIN
+                     SELECT RAISE(IGNORE);
+                 END;",
+            )
+            .unwrap();
+
+        let gmail_api = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-1/attachments/att-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": "aGVsbG8",
+                "size": 5
+            })))
+            .mount(&gmail_api)
+            .await;
+
+        let output = Command::new(&cargo)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                &manifest_path,
+                "--",
+                "attachment",
+                "fetch",
+                "m-1:1.2",
+                "--json",
+            ])
+            .env("XDG_CONFIG_HOME", &xdg_config_home)
+            .env(
+                "MAILROOM_GMAIL__API_BASE_URL",
+                format!("{}/gmail/v1", gmail_api.uri()),
+            )
+            .current_dir(repo_root.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(4));
+        assert!(output.stderr.is_empty());
+
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["success"], json!(false));
+        assert_eq!(value["error"]["code"], json!("not_found"));
+        assert_eq!(value["error"]["kind"], json!("attachment.not_found"));
+        assert_eq!(value["error"]["operation"], json!("attachment.fetch"));
     }
 }

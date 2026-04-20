@@ -695,13 +695,14 @@ fn harden_vault_file_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_export_path, existing_vault_report, export_filename, map_vault_state_write_error,
-        resolve_vault_relative_path,
+        copy_from_vault, default_export_path, existing_vault_report, export_filename,
+        hash_file_blake3, map_vault_state_write_error, resolve_vault_relative_path,
     };
     use crate::store::mailbox::AttachmentDetailRecord;
     use crate::workspace::WorkspacePaths;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     #[test]
@@ -802,6 +803,52 @@ mod tests {
             super::AttachmentServiceError::AttachmentNotFound { attachment_key }
             if attachment_key == "m-1:1.2"
         ));
+    }
+
+    #[test]
+    #[ignore = "benchmark harness; run manually with: cargo test benchmark_attachment_export_hash_compare_tiers -- --ignored --nocapture"]
+    fn benchmark_attachment_export_hash_compare_tiers() {
+        const COPY_ITERATIONS: usize = 8;
+        const HASH_COMPARE_ITERATIONS: usize = 20;
+        let tiers = [
+            ("small", 64 * 1024_usize),
+            ("medium", 1024 * 1024_usize),
+            ("large", 8 * 1024 * 1024_usize),
+        ];
+
+        for (tier_name, size_bytes) in tiers {
+            let temp_dir = TempDir::new().unwrap();
+            let source_path = temp_dir.path().join("source.bin");
+            let destination_path = temp_dir.path().join("exports/export.bin");
+            fs::write(&source_path, vec![0xAC_u8; size_bytes]).unwrap();
+            let source_hash = hash_file_blake3(&source_path).unwrap();
+
+            let copy_started_at = Instant::now();
+            for _ in 0..COPY_ITERATIONS {
+                if destination_path.exists() {
+                    fs::remove_file(&destination_path).unwrap();
+                }
+                let copied =
+                    copy_from_vault(&source_path, &destination_path, &source_hash).unwrap();
+                assert!(copied.copied);
+            }
+            let copy_elapsed = copy_started_at.elapsed();
+
+            let compare_started_at = Instant::now();
+            for _ in 0..HASH_COMPARE_ITERATIONS {
+                let copied =
+                    copy_from_vault(&source_path, &destination_path, &source_hash).unwrap();
+                assert!(!copied.copied);
+            }
+            let compare_elapsed = compare_started_at.elapsed();
+
+            let copy_avg_ms = copy_elapsed.as_secs_f64() * 1_000.0 / COPY_ITERATIONS as f64;
+            let compare_avg_ms =
+                compare_elapsed.as_secs_f64() * 1_000.0 / HASH_COMPARE_ITERATIONS as f64;
+            println!(
+                "{{\"bench\":\"attachment_lane.export\",\"tier\":\"{tier_name}\",\"size_bytes\":{size_bytes},\"copy_avg_ms\":{copy_avg_ms:.3},\"hash_compare_avg_ms\":{compare_avg_ms:.3}}}"
+            );
+        }
     }
 
     fn detail_with_vault(

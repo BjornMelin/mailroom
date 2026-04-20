@@ -1,7 +1,7 @@
 use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
     GmailAttachmentUpsertInput, GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError,
-    SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, commit_incremental_sync,
+    SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
     get_attachment_detail, get_sync_state, inspect_mailbox, list_attachments,
     record_attachment_export, replace_labels, replace_labels_and_report_reindex, replace_messages,
     search::build_plain_fts5_query, search_messages, set_attachment_vault_state, upsert_messages,
@@ -11,6 +11,7 @@ use crate::config::resolve;
 use crate::gmail::GmailLabel;
 use crate::store::{accounts, init};
 use crate::workspace::WorkspacePaths;
+use std::time::Instant;
 use tempfile::{Builder, TempDir};
 
 #[test]
@@ -1557,6 +1558,117 @@ fn attachment_vault_updates_are_account_scoped_for_shared_attachment_keys() {
         Some("hash-a")
     );
     assert!(other_detail.vault_content_hash.is_none());
+}
+
+#[test]
+#[ignore = "benchmark harness; run manually with: cargo test benchmark_attachment_lane_full_sync_tiers -- --ignored --nocapture"]
+fn benchmark_attachment_lane_full_sync_tiers() {
+    let tiers = [("small", 250_usize), ("medium", 1_000), ("large", 3_000)];
+
+    for (tier_name, message_count) in tiers {
+        let repo_root = unique_temp_dir("mailroom-bench-full-sync");
+        let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+        accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: i64::try_from(message_count).unwrap(),
+                threads_total: i64::try_from(message_count).unwrap(),
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+
+        let labels = [gmail_label("INBOX", "INBOX", "system")];
+        replace_labels(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            &labels,
+            100,
+        )
+        .unwrap();
+
+        let messages = (0..message_count)
+            .map(|index| GmailMessageUpsertInput {
+                account_id: String::from("gmail:operator@example.com"),
+                message_id: format!("m-{index}"),
+                thread_id: format!("t-{index}"),
+                history_id: format!("{}", 200 + index),
+                internal_date_epoch_ms: 1_700_000_000_000 + i64::try_from(index).unwrap(),
+                snippet: format!("Benchmark mailbox payload {index}"),
+                subject: format!("Benchmark subject {index}"),
+                from_header: String::from("Benchmark <bench@example.com>"),
+                from_address: Some(String::from("bench@example.com")),
+                recipient_headers: String::from("operator@example.com"),
+                to_header: String::from("operator@example.com"),
+                cc_header: String::new(),
+                bcc_header: String::new(),
+                reply_to_header: String::new(),
+                size_estimate: 4096,
+                label_ids: vec![String::from("INBOX")],
+                label_names_text: String::from("INBOX"),
+                attachments: vec![GmailAttachmentUpsertInput {
+                    attachment_key: format!("m-{index}:1.1"),
+                    part_id: String::from("1.1"),
+                    gmail_attachment_id: Some(format!("att-{index}")),
+                    filename: format!("bench-{index}.bin"),
+                    mime_type: String::from("application/octet-stream"),
+                    size_bytes: 1024,
+                    content_disposition: Some(String::from("attachment")),
+                    content_id: None,
+                    is_inline: false,
+                }],
+            })
+            .collect::<Vec<_>>();
+
+        let started_at = Instant::now();
+        commit_full_sync(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            &labels,
+            &messages,
+            300,
+            &SyncStateUpdate {
+                account_id: String::from("gmail:operator@example.com"),
+                cursor_history_id: Some(format!("{}", 300 + message_count)),
+                bootstrap_query: String::from("newer_than:90d"),
+                last_sync_mode: SyncMode::Full,
+                last_sync_status: SyncStatus::Ok,
+                last_error: None,
+                last_sync_epoch_s: 300,
+                last_full_sync_success_epoch_s: Some(300),
+                last_incremental_sync_success_epoch_s: None,
+            },
+        )
+        .unwrap();
+        let elapsed = started_at.elapsed();
+
+        let mailbox = inspect_mailbox(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(mailbox.message_count, i64::try_from(message_count).unwrap());
+        assert_eq!(
+            mailbox.attachment_count,
+            i64::try_from(message_count).unwrap()
+        );
+
+        let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
+        let per_message_us = elapsed.as_secs_f64() * 1_000_000.0 / message_count as f64;
+        println!(
+            "{{\"bench\":\"attachment_lane.full_sync\",\"tier\":\"{tier_name}\",\"messages\":{message_count},\"attachments\":{message_count},\"elapsed_ms\":{elapsed_ms:.3},\"per_message_us\":{per_message_us:.3}}}"
+        );
+    }
 }
 
 fn unique_temp_dir(prefix: &str) -> TempDir {
