@@ -36,7 +36,6 @@ const MESSAGE_CATALOG_FIELDS: &str = concat!(
     ")",
     ")",
     ")",
-    ")",
     ")"
 );
 
@@ -2066,6 +2065,29 @@ mod tests {
         assert_eq!(
             catalog.attachments[0].gmail_attachment_id.as_deref(),
             Some("att-deep")
+        );
+    }
+
+    #[test]
+    fn message_catalog_fields_selector_is_parenthesis_balanced() {
+        let mut depth = 0_i32;
+        for character in MESSAGE_CATALOG_FIELDS.chars() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    assert!(
+                        depth >= 0,
+                        "MESSAGE_CATALOG_FIELDS has an unmatched closing parenthesis"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            depth, 0,
+            "MESSAGE_CATALOG_FIELDS must have balanced parentheses"
         );
     }
 
