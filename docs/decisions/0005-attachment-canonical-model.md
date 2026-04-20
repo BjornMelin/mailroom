@@ -25,7 +25,7 @@ rows beneath synced Gmail messages.
 
 - `gmail_messages` remains the canonical durable mailbox record.
 - `gmail_message_attachments` stores parsed Gmail attachment metadata keyed to
-  `message_rowid`.
+  `message_rowid` with account-scoped identity (`account_id`, `attachment_key`).
 - sync catalogs attachment metadata only; it does not fetch bytes eagerly.
 - attachment bytes are fetched on demand from Gmail into the repo-local vault at
   `.mailroom/vault/`.
@@ -33,6 +33,20 @@ rows beneath synced Gmail messages.
 - exports are explicit operator actions that copy from the vault into
   `.mailroom/exports/` or a chosen destination and append an export event.
 - SQLite does not store attachment bytes.
+
+## Hardening Notes (2026-04-20)
+
+- vault reuse now requires hash and size verification before returning
+  `downloaded=false`; mismatches trigger a re-download path.
+- export conflict checks hash existing destination files using streaming reads
+  (no full-file in-memory load).
+- vault-state writes now fail fast when no attachment row is updated, and that
+  stale-key race maps to the stable `attachment.not_found` JSON contract.
+- the filename sanitizer dependency remains `sanitize-filename` `0.7.0-beta`,
+  with repo-owned non-empty wrapper guardrails and regression tests; this stays
+  intentional until a stable line provides equivalent behavior.
+- downgrade check policy: if stable crate behavior reaches parity with current
+  guardrails, move off beta in the same change that preserves the tests.
 
 ## Consequences
 
