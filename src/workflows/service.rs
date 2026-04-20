@@ -928,6 +928,20 @@ pub(crate) async fn cleanup_tracked_thread_for_automation(
         return Ok(false);
     };
 
+    let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
+        Some(
+            resolve_cleanup_label_ids(
+                config_report,
+                account_id,
+                &add_label_names,
+                &remove_label_names,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     execute_cleanup_after_auth(
         config_report,
         gmail_client,
@@ -935,6 +949,7 @@ pub(crate) async fn cleanup_tracked_thread_for_automation(
         action,
         add_label_names,
         remove_label_names,
+        resolved_label_ids,
     )
     .await?;
     Ok(true)
@@ -968,39 +983,19 @@ async fn cleanup_impl(
         });
     }
 
-    if action == store::workflows::CleanupAction::Label {
-        let database_path = config_report.config.store.database_path.clone();
-        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-        let account_id = account_id.clone();
-        let add_names = add_label_names.clone();
-        let remove_names = remove_label_names.clone();
-        let (add_resolved, remove_resolved) = join_blocking(
-            spawn_blocking(move || {
-                Ok::<_, store::mailbox::MailboxReadError>((
-                    store::mailbox::resolve_label_ids_by_names(
-                        &database_path,
-                        busy_timeout_ms,
-                        &account_id,
-                        &add_names,
-                    )?,
-                    store::mailbox::resolve_label_ids_by_names(
-                        &database_path,
-                        busy_timeout_ms,
-                        &account_id,
-                        &remove_names,
-                    )?,
-                ))
-            }),
-            "cleanup.label.resolve_labels",
+    let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
+        Some(
+            resolve_cleanup_label_ids(
+                config_report,
+                &account_id,
+                &add_label_names,
+                &remove_label_names,
+            )
+            .await?,
         )
-        .await?;
-        if add_resolved.len() != add_label_names.len() {
-            return Err(WorkflowServiceError::AddLabelsNotFoundLocally);
-        }
-        if remove_resolved.len() != remove_label_names.len() {
-            return Err(WorkflowServiceError::RemoveLabelsNotFoundLocally);
-        }
-    }
+    } else {
+        None
+    };
 
     let gmail_client = crate::gmail_client_for_config(config_report)?;
     gmail_client.get_profile_with_access_scope().await?;
@@ -1011,6 +1006,7 @@ async fn cleanup_impl(
         action,
         add_label_names,
         remove_label_names,
+        resolved_label_ids,
     )
     .await?;
     let sync_report = best_effort_sync_report(
@@ -1033,54 +1029,10 @@ async fn execute_cleanup_after_auth(
     action: store::workflows::CleanupAction,
     add_label_names: Vec<String>,
     remove_label_names: Vec<String>,
+    resolved_label_ids: Option<(Vec<String>, Vec<String>)>,
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
     let account_id = detail.workflow.account_id.clone();
     let thread_id = detail.workflow.thread_id.clone();
-    let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
-        let database_path = config_report.config.store.database_path.clone();
-        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-        let account_id = account_id.clone();
-        let add_names = add_label_names.clone();
-        let remove_names = remove_label_names.clone();
-        let (add_resolved, remove_resolved) = join_blocking(
-            spawn_blocking(move || {
-                Ok::<_, store::mailbox::MailboxReadError>((
-                    store::mailbox::resolve_label_ids_by_names(
-                        &database_path,
-                        busy_timeout_ms,
-                        &account_id,
-                        &add_names,
-                    )?,
-                    store::mailbox::resolve_label_ids_by_names(
-                        &database_path,
-                        busy_timeout_ms,
-                        &account_id,
-                        &remove_names,
-                    )?,
-                ))
-            }),
-            "cleanup.label.resolve_labels",
-        )
-        .await?;
-        if add_resolved.len() != add_label_names.len() {
-            return Err(WorkflowServiceError::AddLabelsNotFoundLocally);
-        }
-        if remove_resolved.len() != remove_label_names.len() {
-            return Err(WorkflowServiceError::RemoveLabelsNotFoundLocally);
-        }
-        Some((
-            add_resolved
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            remove_resolved
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-        ))
-    } else {
-        None
-    };
 
     let payload_json = serde_json::to_string(&serde_json::json!({
         "add_label_names": add_label_names,
@@ -1142,6 +1094,56 @@ async fn execute_cleanup_after_auth(
     }
 
     Ok(workflow)
+}
+
+async fn resolve_cleanup_label_ids(
+    config_report: &ConfigReport,
+    account_id: &str,
+    add_label_names: &[String],
+    remove_label_names: &[String],
+) -> WorkflowResult<(Vec<String>, Vec<String>)> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let account_id = account_id.to_owned();
+    let add_names = add_label_names.to_owned();
+    let remove_names = remove_label_names.to_owned();
+    let (add_resolved, remove_resolved) = join_blocking(
+        spawn_blocking(move || {
+            Ok::<_, store::mailbox::MailboxReadError>((
+                store::mailbox::resolve_label_ids_by_names(
+                    &database_path,
+                    busy_timeout_ms,
+                    &account_id,
+                    &add_names,
+                )?,
+                store::mailbox::resolve_label_ids_by_names(
+                    &database_path,
+                    busy_timeout_ms,
+                    &account_id,
+                    &remove_names,
+                )?,
+            ))
+        }),
+        "cleanup.label.resolve_labels",
+    )
+    .await?;
+    if add_resolved.len() != add_label_names.len() {
+        return Err(WorkflowServiceError::AddLabelsNotFoundLocally);
+    }
+    if remove_resolved.len() != remove_label_names.len() {
+        return Err(WorkflowServiceError::RemoveLabelsNotFoundLocally);
+    }
+
+    Ok((
+        add_resolved
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        remove_resolved
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 async fn update_draft_revision<F>(
