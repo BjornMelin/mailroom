@@ -26,6 +26,7 @@ CREATE TABLE thread_workflows (
     created_at_epoch_s INTEGER NOT NULL,
     updated_at_epoch_s INTEGER NOT NULL,
     UNIQUE (account_id, thread_id),
+    UNIQUE (workflow_id, account_id, thread_id),
     FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
 ) STRICT;
 
@@ -54,7 +55,10 @@ CREATE TABLE thread_workflow_events (
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
     created_at_epoch_s INTEGER NOT NULL,
     FOREIGN KEY (workflow_id) REFERENCES thread_workflows (workflow_id) ON DELETE CASCADE,
-    FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
+    FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id, account_id, thread_id)
+        REFERENCES thread_workflows (workflow_id, account_id, thread_id)
+        ON DELETE CASCADE
 ) STRICT;
 
 CREATE INDEX thread_workflow_events_workflow_idx
@@ -71,13 +75,19 @@ CREATE TABLE thread_draft_revisions (
     source_message_id TEXT NOT NULL,
     reply_mode TEXT NOT NULL CHECK (reply_mode IN ('reply', 'reply_all')),
     subject TEXT NOT NULL,
-    to_addresses_json TEXT NOT NULL CHECK (json_valid(to_addresses_json)),
-    cc_addresses_json TEXT NOT NULL CHECK (json_valid(cc_addresses_json)),
-    bcc_addresses_json TEXT NOT NULL CHECK (json_valid(bcc_addresses_json)),
+    to_addresses_json TEXT NOT NULL
+        CHECK (json_valid(to_addresses_json) AND json_type(to_addresses_json) = 'array'),
+    cc_addresses_json TEXT NOT NULL
+        CHECK (json_valid(cc_addresses_json) AND json_type(cc_addresses_json) = 'array'),
+    bcc_addresses_json TEXT NOT NULL
+        CHECK (json_valid(bcc_addresses_json) AND json_type(bcc_addresses_json) = 'array'),
     body_text TEXT NOT NULL,
     created_at_epoch_s INTEGER NOT NULL,
     FOREIGN KEY (workflow_id) REFERENCES thread_workflows (workflow_id) ON DELETE CASCADE,
-    FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
+    FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE,
+    FOREIGN KEY (workflow_id, account_id, thread_id)
+        REFERENCES thread_workflows (workflow_id, account_id, thread_id)
+        ON DELETE CASCADE
 ) STRICT;
 
 CREATE INDEX thread_draft_revisions_workflow_idx
@@ -97,3 +107,61 @@ CREATE TABLE thread_draft_attachments (
 
 CREATE INDEX thread_draft_attachments_revision_idx
     ON thread_draft_attachments (draft_revision_id, created_at_epoch_s DESC);
+
+CREATE TRIGGER thread_draft_revisions_validate_recipient_json_insert
+BEFORE INSERT ON thread_draft_revisions
+WHEN NOT (
+    json_valid(NEW.to_addresses_json)
+    AND json_type(NEW.to_addresses_json) = 'array'
+    AND json_valid(NEW.cc_addresses_json)
+    AND json_type(NEW.cc_addresses_json) = 'array'
+    AND json_valid(NEW.bcc_addresses_json)
+    AND json_type(NEW.bcc_addresses_json) = 'array'
+    AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.to_addresses_json) AS recipient
+        WHERE recipient.type != 'text'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.cc_addresses_json) AS recipient
+        WHERE recipient.type != 'text'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.bcc_addresses_json) AS recipient
+        WHERE recipient.type != 'text'
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'recipient address columns must be JSON arrays of strings');
+END;
+
+CREATE TRIGGER thread_draft_revisions_validate_recipient_json_update
+BEFORE UPDATE ON thread_draft_revisions
+WHEN NOT (
+    json_valid(NEW.to_addresses_json)
+    AND json_type(NEW.to_addresses_json) = 'array'
+    AND json_valid(NEW.cc_addresses_json)
+    AND json_type(NEW.cc_addresses_json) = 'array'
+    AND json_valid(NEW.bcc_addresses_json)
+    AND json_type(NEW.bcc_addresses_json) = 'array'
+    AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.to_addresses_json) AS recipient
+        WHERE recipient.type != 'text'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.cc_addresses_json) AS recipient
+        WHERE recipient.type != 'text'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.bcc_addresses_json) AS recipient
+        WHERE recipient.type != 'text'
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'recipient address columns must be JSON arrays of strings');
+END;

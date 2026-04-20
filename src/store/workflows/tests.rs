@@ -158,6 +158,130 @@ fn set_triage_state_preserves_existing_stage() {
 }
 
 #[test]
+fn set_triage_state_preserves_newer_existing_snapshot_metadata() {
+    let repo_root = unique_temp_dir("mailroom-workflow-triage-preserve-snapshot");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SetTriageStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::Urgent,
+            note: None,
+            snapshot: WorkflowMessageSnapshot {
+                message_id: String::from("message-new"),
+                internal_date_epoch_ms: 200,
+                subject: String::from("Current subject"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Snippet for Current subject"),
+            },
+            updated_at_epoch_s: 200,
+        },
+    )
+    .unwrap();
+
+    let workflow = set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SetTriageStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::Fyi,
+            note: Some(String::from("Re-triaged from cached snapshot")),
+            snapshot: WorkflowMessageSnapshot {
+                message_id: String::from("message-stale"),
+                internal_date_epoch_ms: 100,
+                subject: String::from("Stale subject"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Snippet for Stale subject"),
+            },
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(workflow.triage_bucket, Some(TriageBucket::Fyi));
+    assert_eq!(workflow.latest_message_id.as_deref(), Some("message-new"));
+    assert_eq!(workflow.latest_message_subject, "Current subject");
+    assert_eq!(
+        workflow.latest_message_snippet,
+        "Snippet for Current subject"
+    );
+}
+
+#[test]
+fn persist_workflow_rejects_stale_updates() {
+    let repo_root = unique_temp_dir("mailroom-workflow-write-conflict");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SetTriageStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::Urgent,
+            note: None,
+            snapshot: snapshot("message-1", "Project status"),
+            updated_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let stale_workflow = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-1",
+    )
+    .unwrap()
+    .unwrap()
+    .workflow;
+    let expected_updated_at_epoch_s = stale_workflow.updated_at_epoch_s;
+
+    let mut connection = crate::store::connection::open_or_create(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE thread_workflows
+             SET updated_at_epoch_s = updated_at_epoch_s + 1
+             WHERE workflow_id = ?1",
+            rusqlite::params![stale_workflow.workflow_id],
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+
+    let error = super::write::persist_workflow(
+        &transaction,
+        super::WorkflowRecord {
+            note: String::from("conflicting note"),
+            updated_at_epoch_s: expected_updated_at_epoch_s + 10,
+            ..stale_workflow
+        },
+        Some(expected_updated_at_epoch_s),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        super::WorkflowStoreWriteError::Conflict { .. }
+    ));
+}
+
+#[test]
 fn upsert_draft_revision_persists_current_draft_and_attachments() {
     let repo_root = unique_temp_dir("mailroom-workflow-draft");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());

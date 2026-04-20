@@ -406,6 +406,8 @@ pub(crate) enum WorkflowStoreWriteError {
     ReloadWorkflow { thread_id: String },
     #[error("failed to reload draft revision {draft_revision_id}")]
     ReloadDraftRevision { draft_revision_id: String },
+    #[error("workflow write conflict for thread {thread_id}")]
+    Conflict { thread_id: String },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
     #[error(transparent)]

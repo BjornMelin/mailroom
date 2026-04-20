@@ -187,6 +187,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowStoreWriteError::MissingWorkflow { .. } => {
                 (ErrorCode::NotFound, "store.workflow.write.missing_workflow")
             }
+            WorkflowStoreWriteError::Conflict { .. } => {
+                (ErrorCode::Conflict, "store.workflow.write.conflict")
+            }
             WorkflowStoreWriteError::ReadyToSendRequiresSendableDraft => {
                 (ErrorCode::Conflict, "store.workflow.write.ready_to_send")
             }
@@ -436,5 +439,88 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("storage_failure"));
         assert_eq!(value["error"]["kind"], json!("workflow.send.reconcile"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn workflow_store_write_conflict_maps_to_conflict_code() {
+        let error = anyhow!(crate::store::workflows::WorkflowStoreWriteError::Conflict {
+            thread_id: String::from("thread-1"),
+        });
+
+        let report = describe_error(&error, "workflow.promote");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("conflict"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("store.workflow.write.conflict")
+        );
+        assert_eq!(value["error"]["operation"], json!("workflow.promote"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(5));
+    }
+
+    #[test]
+    fn cli_entrypoint_contract_round_trips_json_and_human_failures() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo"));
+        let manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let repo_root = TempDir::new().unwrap();
+        std::fs::create_dir(repo_root.path().join(".git")).unwrap();
+        let home_dir = TempDir::new().unwrap();
+        let xdg_config_home = home_dir.path().join(".config");
+
+        let report = describe_error(
+            &anyhow!(WorkflowServiceError::NoActiveAccount),
+            "workflow.show",
+        );
+        let expected_json = to_value(json_failure_value(&report)).unwrap();
+
+        let json_output = Command::new(&cargo)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                &manifest_path,
+                "--",
+                "workflow",
+                "show",
+                "thread-1",
+                "--json",
+            ])
+            .env("XDG_CONFIG_HOME", &xdg_config_home)
+            .current_dir(repo_root.path())
+            .output()
+            .unwrap();
+        assert_eq!(json_output.status.code(), Some(3));
+        assert!(json_output.stderr.is_empty());
+
+        let json_stdout = String::from_utf8(json_output.stdout).unwrap();
+        let json_value: serde_json::Value = serde_json::from_str(&json_stdout).unwrap();
+        assert_eq!(json_value, expected_json);
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
+
+        let human_output = Command::new(&cargo)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                &manifest_path,
+                "--",
+                "workflow",
+                "show",
+                "thread-1",
+            ])
+            .env("XDG_CONFIG_HOME", &xdg_config_home)
+            .current_dir(repo_root.path())
+            .output()
+            .unwrap();
+        assert_eq!(human_output.status.code(), Some(3));
+        assert!(human_output.stdout.is_empty());
+        let human_stderr = String::from_utf8(human_output.stderr).unwrap();
+        let human_stderr_lower = human_stderr.to_lowercase();
+        assert!(human_stderr_lower.contains("no active gmail account found"));
+        assert!(human_stderr_lower.contains("mailroom auth login"));
     }
 }
