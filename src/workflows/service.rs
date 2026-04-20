@@ -573,7 +573,7 @@ pub async fn promote_workflow(
             || detail.workflow.gmail_draft_id.is_some();
         if needs_draft_retirement {
             let gmail_client = crate::gmail_client_for_config(config_report)?;
-            gmail_client.ensure_authenticated().await?;
+            gmail_client.get_profile_with_access_scope().await?;
             promoted_close_gmail_client = Some(gmail_client);
         }
     }
@@ -601,7 +601,7 @@ pub async fn promote_workflow(
             Some(gmail_client) => gmail_client,
             None => {
                 let gmail_client = crate::gmail_client_for_config(config_report)?;
-                gmail_client.ensure_authenticated().await?;
+                gmail_client.get_profile_with_access_scope().await?;
                 gmail_client
             }
         };
@@ -996,7 +996,7 @@ async fn cleanup_impl(
         "execute": execute,
     }))?;
     let gmail_client = crate::gmail_client_for_config(config_report)?;
-    gmail_client.ensure_authenticated().await?;
+    gmail_client.get_profile_with_access_scope().await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
@@ -2871,6 +2871,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_archive_deletes_remote_draft_and_treats_sync_as_best_effort() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-1"))
             .respond_with(ResponseTemplate::new(204))
@@ -2977,6 +2978,7 @@ mod tests {
     #[tokio::test]
     async fn promote_workflow_closed_deletes_remote_draft_after_local_close_persists() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-1"))
             .respond_with(ResponseTemplate::new(204))
@@ -3125,6 +3127,7 @@ mod tests {
     #[tokio::test]
     async fn promote_workflow_closed_keeps_remote_draft_when_local_close_write_fails() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-1"))
             .respond_with(ResponseTemplate::new(204))
@@ -3328,6 +3331,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_archive_treats_missing_remote_draft_as_already_deleted() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-stale"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
@@ -3463,6 +3467,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_archive_keeps_local_remote_draft_state_when_cleanup_mutation_fails() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-1"))
             .respond_with(ResponseTemplate::new(204))
@@ -3558,6 +3563,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_archive_keeps_remote_draft_when_local_cleanup_write_fails() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-1"))
             .respond_with(ResponseTemplate::new(204))
@@ -3708,6 +3714,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_archive_keeps_draft_state_when_remote_delete_fails() {
         let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
         Mock::given(method("DELETE"))
             .and(path("/gmail/v1/users/me/drafts/draft-1"))
             .respond_with(ResponseTemplate::new(500).set_body_string("draft delete failed"))
