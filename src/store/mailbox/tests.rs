@@ -1,8 +1,10 @@
 use super::{
-    GmailMessageUpsertInput, IncrementalSyncCommit, SearchQuery, SyncMode, SyncStateUpdate,
-    SyncStatus, commit_incremental_sync, get_sync_state, inspect_mailbox, replace_labels,
+    AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
+    GmailAttachmentUpsertInput, GmailMessageUpsertInput, IncrementalSyncCommit, SearchQuery,
+    SyncMode, SyncStateUpdate, SyncStatus, commit_incremental_sync, get_attachment_detail,
+    get_sync_state, inspect_mailbox, list_attachments, record_attachment_export, replace_labels,
     replace_labels_and_report_reindex, replace_messages, search::build_plain_fts5_query,
-    search_messages, upsert_messages, upsert_sync_state,
+    search_messages, set_attachment_vault_state, upsert_messages, upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -65,6 +67,7 @@ fn search_messages_returns_ranked_hits_with_filters() {
                 size_estimate: 123,
                 label_ids: vec![String::from("INBOX"), String::from("Label_1")],
                 label_names_text: String::from("INBOX Project/Alpha"),
+                attachments: Vec::new(),
             },
             GmailMessageUpsertInput {
                 account_id: String::from("gmail:operator@example.com"),
@@ -84,6 +87,7 @@ fn search_messages_returns_ranked_hits_with_filters() {
                 size_estimate: 456,
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
+                attachments: Vec::new(),
             },
         ],
         100,
@@ -173,6 +177,7 @@ fn search_messages_matches_common_punctuated_terms() {
             size_estimate: 123,
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
+            attachments: Vec::new(),
         }],
         110,
     )
@@ -257,6 +262,7 @@ fn replace_labels_reindexes_search_label_names() {
             size_estimate: 123,
             label_ids: vec![String::from("INBOX"), String::from("Label_1")],
             label_names_text: String::from("INBOX ProjectAlpha"),
+            attachments: Vec::new(),
         }],
         120,
     )
@@ -362,6 +368,7 @@ fn replace_labels_skips_search_reindex_when_label_names_are_unchanged() {
             size_estimate: 123,
             label_ids: vec![String::from("INBOX"), String::from("Label_1")],
             label_names_text: String::from("INBOX ProjectAlpha"),
+            attachments: Vec::new(),
         }],
         120,
     )
@@ -454,6 +461,7 @@ fn inspect_mailbox_reports_sync_state_and_counts() {
             size_estimate: 123,
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
+            attachments: Vec::new(),
         }],
         200,
     )
@@ -562,6 +570,7 @@ fn replace_messages_rejects_mixed_account_batches() {
             size_estimate: 123,
             label_ids: vec![],
             label_names_text: String::new(),
+            attachments: Vec::new(),
         }],
         100,
     )
@@ -589,6 +598,7 @@ fn replace_messages_rejects_mixed_account_batches() {
             size_estimate: 456,
             label_ids: vec![],
             label_names_text: String::new(),
+            attachments: Vec::new(),
         }],
         100,
     )
@@ -679,6 +689,7 @@ fn upsert_sync_state_scopes_indexed_message_count_to_the_account() {
             size_estimate: 123,
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
+            attachments: Vec::new(),
         }],
         200,
     )
@@ -726,6 +737,7 @@ fn upsert_sync_state_scopes_indexed_message_count_to_the_account() {
             size_estimate: 456,
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
+            attachments: Vec::new(),
         }],
         300,
     )
@@ -806,6 +818,7 @@ fn apply_incremental_changes_rejects_messages_for_a_different_account() {
             size_estimate: 123,
             label_ids: vec![],
             label_names_text: String::new(),
+            attachments: Vec::new(),
         }],
         100,
     )
@@ -833,6 +846,7 @@ fn apply_incremental_changes_rejects_messages_for_a_different_account() {
             size_estimate: 456,
             label_ids: vec![],
             label_names_text: String::new(),
+            attachments: Vec::new(),
         }],
         &[String::from("m-1")],
         100,
@@ -1080,6 +1094,7 @@ fn delete_messages_removes_large_deduplicated_batches() {
             size_estimate: 123,
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
+            attachments: Vec::new(),
         })
         .collect::<Vec<_>>();
     upsert_messages(
@@ -1112,6 +1127,271 @@ fn delete_messages_removes_large_deduplicated_batches() {
     .unwrap();
     assert_eq!(mailbox.message_count, 0);
     assert_eq!(mailbox.indexed_message_count, 0);
+}
+
+#[test]
+fn attachment_catalog_round_trips_through_message_upserts() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-attachments-catalog");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[gmail_label("INBOX", "INBOX", "system")],
+        100,
+    )
+    .unwrap();
+
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("101"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Quarterly statement attached"),
+            subject: String::from("Statement"),
+            from_header: String::from("Billing <billing@example.com>"),
+            from_address: Some(String::from("billing@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![GmailAttachmentUpsertInput {
+                attachment_key: String::from("m-1:1.2"),
+                part_id: String::from("1.2"),
+                gmail_attachment_id: Some(String::from("att-1")),
+                filename: String::from("statement.pdf"),
+                mime_type: String::from("application/pdf"),
+                size_bytes: 42,
+                content_disposition: Some(String::from("attachment; filename=\"statement.pdf\"")),
+                content_id: None,
+                is_inline: false,
+            }],
+        }],
+        100,
+    )
+    .unwrap();
+
+    let attachments = list_attachments(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentListQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            thread_id: None,
+            message_id: None,
+            filename: None,
+            mime_type: None,
+            fetched_only: false,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].attachment_key, "m-1:1.2");
+    assert_eq!(attachments[0].filename, "statement.pdf");
+
+    let detail = get_attachment_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        "m-1:1.2",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(detail.gmail_attachment_id.as_deref(), Some("att-1"));
+    assert_eq!(detail.mime_type, "application/pdf");
+
+    let mailbox = inspect_mailbox(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mailbox.attachment_count, 1);
+    assert_eq!(mailbox.vaulted_attachment_count, 0);
+    assert_eq!(mailbox.attachment_export_count, 0);
+}
+
+#[test]
+fn attachment_vault_state_and_export_events_are_reflected_in_reads() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-attachments-vault");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[gmail_label("INBOX", "INBOX", "system")],
+        100,
+    )
+    .unwrap();
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("101"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Quarterly statement attached"),
+            subject: String::from("Statement"),
+            from_header: String::from("Billing <billing@example.com>"),
+            from_address: Some(String::from("billing@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![GmailAttachmentUpsertInput {
+                attachment_key: String::from("m-1:1.2"),
+                part_id: String::from("1.2"),
+                gmail_attachment_id: Some(String::from("att-1")),
+                filename: String::from("statement.pdf"),
+                mime_type: String::from("application/pdf"),
+                size_bytes: 42,
+                content_disposition: Some(String::from("attachment; filename=\"statement.pdf\"")),
+                content_id: None,
+                is_inline: false,
+            }],
+        }],
+        100,
+    )
+    .unwrap();
+
+    set_attachment_vault_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentVaultStateUpdate {
+            attachment_key: String::from("m-1:1.2"),
+            content_hash: String::from("abc123"),
+            relative_path: String::from("blake3/ab/abc123"),
+            size_bytes: 42,
+            fetched_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+    record_attachment_export(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentExportEventInput {
+            account_id: String::from("gmail:operator@example.com"),
+            attachment_key: String::from("m-1:1.2"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            destination_path: String::from("/tmp/export/statement.pdf"),
+            content_hash: String::from("abc123"),
+            exported_at_epoch_s: 102,
+        },
+    )
+    .unwrap();
+
+    let fetched_only = list_attachments(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentListQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            thread_id: None,
+            message_id: None,
+            filename: None,
+            mime_type: None,
+            fetched_only: true,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(fetched_only.len(), 1);
+    assert_eq!(fetched_only[0].export_count, 1);
+
+    let detail = get_attachment_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        "m-1:1.2",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(detail.vault_content_hash.as_deref(), Some("abc123"));
+    assert_eq!(detail.export_count, 1);
+
+    let mailbox = inspect_mailbox(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mailbox.attachment_count, 1);
+    assert_eq!(mailbox.vaulted_attachment_count, 1);
+    assert_eq!(mailbox.attachment_export_count, 1);
+}
+
+#[test]
+fn set_attachment_vault_state_errors_when_attachment_key_is_missing() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-attachment-vault-missing");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let error = set_attachment_vault_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentVaultStateUpdate {
+            attachment_key: String::from("missing:1.2"),
+            content_hash: String::from("abc123"),
+            relative_path: String::from("blake3/ab/abc123"),
+            size_bytes: 42,
+            fetched_at_epoch_s: 101,
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("attachment `missing:1.2` was not found while persisting vault state")
+    );
 }
 
 fn unique_temp_dir(prefix: &str) -> TempDir {

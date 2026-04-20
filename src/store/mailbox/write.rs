@@ -1,9 +1,13 @@
 use super::read::{count_indexed_messages, count_labels, count_messages, read_sync_state};
-use super::{GmailMessageUpsertInput, SyncStateRecord, SyncStateUpdate, unique_sorted_strings};
+use super::{
+    AttachmentExportEventInput, AttachmentVaultStateUpdate, GmailMessageUpsertInput,
+    SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
+};
 use crate::gmail::GmailLabel;
 use crate::store::connection;
 use anyhow::{Result, anyhow, ensure};
 use rusqlite::{ToSql, params, params_from_iter};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const DELETE_BATCH_SIZE: usize = 400;
@@ -58,11 +62,19 @@ pub(crate) fn commit_full_sync(
 ) -> Result<SyncStateRecord> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
+    let preserved_attachment_vaults =
+        load_attachment_vault_state_for_account(&transaction, account_id)?;
 
     let _should_reindex_search =
         replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
     delete_account_messages(&transaction, account_id)?;
-    write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
+    write_messages(
+        &transaction,
+        account_id,
+        messages,
+        updated_at_epoch_s,
+        Some(&preserved_attachment_vaults),
+    )?;
     let record = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
 
     transaction.commit()?;
@@ -91,6 +103,7 @@ pub(crate) fn commit_incremental_sync(
         account_id,
         commit.messages_to_upsert,
         commit.updated_at_epoch_s,
+        None,
     )?;
     if should_reindex_search {
         reindex_message_search_for_account(&transaction, account_id)?;
@@ -112,7 +125,7 @@ pub(crate) fn replace_messages(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
     delete_account_messages(&transaction, account_id)?;
-    let replaced = write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
+    let replaced = write_messages(&transaction, account_id, messages, updated_at_epoch_s, None)?;
     transaction.commit()?;
     Ok(replaced)
 }
@@ -130,7 +143,7 @@ pub(crate) fn upsert_messages(
         .first()
         .map(|message| message.account_id.as_str())
         .unwrap_or("");
-    let updated = write_messages(&transaction, account_id, messages, updated_at_epoch_s)?;
+    let updated = write_messages(&transaction, account_id, messages, updated_at_epoch_s, None)?;
     transaction.commit()?;
     Ok(updated)
 }
@@ -152,6 +165,7 @@ pub(crate) fn apply_incremental_changes(
         account_id,
         messages_to_upsert,
         updated_at_epoch_s,
+        None,
     )?;
     transaction.commit()?;
     Ok(deleted)
@@ -408,11 +422,90 @@ fn delete_account_messages(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreservedAttachmentVaultState {
+    content_hash: String,
+    relative_path: String,
+    size_bytes: i64,
+    fetched_at_epoch_s: i64,
+}
+
+fn load_attachment_vault_state_for_account(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<BTreeMap<String, PreservedAttachmentVaultState>> {
+    let mut query = transaction.prepare_cached(
+        "SELECT
+             gma.attachment_key,
+             gma.vault_content_hash,
+             gma.vault_relative_path,
+             gma.vault_size_bytes,
+             gma.vault_fetched_at_epoch_s
+         FROM gmail_message_attachments gma
+         INNER JOIN gmail_messages gm
+           ON gm.message_rowid = gma.message_rowid
+         WHERE gm.account_id = ?1
+           AND gma.vault_content_hash IS NOT NULL
+           AND gma.vault_relative_path IS NOT NULL
+           AND gma.vault_size_bytes IS NOT NULL
+           AND gma.vault_fetched_at_epoch_s IS NOT NULL",
+    )?;
+    let rows = query
+        .query_map([account_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PreservedAttachmentVaultState {
+                    content_hash: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                    fetched_at_epoch_s: row.get(4)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
+}
+
+fn load_attachment_vault_state_for_message(
+    transaction: &rusqlite::Transaction<'_>,
+    message_rowid: i64,
+) -> Result<BTreeMap<String, PreservedAttachmentVaultState>> {
+    let mut query = transaction.prepare_cached(
+        "SELECT
+             attachment_key,
+             vault_content_hash,
+             vault_relative_path,
+             vault_size_bytes,
+             vault_fetched_at_epoch_s
+         FROM gmail_message_attachments
+         WHERE message_rowid = ?1
+           AND vault_content_hash IS NOT NULL
+           AND vault_relative_path IS NOT NULL
+           AND vault_size_bytes IS NOT NULL
+           AND vault_fetched_at_epoch_s IS NOT NULL",
+    )?;
+    let rows = query
+        .query_map([message_rowid], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PreservedAttachmentVaultState {
+                    content_hash: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                    fetched_at_epoch_s: row.get(4)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
+}
+
 fn write_messages(
     transaction: &rusqlite::Transaction<'_>,
     account_id: &str,
     messages: &[GmailMessageUpsertInput],
     updated_at_epoch_s: i64,
+    preserved_attachment_vaults: Option<&BTreeMap<String, PreservedAttachmentVaultState>>,
 ) -> Result<usize> {
     if messages.is_empty() {
         return Ok(0);
@@ -461,8 +554,30 @@ fn write_messages(
     )?;
     let mut delete_message_labels =
         transaction.prepare_cached("DELETE FROM gmail_message_labels WHERE message_rowid = ?1")?;
+    let mut delete_message_attachments = transaction
+        .prepare_cached("DELETE FROM gmail_message_attachments WHERE message_rowid = ?1")?;
     let mut insert_message_label = transaction.prepare_cached(
         "INSERT INTO gmail_message_labels (message_rowid, label_id) VALUES (?1, ?2)",
+    )?;
+    let mut insert_attachment = transaction.prepare_cached(
+        "INSERT INTO gmail_message_attachments (
+             message_rowid,
+             attachment_key,
+             part_id,
+             gmail_attachment_id,
+             filename,
+             mime_type,
+             size_bytes,
+             content_disposition,
+             content_id,
+             is_inline,
+             vault_content_hash,
+             vault_relative_path,
+             vault_size_bytes,
+             vault_fetched_at_epoch_s,
+             updated_at_epoch_s
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
     )?;
     let mut upsert_search = transaction.prepare_cached(
         "INSERT OR REPLACE INTO gmail_message_search (
@@ -505,9 +620,39 @@ fn write_messages(
             |row| row.get(0),
         )?;
 
+        let message_attachment_vaults;
+        let existing_attachment_vaults = match preserved_attachment_vaults {
+            Some(preserved) => preserved,
+            None => {
+                message_attachment_vaults =
+                    load_attachment_vault_state_for_message(transaction, message_rowid)?;
+                &message_attachment_vaults
+            }
+        };
         delete_message_labels.execute([message_rowid])?;
+        delete_message_attachments.execute([message_rowid])?;
         for label_id in unique_sorted_strings(&message.label_ids) {
             insert_message_label.execute(params![message_rowid, label_id])?;
+        }
+        for attachment in &message.attachments {
+            let preserved = existing_attachment_vaults.get(&attachment.attachment_key);
+            insert_attachment.execute(params![
+                message_rowid,
+                &attachment.attachment_key,
+                &attachment.part_id,
+                &attachment.gmail_attachment_id,
+                &attachment.filename,
+                &attachment.mime_type,
+                attachment.size_bytes,
+                &attachment.content_disposition,
+                &attachment.content_id,
+                if attachment.is_inline { 1_i64 } else { 0_i64 },
+                preserved.map(|state| state.content_hash.as_str()),
+                preserved.map(|state| state.relative_path.as_str()),
+                preserved.map(|state| state.size_bytes),
+                preserved.map(|state| state.fetched_at_epoch_s),
+                updated_at_epoch_s,
+            ])?;
         }
 
         upsert_search.execute(params![
@@ -521,10 +666,75 @@ fn write_messages(
     }
 
     drop(upsert_search);
+    drop(insert_attachment);
     drop(insert_message_label);
+    drop(delete_message_attachments);
     drop(delete_message_labels);
     drop(upsert_message);
     Ok(messages.len())
+}
+
+pub(crate) fn set_attachment_vault_state(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    update: &AttachmentVaultStateUpdate,
+) -> Result<()> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let transaction = connection.transaction()?;
+    let rows_updated = transaction.execute(
+        "UPDATE gmail_message_attachments
+         SET vault_content_hash = ?2,
+             vault_relative_path = ?3,
+             vault_size_bytes = ?4,
+             vault_fetched_at_epoch_s = ?5
+         WHERE attachment_key = ?1",
+        params![
+            &update.attachment_key,
+            &update.content_hash,
+            &update.relative_path,
+            update.size_bytes,
+            update.fetched_at_epoch_s,
+        ],
+    )?;
+    ensure!(
+        rows_updated == 1,
+        "attachment `{}` was not found while persisting vault state",
+        update.attachment_key
+    );
+    transaction.commit()?;
+    Ok(())
+}
+
+pub(crate) fn record_attachment_export(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    event: &AttachmentExportEventInput,
+) -> Result<()> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT INTO attachment_export_events (
+             account_id,
+             attachment_key,
+             message_id,
+             thread_id,
+             destination_path,
+             content_hash,
+             exported_at_epoch_s
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &event.account_id,
+            &event.attachment_key,
+            &event.message_id,
+            &event.thread_id,
+            &event.destination_path,
+            &event.content_hash,
+            event.exported_at_epoch_s,
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn reindex_message_search_for_account(
