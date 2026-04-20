@@ -1616,16 +1616,26 @@ fn resolve_workflow_account_id_blocking(
         return Ok(active_account.account_id);
     }
 
+    if let Some(thread_id) = thread_id
+        && let Some(account_id) = store::workflows::lookup_workflow_account_id(
+            database_path,
+            busy_timeout_ms,
+            Some(thread_id),
+        )?
+    {
+        return Ok(account_id);
+    }
+
+    if let Some(account_id) =
+        store::workflows::lookup_workflow_account_id(database_path, busy_timeout_ms, None)?
+    {
+        return Ok(account_id);
+    }
+
     if let Some(mailbox) = store::mailbox::inspect_mailbox(database_path, busy_timeout_ms)?
         && let Some(sync_state) = mailbox.sync_state
     {
         return Ok(sync_state.account_id);
-    }
-
-    if let Some(account_id) =
-        store::workflows::lookup_workflow_account_id(database_path, busy_timeout_ms, thread_id)?
-    {
-        return Ok(account_id);
     }
 
     Err(WorkflowServiceError::NoActiveAccount)
