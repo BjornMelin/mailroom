@@ -1,4 +1,5 @@
 use crate::CliInputError;
+use crate::attachments::AttachmentServiceError;
 use crate::auth::{self, oauth_client::OAuthClientError};
 use crate::gmail::GmailClientError;
 use crate::store::{
@@ -127,6 +128,34 @@ fn json_failure_value(error: &JsonErrorBody) -> JsonFailureEnvelope<'_> {
 }
 
 fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
+    if let Some(attachment_error) = find_cause::<AttachmentServiceError>(error) {
+        return match attachment_error {
+            AttachmentServiceError::NoActiveAccount => {
+                (ErrorCode::AuthRequired, "attachment.account.required")
+            }
+            AttachmentServiceError::AttachmentNotFound { .. } => {
+                (ErrorCode::NotFound, "attachment.not_found")
+            }
+            AttachmentServiceError::InvalidLimit
+            | AttachmentServiceError::InvalidVaultPath { .. } => {
+                (ErrorCode::ValidationFailed, "attachment.validation")
+            }
+            AttachmentServiceError::DestinationConflict { .. } => {
+                (ErrorCode::Conflict, "attachment.destination_conflict")
+            }
+            AttachmentServiceError::BlockingTask { .. } => {
+                (ErrorCode::InternalFailure, "attachment.blocking_join")
+            }
+            AttachmentServiceError::CreateDirectory { .. }
+            | AttachmentServiceError::WriteFile { .. }
+            | AttachmentServiceError::ReadFile { .. }
+            | AttachmentServiceError::CopyFile { .. }
+            | AttachmentServiceError::StoreWrite { .. } => {
+                (ErrorCode::StorageFailure, "attachment.storage")
+            }
+        };
+    }
+
     if let Some(workflow_error) = find_cause::<WorkflowServiceError>(error) {
         match workflow_error {
             WorkflowServiceError::WorkflowNotFound { .. }
@@ -251,6 +280,10 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             GmailClientError::Transport { .. } => (ErrorCode::RemoteFailure, "gmail.transport"),
             GmailClientError::ResponseDecode { .. } => {
                 (ErrorCode::RemoteFailure, "gmail.response_decode")
+            }
+            GmailClientError::AttachmentPartMissing { .. }
+            | GmailClientError::AttachmentBodyMissing { .. } => {
+                (ErrorCode::RemoteFailure, "gmail.attachment")
             }
             GmailClientError::Api { status, .. }
                 if *status == reqwest::StatusCode::UNAUTHORIZED =>
@@ -440,6 +473,20 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("validation_failed"));
         assert_eq!(value["error"]["kind"], json!("workflow.validation"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn attachment_store_write_errors_map_to_storage_failure_code() {
+        let error = anyhow!(crate::attachments::AttachmentServiceError::StoreWrite {
+            source: anyhow!("database is locked"),
+        });
+
+        let report = describe_error(&error, "attachment.fetch");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("attachment.storage"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
     }
 
     #[test]

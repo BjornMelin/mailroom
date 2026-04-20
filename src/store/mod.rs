@@ -114,6 +114,15 @@ impl StoreDoctorReport {
                     "mailbox_indexed_message_count={}",
                     mailbox.indexed_message_count
                 );
+                println!("mailbox_attachment_count={}", mailbox.attachment_count);
+                println!(
+                    "mailbox_vaulted_attachment_count={}",
+                    mailbox.vaulted_attachment_count
+                );
+                println!(
+                    "mailbox_attachment_export_count={}",
+                    mailbox.attachment_export_count
+                );
                 match &mailbox.sync_state {
                     Some(sync_state) => {
                         println!("mailbox_sync_status={}", sync_state.last_sync_status);
@@ -347,7 +356,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 5);
+        assert_eq!(report.schema_version, 7);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -477,11 +486,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(5, 6).unwrap_err();
+        let error = super::pending_migrations(7, 8).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 6 is newer than embedded migrations (5)")
+                .contains("database schema version 8 is newer than embedded migrations (7)")
         );
     }
 

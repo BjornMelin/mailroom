@@ -143,6 +143,7 @@ async fn search_before_date_excludes_that_day() {
             size_estimate: 123,
             label_ids: vec![],
             label_names_text: String::new(),
+            attachments: Vec::new(),
         }],
         100,
     )
@@ -191,7 +192,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(5));
+    assert_eq!(store_report.schema_version, Some(7));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -1233,6 +1234,7 @@ fn seed_existing_mailbox_with_custom_labels(
             size_estimate: 123,
             label_ids: seeded_labels.label_ids,
             label_names_text: seeded_labels.label_names_text,
+            attachments: Vec::new(),
         }],
         100,
     )
@@ -1258,6 +1260,11 @@ fn seed_existing_mailbox_with_custom_labels(
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/06-attachment-catalog-export-foundation/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/05-workflow-version-cas/down.sql"

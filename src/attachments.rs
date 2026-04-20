@@ -7,6 +7,7 @@ use anyhow::Result;
 use sanitize_filename::sanitize;
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -66,6 +67,11 @@ pub enum AttachmentServiceError {
         destination_path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("failed to persist attachment store state: {source}")]
+    StoreWrite {
+        #[source]
+        source: anyhow::Error,
     },
 }
 
@@ -266,7 +272,15 @@ pub async fn fetch(
     workspace_paths.ensure_runtime_dirs()?;
     let detail = load_attachment_detail(config_report, &account_id, &attachment_key).await?;
 
-    if let Some(existing_report) = existing_vault_report(&workspace_paths, &account_id, &detail)? {
+    let existing_report = spawn_blocking({
+        let workspace_paths = workspace_paths.clone();
+        let account_id = account_id.clone();
+        let detail = detail.clone();
+        move || existing_vault_report(&workspace_paths, &account_id, &detail)
+    })
+    .await
+    .map_err(|source| AttachmentServiceError::BlockingTask { source })??;
+    if let Some(existing_report) = existing_report {
         return Ok(existing_report);
     }
 
@@ -289,17 +303,21 @@ pub async fn fetch(
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let update = store::mailbox::AttachmentVaultStateUpdate {
+        account_id: account_id.clone(),
         attachment_key: detail.attachment_key.clone(),
         content_hash: vault_write.content_hash.clone(),
         relative_path: vault_write.relative_path.clone(),
         size_bytes: vault_write.size_bytes,
         fetched_at_epoch_s,
     };
-    spawn_blocking(move || {
+    let update_result = spawn_blocking(move || {
         store::mailbox::set_attachment_vault_state(&database_path, busy_timeout_ms, &update)
     })
     .await
-    .map_err(|source| AttachmentServiceError::BlockingTask { source })??;
+    .map_err(|source| AttachmentServiceError::BlockingTask { source })?;
+    if let Err(error) = update_result {
+        return Err(map_vault_state_write_error(error).into());
+    }
 
     Ok(AttachmentFetchReport {
         account_id,
@@ -357,11 +375,14 @@ pub async fn export(
         content_hash: fetched.content_hash.clone(),
         exported_at_epoch_s,
     };
-    spawn_blocking(move || {
+    let record_result = spawn_blocking(move || {
         store::mailbox::record_attachment_export(&database_path, busy_timeout_ms, &event)
     })
     .await
-    .map_err(|source| AttachmentServiceError::BlockingTask { source })??;
+    .map_err(|source| AttachmentServiceError::BlockingTask { source })?;
+    if let Err(source) = record_result {
+        return Err(AttachmentServiceError::StoreWrite { source }.into());
+    }
 
     Ok(AttachmentExportReport {
         account_id: fetched.account_id,
@@ -442,6 +463,22 @@ fn existing_vault_report(
     if !path.exists() {
         return Ok(None);
     }
+    let metadata = fs::metadata(&path).map_err(|source| AttachmentServiceError::ReadFile {
+        path: path.clone(),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if let Some(expected_size) = detail.vault_size_bytes {
+        let observed_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+        if observed_size != expected_size {
+            return Ok(None);
+        }
+    }
+    if hash_file_blake3(&path)? != content_hash {
+        return Ok(None);
+    }
 
     Ok(Some(AttachmentFetchReport {
         account_id: account_id.to_owned(),
@@ -484,9 +521,15 @@ fn resolve_vault_relative_path(
 fn export_filename(filename: &str, attachment_key: &str) -> String {
     let trimmed = filename.trim();
     if !trimmed.is_empty() {
-        return sanitize(trimmed).to_string();
+        let sanitized = sanitize(trimmed).to_string();
+        if !sanitized.trim().is_empty() {
+            return sanitized;
+        }
     }
-    format!("attachment-{}.bin", sanitize(attachment_key))
+    format!(
+        "attachment-{}.bin",
+        sanitize_non_empty(attachment_key, "attachment")
+    )
 }
 
 fn default_export_path(
@@ -497,8 +540,20 @@ fn default_export_path(
 ) -> PathBuf {
     workspace_paths
         .exports_dir
-        .join(sanitize(thread_id).to_string())
-        .join(format!("{}--{}", sanitize(message_id), filename))
+        .join(sanitize_non_empty(thread_id, "thread"))
+        .join(format!(
+            "{}--{}",
+            sanitize_non_empty(message_id, "message"),
+            filename
+        ))
+}
+
+fn sanitize_non_empty(value: &str, fallback: &str) -> String {
+    let sanitized = sanitize(value).to_string();
+    if sanitized.trim().is_empty() {
+        return fallback.to_owned();
+    }
+    sanitized
 }
 
 struct VaultWriteResult {
@@ -560,12 +615,7 @@ fn copy_from_vault(
     })?;
 
     if destination_path.exists() {
-        let existing =
-            fs::read(destination_path).map_err(|source| AttachmentServiceError::ReadFile {
-                path: destination_path.to_path_buf(),
-                source,
-            })?;
-        let existing_hash = blake3::hash(&existing).to_hex().to_string();
+        let existing_hash = hash_file_blake3(destination_path)?;
         if existing_hash == content_hash {
             return Ok(CopyFromVaultResult { copied: false });
         }
@@ -581,6 +631,42 @@ fn copy_from_vault(
         source,
     })?;
     Ok(CopyFromVaultResult { copied: true })
+}
+
+fn hash_file_blake3(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).map_err(|source| AttachmentServiceError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| AttachmentServiceError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn map_vault_state_write_error(error: store::mailbox::MailboxWriteError) -> AttachmentServiceError {
+    match error {
+        store::mailbox::MailboxWriteError::AttachmentNotFound { attachment_key, .. } => {
+            AttachmentServiceError::AttachmentNotFound { attachment_key }
+        }
+        store::mailbox::MailboxWriteError::Query(source) => AttachmentServiceError::StoreWrite {
+            source: source.into(),
+        },
+        store::mailbox::MailboxWriteError::Unexpected(source) => {
+            AttachmentServiceError::StoreWrite { source }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -601,13 +687,23 @@ fn harden_vault_file_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_export_path, export_filename, resolve_vault_relative_path};
+    use super::{
+        default_export_path, existing_vault_report, export_filename, resolve_vault_relative_path,
+    };
+    use crate::store::mailbox::AttachmentDetailRecord;
     use crate::workspace::WorkspacePaths;
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn export_filename_falls_back_when_gmail_filename_is_blank() {
         assert_eq!(export_filename("", "m-1:2"), "attachment-m-12.bin");
+    }
+
+    #[test]
+    fn export_filename_falls_back_when_sanitized_filename_is_empty() {
+        assert_eq!(export_filename("///", "m-1:2"), "attachment-m-12.bin");
     }
 
     #[test]
@@ -622,10 +718,94 @@ mod tests {
     }
 
     #[test]
+    fn default_export_path_falls_back_when_partition_ids_sanitize_to_empty() {
+        let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
+        let path = default_export_path(&paths, "///", "\\\\", "note.pdf");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/mailroom/.mailroom/exports/thread/message--note.pdf")
+        );
+    }
+
+    #[test]
     fn resolve_vault_relative_path_rejects_parent_traversal() {
         let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
         let error = resolve_vault_relative_path(&paths, "../escape.bin").unwrap_err();
 
         assert!(error.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn existing_vault_report_requires_hash_match_before_reuse() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+
+        let relative_path = "blake3/ab/abc123";
+        let vault_path = paths.vault_dir.join(relative_path);
+        fs::create_dir_all(vault_path.parent().unwrap()).unwrap();
+        fs::write(&vault_path, b"hello").unwrap();
+
+        let report = existing_vault_report(
+            &paths,
+            "gmail:operator@example.com",
+            &detail_with_vault(relative_path, "invalid-hash", 5),
+        )
+        .unwrap();
+
+        assert!(report.is_none());
+    }
+
+    #[test]
+    fn existing_vault_report_reuses_matching_vault_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+
+        let bytes = b"hello";
+        let content_hash = blake3::hash(bytes).to_hex().to_string();
+        let relative_path = format!("blake3/{}/{}", &content_hash[..2], content_hash);
+        let vault_path = paths.vault_dir.join(&relative_path);
+        fs::create_dir_all(vault_path.parent().unwrap()).unwrap();
+        fs::write(&vault_path, bytes).unwrap();
+
+        let report = existing_vault_report(
+            &paths,
+            "gmail:operator@example.com",
+            &detail_with_vault(&relative_path, &content_hash, 5),
+        )
+        .unwrap();
+
+        assert!(report.is_some());
+        assert!(!report.unwrap().downloaded);
+    }
+
+    fn detail_with_vault(
+        relative_path: &str,
+        content_hash: &str,
+        vault_size_bytes: i64,
+    ) -> AttachmentDetailRecord {
+        AttachmentDetailRecord {
+            attachment_key: String::from("m-1:1.2"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            part_id: String::from("1.2"),
+            gmail_attachment_id: Some(String::from("att-1")),
+            filename: String::from("statement.pdf"),
+            mime_type: String::from("application/pdf"),
+            size_bytes: 5,
+            content_disposition: None,
+            content_id: None,
+            is_inline: false,
+            internal_date_epoch_ms: 1_700_000_000_000,
+            subject: String::from("Statement"),
+            from_header: String::from("Billing <billing@example.com>"),
+            vault_content_hash: Some(content_hash.to_owned()),
+            vault_relative_path: Some(relative_path.to_owned()),
+            vault_size_bytes: Some(vault_size_bytes),
+            vault_fetched_at_epoch_s: Some(101),
+            export_count: 0,
+        }
     }
 }

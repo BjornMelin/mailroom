@@ -1,10 +1,11 @@
 use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
-    GmailAttachmentUpsertInput, GmailMessageUpsertInput, IncrementalSyncCommit, SearchQuery,
-    SyncMode, SyncStateUpdate, SyncStatus, commit_incremental_sync, get_attachment_detail,
-    get_sync_state, inspect_mailbox, list_attachments, record_attachment_export, replace_labels,
-    replace_labels_and_report_reindex, replace_messages, search::build_plain_fts5_query,
-    search_messages, set_attachment_vault_state, upsert_messages, upsert_sync_state,
+    GmailAttachmentUpsertInput, GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError,
+    SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, commit_incremental_sync,
+    get_attachment_detail, get_sync_state, inspect_mailbox, list_attachments,
+    record_attachment_export, replace_labels, replace_labels_and_report_reindex, replace_messages,
+    search::build_plain_fts5_query, search_messages, set_attachment_vault_state, upsert_messages,
+    upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -1304,6 +1305,7 @@ fn attachment_vault_state_and_export_events_are_reflected_in_reads() {
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         &AttachmentVaultStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
             attachment_key: String::from("m-1:1.2"),
             content_hash: String::from("abc123"),
             relative_path: String::from("blake3/ab/abc123"),
@@ -1378,6 +1380,7 @@ fn set_attachment_vault_state_errors_when_attachment_key_is_missing() {
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         &AttachmentVaultStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
             attachment_key: String::from("missing:1.2"),
             content_hash: String::from("abc123"),
             relative_path: String::from("blake3/ab/abc123"),
@@ -1387,11 +1390,173 @@ fn set_attachment_vault_state_errors_when_attachment_key_is_missing() {
     )
     .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("attachment `missing:1.2` was not found while persisting vault state")
+    assert!(matches!(
+        error,
+        MailboxWriteError::AttachmentNotFound {
+            account_id,
+            attachment_key
+        } if account_id == "gmail:operator@example.com" && attachment_key == "missing:1.2"
+    ));
+}
+
+#[test]
+fn attachment_vault_updates_are_account_scoped_for_shared_attachment_keys() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-attachment-vault-account-scope");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("other@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[gmail_label("INBOX", "INBOX", "system")],
+        100,
+    )
+    .unwrap();
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:other@example.com",
+        &[gmail_label("INBOX", "INBOX", "system")],
+        100,
+    )
+    .unwrap();
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("101"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Statement attached"),
+            subject: String::from("Statement"),
+            from_header: String::from("Billing <billing@example.com>"),
+            from_address: Some(String::from("billing@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![GmailAttachmentUpsertInput {
+                attachment_key: String::from("shared:1.2"),
+                part_id: String::from("1.2"),
+                gmail_attachment_id: Some(String::from("att-1")),
+                filename: String::from("statement.pdf"),
+                mime_type: String::from("application/pdf"),
+                size_bytes: 42,
+                content_disposition: Some(String::from("attachment; filename=\"statement.pdf\"")),
+                content_id: None,
+                is_inline: false,
+            }],
+        }],
+        100,
+    )
+    .unwrap();
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:other@example.com"),
+            message_id: String::from("m-2"),
+            thread_id: String::from("t-2"),
+            history_id: String::from("102"),
+            internal_date_epoch_ms: 1_700_000_000_100,
+            snippet: String::from("Statement attached"),
+            subject: String::from("Statement"),
+            from_header: String::from("Billing <billing@example.com>"),
+            from_address: Some(String::from("billing@example.com")),
+            recipient_headers: String::from("other@example.com"),
+            to_header: String::from("other@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![GmailAttachmentUpsertInput {
+                attachment_key: String::from("shared:1.2"),
+                part_id: String::from("1.2"),
+                gmail_attachment_id: Some(String::from("att-2")),
+                filename: String::from("statement.pdf"),
+                mime_type: String::from("application/pdf"),
+                size_bytes: 42,
+                content_disposition: Some(String::from("attachment; filename=\"statement.pdf\"")),
+                content_id: None,
+                is_inline: false,
+            }],
+        }],
+        100,
+    )
+    .unwrap();
+
+    set_attachment_vault_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentVaultStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
+            attachment_key: String::from("shared:1.2"),
+            content_hash: String::from("hash-a"),
+            relative_path: String::from("blake3/ha/hash-a"),
+            size_bytes: 42,
+            fetched_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+
+    let operator_detail = get_attachment_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        "shared:1.2",
+    )
+    .unwrap()
+    .unwrap();
+    let other_detail = get_attachment_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:other@example.com",
+        "shared:1.2",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        operator_detail.vault_content_hash.as_deref(),
+        Some("hash-a")
     );
+    assert!(other_detail.vault_content_hash.is_none());
 }
 
 fn unique_temp_dir(prefix: &str) -> TempDir {

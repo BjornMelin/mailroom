@@ -1,7 +1,7 @@
 use super::read::{count_indexed_messages, count_labels, count_messages, read_sync_state};
 use super::{
     AttachmentExportEventInput, AttachmentVaultStateUpdate, GmailMessageUpsertInput,
-    SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
+    MailboxWriteError, SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
 };
 use crate::gmail::GmailLabel;
 use crate::store::connection;
@@ -442,9 +442,7 @@ fn load_attachment_vault_state_for_account(
              gma.vault_size_bytes,
              gma.vault_fetched_at_epoch_s
          FROM gmail_message_attachments gma
-         INNER JOIN gmail_messages gm
-           ON gm.message_rowid = gma.message_rowid
-         WHERE gm.account_id = ?1
+         WHERE gma.account_id = ?1
            AND gma.vault_content_hash IS NOT NULL
            AND gma.vault_relative_path IS NOT NULL
            AND gma.vault_size_bytes IS NOT NULL
@@ -561,6 +559,7 @@ fn write_messages(
     )?;
     let mut insert_attachment = transaction.prepare_cached(
         "INSERT INTO gmail_message_attachments (
+             account_id,
              message_rowid,
              attachment_key,
              part_id,
@@ -577,7 +576,7 @@ fn write_messages(
              vault_fetched_at_epoch_s,
              updated_at_epoch_s
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
     )?;
     let mut upsert_search = transaction.prepare_cached(
         "INSERT OR REPLACE INTO gmail_message_search (
@@ -637,6 +636,7 @@ fn write_messages(
         for attachment in &message.attachments {
             let preserved = existing_attachment_vaults.get(&attachment.attachment_key);
             insert_attachment.execute(params![
+                account_id,
                 message_rowid,
                 &attachment.attachment_key,
                 &attachment.part_id,
@@ -678,17 +678,20 @@ pub(crate) fn set_attachment_vault_state(
     database_path: &Path,
     busy_timeout_ms: u64,
     update: &AttachmentVaultStateUpdate,
-) -> Result<()> {
-    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+) -> Result<(), MailboxWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(MailboxWriteError::from)?;
     let transaction = connection.transaction()?;
     let rows_updated = transaction.execute(
         "UPDATE gmail_message_attachments
-         SET vault_content_hash = ?2,
-             vault_relative_path = ?3,
-             vault_size_bytes = ?4,
-             vault_fetched_at_epoch_s = ?5
-         WHERE attachment_key = ?1",
+         SET vault_content_hash = ?3,
+             vault_relative_path = ?4,
+             vault_size_bytes = ?5,
+             vault_fetched_at_epoch_s = ?6
+         WHERE account_id = ?1
+           AND attachment_key = ?2",
         params![
+            &update.account_id,
             &update.attachment_key,
             &update.content_hash,
             &update.relative_path,
@@ -696,11 +699,19 @@ pub(crate) fn set_attachment_vault_state(
             update.fetched_at_epoch_s,
         ],
     )?;
-    ensure!(
-        rows_updated == 1,
-        "attachment `{}` was not found while persisting vault state",
-        update.attachment_key
-    );
+    if rows_updated == 0 {
+        return Err(MailboxWriteError::AttachmentNotFound {
+            account_id: update.account_id.clone(),
+            attachment_key: update.attachment_key.clone(),
+        });
+    }
+    if rows_updated != 1 {
+        return Err(MailboxWriteError::Unexpected(anyhow!(
+            "attachment vault update unexpectedly touched {rows_updated} rows for account `{}` and key `{}`",
+            update.account_id,
+            update.attachment_key
+        )));
+    }
     transaction.commit()?;
     Ok(())
 }
