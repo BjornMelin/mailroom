@@ -11,16 +11,19 @@ The current native flow owns:
 - recent-window bootstrap sync
 - incremental sync from stored Gmail history IDs
 - local metadata + snippet indexing in SQLite FTS5
+- attachment metadata cataloging from Gmail message payloads
 - local search with explicit filters
 
 It does not yet own:
 
-- full body indexing
-- attachment extraction
-- attachment catalog/export flows
+- full-body indexing
+- attachment content indexing
+- bulk attachment export or document processing
 
 Thread workflow, draft/send, and cleanup behavior live in
 `docs/operations/thread-workflow-and-cleanup.md`.
+Attachment fetch/export behavior lives in
+`docs/operations/attachment-catalog-and-export.md`.
 
 ## Commands
 
@@ -66,14 +69,14 @@ The sync flow is one-shot and local-first:
 1. refresh the active account from Gmail profile data
 2. refresh the label catalog
 3. decide between full bootstrap and incremental replay
-4. fetch Gmail message metadata with bounded concurrency
-5. persist mailbox rows, label joins, FTS rows, and sync cursor state
+4. fetch Gmail message payloads with bounded concurrency
+5. persist mailbox rows, attachment rows, label joins, FTS rows, and sync cursor state
 
 Default bootstrap behavior:
 
 - query: `in:anywhere -in:spam -in:trash newer_than:{N}d`
 - default `N`: `90`
-- storage: metadata plus snippet only
+- storage: metadata, snippet, and attachment rows
 
 Incremental sync behavior:
 
@@ -117,6 +120,7 @@ The contract is local full-text search plus explicit structured filters.
 The mailbox sync/search slice adds these SQLite objects:
 
 - `gmail_messages`
+- `gmail_message_attachments`
 - `gmail_labels`
 - `gmail_message_labels`
 - `gmail_sync_state`

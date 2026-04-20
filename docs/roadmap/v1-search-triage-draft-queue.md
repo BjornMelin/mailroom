@@ -49,15 +49,22 @@ The first workflow slice is now in place:
 - Gmail draft create/update/send integration
 - reviewed archive, label, and trash actions with post-action resync
 
-The next implementation slice should build attachment catalog/export and richer
-operator review ergonomics, not re-open auth, account, config, store, sync, or
-workflow ownership.
+The attachment catalog/export foundation is now in place too:
+
+- attachment metadata rows derived from synced Gmail message payloads
+- explicit vault fetch into `.mailroom/vault/`
+- deliberate export into `.mailroom/exports/` or an explicit destination
+- append-only attachment export event tracking
+
+The next implementation slice should improve operator review ergonomics and
+higher-level cleanup assistance, not re-open auth, account, config, store,
+sync, workflow, or attachment ownership.
 
 ## Deferred
 
 - unsubscribe automation
 - bulk cleanup heuristics
-- attachment catalog and export flows
+- attachment content indexing or OCR
 - advanced semantic/vector search
 - external search engines
 - multi-account support

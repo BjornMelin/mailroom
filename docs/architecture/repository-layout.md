@@ -25,6 +25,7 @@
 - `src/config.rs`: typed config resolution and source reporting
 - `src/auth/`: Gmail OAuth flow and credential persistence
 - `src/gmail/`: native Gmail HTTP client, label reads, metadata reads, history replay, and draft/thread mutation primitives
+- `src/attachments.rs`: attachment listing, vault fetch, and export orchestration
 - `src/mailbox.rs`: sync/search orchestration over Gmail and SQLite
 - `src/workflows/`: thread-scoped triage, draft/send, snooze, and cleanup orchestration
 - `src/doctor.rs`: combined workspace/store/auth health reporting
@@ -40,7 +41,8 @@ As the codebase grows, prefer a layout along these lines:
 - `src/auth/`: OAuth and credential-store abstractions
 - `src/store/`: SQLite schema, queries, mailbox persistence, and search primitives
 - `src/gmail/`: Gmail auth and API adapters
-- `src/workflows/`: triage, drafting, cleanup flows, export flows
+- `src/attachments/` or `src/attachments.rs`: inbound attachment catalog and export flows
+- `src/workflows/`: triage, drafting, and cleanup flows
 - `src/tui/`: ratatui application shell
 
 Do not introduce duplicate ownership of workflow rules between CLI, TUI, and adapters.

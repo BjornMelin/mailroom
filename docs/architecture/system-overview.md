@@ -23,8 +23,9 @@ The native Rust core owns:
 - active account verification against Gmail profile data
 - live label reads used for operator inspection and future sync validation
 - mailbox metadata sync and cursor management
-- mailbox state modeling
+- mailbox state and attachment catalog modeling
 - local search over synced mailbox state
+- content-addressed attachment vaulting and deliberate export
 - thread-scoped workflow state and append-only workflow events
 - remote Gmail draft projection and send orchestration
 - reviewed cleanup actions for archive, label, and trash
@@ -72,6 +73,7 @@ The current native substrate is intentionally narrow but now usable:
 - live Gmail profile and label inspection through the native client
 - one-shot mailbox sync over Gmail message metadata and history replay
 - local SQLite FTS5 search over metadata and snippet text
+- attachment metadata cataloging plus on-demand vault/export flows
 - thread-scoped workflow state with triage buckets, snooze, and stage promotion
 - local draft revisions with file attachments and remote Gmail draft synchronization
 - explicit draft send and reviewed cleanup actions that resync the mailbox afterward
@@ -89,6 +91,10 @@ full or incremental sync” contract, is defined in
 Detailed thread workflow ownership is defined in
 `docs/decisions/0004-unified-thread-workflow.md` and
 `docs/operations/thread-workflow-and-cleanup.md`.
+
+Detailed attachment ownership is defined in
+`docs/decisions/0005-attachment-canonical-model.md` and
+`docs/operations/attachment-catalog-and-export.md`.
 
 ## Non-goals for v1
 

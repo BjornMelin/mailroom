@@ -46,6 +46,11 @@ pub enum Commands {
     Roadmap,
     /// Search the local mailbox index
     Search(SearchArgs),
+    /// Inspect, fetch, and export cataloged inbound attachments
+    Attachment {
+        #[command(subcommand)]
+        command: AttachmentCommand,
+    },
     /// Synchronize mailbox metadata into the local index
     Sync {
         #[command(subcommand)]
@@ -173,6 +178,61 @@ pub struct SearchArgs {
     /// Emit JSON instead of plain text
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AttachmentCommand {
+    /// List cataloged attachments from the local mailbox store
+    List {
+        /// Restrict results to a specific Gmail thread ID
+        #[arg(long)]
+        thread_id: Option<String>,
+        /// Restrict results to a specific Gmail message ID
+        #[arg(long)]
+        message_id: Option<String>,
+        /// Restrict results to filenames containing this substring
+        #[arg(long)]
+        filename: Option<String>,
+        /// Restrict results to an exact MIME type
+        #[arg(long)]
+        mime_type: Option<String>,
+        /// Only return attachments already fetched into the local vault
+        #[arg(long)]
+        fetched_only: bool,
+        /// Maximum number of attachments to return
+        #[arg(long, default_value_t = crate::attachments::DEFAULT_ATTACHMENT_LIST_LIMIT)]
+        limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one cataloged attachment in detail
+    Show {
+        /// Attachment key in `message_id:part_id` form
+        attachment_key: String,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch attachment bytes into the local vault
+    Fetch {
+        /// Attachment key in `message_id:part_id` form
+        attachment_key: String,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy a fetched attachment into the exports directory or an explicit destination
+    Export {
+        /// Attachment key in `message_id:part_id` form
+        attachment_key: String,
+        /// Destination file path or existing directory
+        #[arg(long)]
+        to: Option<PathBuf>,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
