@@ -224,7 +224,7 @@ pub async fn list(
         return Err(AttachmentServiceError::InvalidLimit.into());
     }
 
-    store::init(config_report)?;
+    init_store_task(config_report).await?;
     let account_id = resolve_attachment_account_id_task(config_report).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -260,7 +260,7 @@ pub async fn show(
     config_report: &ConfigReport,
     attachment_key: String,
 ) -> Result<AttachmentShowReport> {
-    store::init(config_report)?;
+    init_store_task(config_report).await?;
     let account_id = resolve_attachment_account_id_task(config_report).await?;
     let detail = load_attachment_detail(config_report, &account_id, &attachment_key).await?;
 
@@ -274,7 +274,7 @@ pub async fn fetch(
     config_report: &ConfigReport,
     attachment_key: String,
 ) -> Result<AttachmentFetchReport> {
-    store::init(config_report)?;
+    init_store_task(config_report).await?;
     let account_id = resolve_attachment_account_id_task(config_report).await?;
     let workspace_paths = configured_paths(config_report)?;
     ensure_runtime_dirs_task(workspace_paths.clone()).await?;
@@ -350,7 +350,6 @@ pub async fn export(
 ) -> Result<AttachmentExportReport> {
     let fetched = fetch(config_report, attachment_key).await?;
     let workspace_paths = configured_paths(config_report)?;
-    ensure_runtime_dirs_task(workspace_paths.clone()).await?;
     let filename = export_filename(&fetched.filename, &fetched.attachment_key);
     let destination_path = spawn_blocking({
         let workspace_paths = workspace_paths.clone();
@@ -424,6 +423,14 @@ async fn resolve_attachment_account_id_task(config_report: &ConfigReport) -> Res
     spawn_blocking(move || resolve_attachment_account_id(&database_path, busy_timeout_ms))
         .await
         .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+}
+
+async fn init_store_task(config_report: &ConfigReport) -> Result<()> {
+    let config_report = config_report.clone();
+    spawn_blocking(move || store::init(&config_report))
+        .await
+        .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+        .map(|_| ())
 }
 
 async fn ensure_runtime_dirs_task(workspace_paths: WorkspacePaths) -> Result<()> {
