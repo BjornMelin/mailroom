@@ -680,7 +680,7 @@ pub(crate) fn set_attachment_vault_state(
     update: &AttachmentVaultStateUpdate,
 ) -> Result<(), MailboxWriteError> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
-        .map_err(MailboxWriteError::from)?;
+        .map_err(|source| MailboxWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
     let rows_updated = transaction.execute(
         "UPDATE gmail_message_attachments
@@ -706,11 +706,11 @@ pub(crate) fn set_attachment_vault_state(
         });
     }
     if rows_updated != 1 {
-        return Err(MailboxWriteError::Unexpected(anyhow!(
-            "attachment vault update unexpectedly touched {rows_updated} rows for account `{}` and key `{}`",
-            update.account_id,
-            update.attachment_key
-        )));
+        return Err(MailboxWriteError::RowCountMismatch {
+            operation: "set_attachment_vault_state",
+            expected: 1,
+            actual: rows_updated,
+        });
     }
     transaction.commit()?;
     Ok(())
@@ -720,8 +720,9 @@ pub(crate) fn record_attachment_export(
     database_path: &Path,
     busy_timeout_ms: u64,
     event: &AttachmentExportEventInput,
-) -> Result<()> {
-    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+) -> Result<(), MailboxWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
     transaction.execute(
         "INSERT INTO attachment_export_events (

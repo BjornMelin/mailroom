@@ -301,8 +301,29 @@ pub(crate) enum MailboxWriteError {
         account_id: String,
         attachment_key: String,
     },
+    #[error("failed to open local mailbox store at {path}")]
+    OpenDatabase {
+        path: String,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
-    #[error(transparent)]
-    Unexpected(#[from] anyhow::Error),
+    #[error(
+        "mailbox write operation `{operation}` unexpectedly touched {actual} rows (expected {expected})"
+    )]
+    RowCountMismatch {
+        operation: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl MailboxWriteError {
+    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+        Self::OpenDatabase {
+            path: path.display().to_string(),
+            source,
+        }
+    }
 }

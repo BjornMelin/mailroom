@@ -76,7 +76,7 @@ Default bootstrap behavior:
 
 - query: `in:anywhere -in:spam -in:trash newer_than:{N}d`
 - default `N`: `90`
-- storage: metadata plus snippet only
+- storage: metadata, snippet, and attachment rows
 
 Incremental sync behavior:
 

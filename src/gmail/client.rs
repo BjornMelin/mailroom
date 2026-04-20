@@ -269,6 +269,11 @@ struct GmailMessageMetadataResponse {
     payload: Option<GmailMessagePayload>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GmailMessagePayloadResponse {
+    payload: Option<GmailMessagePayload>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct GmailMessagePayload {
     #[serde(rename = "partId")]
@@ -548,7 +553,7 @@ impl GmailClient {
             );
         }
 
-        let response: GmailMessageMetadataResponse = self
+        let response: GmailMessagePayloadResponse = self
             .get_json(
                 &format!("users/me/messages/{message_id}"),
                 &[
@@ -1324,15 +1329,6 @@ fn attachment_from_part(
     let content_disposition = header_value(&part.headers, "Content-Disposition");
     let content_id = header_value(&part.headers, "Content-Id")
         .or_else(|| header_value(&part.headers, "Content-ID"));
-    let gmail_attachment_id = part
-        .body
-        .as_ref()
-        .and_then(|body| body.attachment_id.clone())
-        .filter(|value| !value.trim().is_empty());
-    if filename.is_empty() && gmail_attachment_id.is_none() {
-        return None;
-    }
-
     let is_inline = content_disposition.as_deref().is_some_and(|value| {
         value
             .trim_start()
@@ -1341,6 +1337,14 @@ fn attachment_from_part(
     }) || content_id
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty());
+    let gmail_attachment_id = part
+        .body
+        .as_ref()
+        .and_then(|body| body.attachment_id.clone())
+        .filter(|value| !value.trim().is_empty());
+    if filename.is_empty() && gmail_attachment_id.is_none() && !is_inline {
+        return None;
+    }
 
     Some(GmailMessageAttachment {
         attachment_key: attachment_key(message_id, part_id),
@@ -1513,7 +1517,7 @@ fn build_gmail_http_client(config: &GmailConfig) -> GmailResult<reqwest::Client>
 #[cfg(test)]
 mod tests {
     use super::{
-        GmailClient, GmailMessagePayload, GmailProfile, MESSAGE_CATALOG_FIELDS,
+        GmailClient, GmailClientError, GmailMessagePayload, GmailProfile, MESSAGE_CATALOG_FIELDS,
         MESSAGE_CATALOG_FULL_FIELDS, duration_to_retry_delay_ms, extract_email_address,
         payload_projection_truncated, request_supports_automatic_retry, retry_after_delay,
     };
@@ -1935,6 +1939,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_message_catalog_collects_cid_only_inline_parts() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-inline-cid"))
+            .and(query_param("format", "full"))
+            .and(query_param("fields", MESSAGE_CATALOG_FIELDS))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m-inline-cid",
+                "threadId": "thread-inline",
+                "labelIds": ["INBOX"],
+                "snippet": "Inline image",
+                "historyId": "501",
+                "internalDate": "1700000000000",
+                "sizeEstimate": 5,
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Inline image"},
+                        {"name": "From", "value": "Billing <billing@example.com>"},
+                        {"name": "To", "value": "operator@example.com"}
+                    ],
+                    "parts": [
+                        {
+                            "partId": "1.2",
+                            "mimeType": "image/png",
+                            "filename": "",
+                            "headers": [
+                                {"name": "Content-Id", "value": "<image-1>"}
+                            ],
+                            "body": {
+                                "data": "aGVsbG8",
+                                "size": 5
+                            }
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let catalog = client.get_message_catalog("m-inline-cid").await.unwrap();
+
+        assert_eq!(catalog.attachments.len(), 1);
+        assert_eq!(catalog.attachments[0].attachment_key, "m-inline-cid:1.2");
+        assert!(catalog.attachments[0].is_inline);
+        assert_eq!(
+            catalog.attachments[0].content_id.as_deref(),
+            Some("<image-1>")
+        );
+    }
+
+    #[tokio::test]
     async fn get_message_catalog_refetches_full_payload_when_projection_hits_depth_marker() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2094,6 +2152,74 @@ mod tests {
         assert_eq!(remote, b"pdf-bytes");
         assert_eq!(remote_padded, b"pdf-bytes=");
         assert_eq!(inline, b"hello");
+    }
+
+    #[tokio::test]
+    async fn get_attachment_bytes_returns_attachment_part_missing_for_unknown_inline_part() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-inline-missing"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "payload": {
+                    "parts": [
+                        {
+                            "partId": "1.1",
+                            "body": {
+                                "data": "aGVsbG8"
+                            }
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let error = client
+            .get_attachment_bytes("m-inline-missing", "9.9", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GmailClientError::AttachmentPartMissing { message_id, part_id }
+            if message_id == "m-inline-missing" && part_id == "9.9"
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_attachment_bytes_returns_attachment_body_missing_for_empty_inline_part() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-inline-empty-body"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "payload": {
+                    "parts": [
+                        {
+                            "partId": "1.2",
+                            "body": {}
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let error = client
+            .get_attachment_bytes("m-inline-empty-body", "1.2", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GmailClientError::AttachmentBodyMissing { message_id, part_id }
+            if message_id == "m-inline-empty-body" && part_id == "1.2"
+        ));
     }
 
     #[tokio::test]

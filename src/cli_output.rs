@@ -515,6 +515,23 @@ mod tests {
     }
 
     #[test]
+    fn attachment_show_not_found_maps_to_not_found_exit_code() {
+        let error = anyhow!(
+            crate::attachments::AttachmentServiceError::AttachmentNotFound {
+                attachment_key: String::from("m-1:1.2"),
+            }
+        );
+
+        let report = describe_error(&error, "attachment.show");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("not_found"));
+        assert_eq!(value["error"]["kind"], json!("attachment.not_found"));
+        assert_eq!(value["error"]["operation"], json!("attachment.show"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(4));
+    }
+
+    #[test]
     fn attachment_not_found_maps_to_not_found_exit_code() {
         let error = anyhow!(
             crate::attachments::AttachmentServiceError::AttachmentNotFound {
@@ -528,6 +545,41 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("not_found"));
         assert_eq!(value["error"]["kind"], json!("attachment.not_found"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(4));
+    }
+
+    #[test]
+    fn attachment_export_store_write_errors_map_to_storage_failure_code() {
+        let error = anyhow!(crate::attachments::AttachmentServiceError::StoreWrite {
+            source: anyhow!("database is locked"),
+        });
+
+        let report = describe_error(&error, "attachment.export");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("attachment.storage"));
+        assert_eq!(value["error"]["operation"], json!("attachment.export"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn attachment_export_conflicts_map_to_conflict_exit_code() {
+        let error = anyhow!(
+            crate::attachments::AttachmentServiceError::DestinationConflict {
+                path: std::path::PathBuf::from("/tmp/export.bin"),
+            }
+        );
+
+        let report = describe_error(&error, "attachment.export");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("conflict"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("attachment.destination_conflict")
+        );
+        assert_eq!(value["error"]["operation"], json!("attachment.export"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(5));
     }
 
     #[test]

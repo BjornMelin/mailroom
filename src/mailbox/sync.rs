@@ -158,27 +158,12 @@ async fn run_full_sync(
         pages_fetched += 1;
         messages_listed += page.messages.len();
 
-        let catalogs = if let Some(first_message) = page.messages.first() {
-            let mut catalogs = Vec::new();
-            if let Some(first_catalog) = gmail_client
-                .get_message_catalog_if_present(&first_message.id)
-                .await?
-            {
-                catalogs.push(first_catalog);
-            }
-            let remaining_ids = page
-                .messages
-                .iter()
-                .skip(1)
-                .map(|message| message.id.clone())
-                .collect();
-            let (remaining_catalogs, _) =
-                fetch_message_catalogs(gmail_client.clone(), remaining_ids).await?;
-            catalogs.extend(remaining_catalogs);
-            catalogs
-        } else {
-            Vec::new()
-        };
+        let message_ids = page
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+        let (catalogs, _) = fetch_message_catalogs(gmail_client.clone(), message_ids).await?;
 
         for catalog in &catalogs {
             cursor_history_id = newest_history_id(cursor_history_id, &catalog.metadata.history_id);

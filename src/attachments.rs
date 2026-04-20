@@ -16,6 +16,7 @@ use thiserror::Error;
 use tokio::task::spawn_blocking;
 
 pub const DEFAULT_ATTACHMENT_LIST_LIMIT: usize = 50;
+const TEMP_PATH_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct AttachmentListRequest {
@@ -224,7 +225,7 @@ pub async fn list(
     }
 
     store::init(config_report)?;
-    let account_id = resolve_attachment_account_id(config_report)?;
+    let account_id = resolve_attachment_account_id_task(config_report).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let query = store::mailbox::AttachmentListQuery {
@@ -260,7 +261,7 @@ pub async fn show(
     attachment_key: String,
 ) -> Result<AttachmentShowReport> {
     store::init(config_report)?;
-    let account_id = resolve_attachment_account_id(config_report)?;
+    let account_id = resolve_attachment_account_id_task(config_report).await?;
     let detail = load_attachment_detail(config_report, &account_id, &attachment_key).await?;
 
     Ok(AttachmentShowReport {
@@ -274,7 +275,7 @@ pub async fn fetch(
     attachment_key: String,
 ) -> Result<AttachmentFetchReport> {
     store::init(config_report)?;
-    let account_id = resolve_attachment_account_id(config_report)?;
+    let account_id = resolve_attachment_account_id_task(config_report).await?;
     let workspace_paths = configured_paths(config_report)?;
     workspace_paths.ensure_runtime_dirs()?;
     let detail = load_attachment_detail(config_report, &account_id, &attachment_key).await?;
@@ -323,7 +324,7 @@ pub async fn fetch(
     .await
     .map_err(|source| AttachmentServiceError::BlockingTask { source })?;
     if let Err(error) = update_result {
-        return Err(map_vault_state_write_error(error).into());
+        return Err(map_mailbox_write_error(error).into());
     }
 
     Ok(AttachmentFetchReport {
@@ -351,16 +352,23 @@ pub async fn export(
     let workspace_paths = configured_paths(config_report)?;
     workspace_paths.ensure_runtime_dirs()?;
     let filename = export_filename(&fetched.filename, &fetched.attachment_key);
-    let destination_path = match destination {
-        Some(path) if path.is_dir() => path.join(&filename),
-        Some(path) => path,
-        None => default_export_path(
-            &workspace_paths,
-            &fetched.thread_id,
-            &fetched.message_id,
-            &filename,
-        ),
-    };
+    let destination_path = spawn_blocking({
+        let workspace_paths = workspace_paths.clone();
+        let thread_id = fetched.thread_id.clone();
+        let message_id = fetched.message_id.clone();
+        let filename = filename.clone();
+        move || {
+            resolve_export_destination_path(
+                &workspace_paths,
+                &thread_id,
+                &message_id,
+                &filename,
+                destination,
+            )
+        }
+    })
+    .await
+    .map_err(|source| AttachmentServiceError::BlockingTask { source })??;
     let exported_at_epoch_s = current_epoch_seconds()?;
     let copy_result = spawn_blocking({
         let source_path = fetched.vault_path.clone();
@@ -387,8 +395,8 @@ pub async fn export(
     })
     .await
     .map_err(|source| AttachmentServiceError::BlockingTask { source })?;
-    if let Err(source) = record_result {
-        return Err(AttachmentServiceError::StoreWrite { source }.into());
+    if let Err(error) = record_result {
+        return Err(map_mailbox_write_error(error).into());
     }
 
     Ok(AttachmentExportReport {
@@ -405,18 +413,21 @@ pub async fn export(
     })
 }
 
-fn resolve_attachment_account_id(config_report: &ConfigReport) -> Result<String> {
-    if let Some(active_account) = store::accounts::get_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-    )? {
+async fn resolve_attachment_account_id_task(config_report: &ConfigReport) -> Result<String> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    spawn_blocking(move || resolve_attachment_account_id(&database_path, busy_timeout_ms))
+        .await
+        .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+}
+
+fn resolve_attachment_account_id(database_path: &Path, busy_timeout_ms: u64) -> Result<String> {
+    if let Some(active_account) = store::accounts::get_active(database_path, busy_timeout_ms)? {
         return Ok(active_account.account_id);
     }
 
-    if let Some(mailbox) = store::mailbox::inspect_mailbox(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-    )? && let Some(sync_state) = mailbox.sync_state
+    if let Some(mailbox) = store::mailbox::inspect_mailbox(database_path, busy_timeout_ms)?
+        && let Some(sync_state) = mailbox.sync_state
     {
         return Ok(sync_state.account_id);
     }
@@ -556,6 +567,20 @@ fn default_export_path(
         ))
 }
 
+fn resolve_export_destination_path(
+    workspace_paths: &WorkspacePaths,
+    thread_id: &str,
+    message_id: &str,
+    filename: &str,
+    destination: Option<PathBuf>,
+) -> Result<PathBuf> {
+    Ok(match destination {
+        Some(path) if path.is_dir() => path.join(filename),
+        Some(path) => path,
+        None => default_export_path(workspace_paths, thread_id, message_id, filename),
+    })
+}
+
 fn sanitize_non_empty(value: &str, fallback: &str) -> String {
     let sanitized = sanitize(value).to_string();
     if sanitized.trim().is_empty() {
@@ -602,16 +627,8 @@ fn write_vault_file_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
             path: path.to_path_buf(),
             source: std::io::Error::other("vault path has no parent"),
         })?;
-    let temp_path = unique_vault_temp_path(parent, path)?;
+    let (mut temp_file, temp_path) = create_unique_vault_temp_file(parent, path)?;
     let write_result = (|| -> Result<()> {
-        let mut temp_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|source| AttachmentServiceError::WriteFile {
-                path: temp_path.clone(),
-                source,
-            })?;
         temp_file
             .write_all(bytes)
             .map_err(|source| AttachmentServiceError::WriteFile {
@@ -637,7 +654,42 @@ fn write_vault_file_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     write_result
 }
 
-fn unique_vault_temp_path(parent: &Path, path: &Path) -> Result<PathBuf> {
+fn create_unique_vault_temp_file(parent: &Path, path: &Path) -> Result<(fs::File, PathBuf)> {
+    for attempt in 0..TEMP_PATH_RETRY_LIMIT {
+        let temp_path = unique_vault_temp_path(parent, path, attempt)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((file, temp_path)),
+            Err(source)
+                if source.kind() == std::io::ErrorKind::AlreadyExists
+                    && attempt + 1 < TEMP_PATH_RETRY_LIMIT =>
+            {
+                continue;
+            }
+            Err(source) => {
+                return Err(AttachmentServiceError::WriteFile {
+                    path: temp_path,
+                    source,
+                }
+                .into());
+            }
+        }
+    }
+
+    Err(AttachmentServiceError::WriteFile {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "failed to create a unique temporary vault file",
+        ),
+    }
+    .into())
+}
+
+fn unique_vault_temp_path(parent: &Path, path: &Path, attempt: usize) -> Result<PathBuf> {
     let file_name = path
         .file_name()
         .ok_or_else(|| AttachmentServiceError::WriteFile {
@@ -649,7 +701,26 @@ fn unique_vault_temp_path(parent: &Path, path: &Path) -> Result<PathBuf> {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     Ok(parent.join(format!(
-        ".{}.tmp-{}-{now_nanos}",
+        ".{}.tmp-{}-{now_nanos}-{attempt}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    )))
+}
+
+#[cfg(windows)]
+fn unique_vault_backup_path(parent: &Path, path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AttachmentServiceError::WriteFile {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("vault path has no filename"),
+        })?;
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Ok(parent.join(format!(
+        ".{}.bak-{}-{now_nanos}",
         file_name.to_string_lossy(),
         std::process::id()
     )))
@@ -658,11 +729,47 @@ fn unique_vault_temp_path(parent: &Path, path: &Path) -> Result<PathBuf> {
 fn persist_vault_temp_file(tmp_path: &Path, destination: &Path) -> Result<()> {
     #[cfg(windows)]
     {
-        if destination.exists() {
-            fs::remove_file(destination).map_err(|source| AttachmentServiceError::WriteFile {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| AttachmentServiceError::WriteFile {
                 path: destination.to_path_buf(),
-                source,
+                source: std::io::Error::other("vault path has no parent"),
             })?;
+        let backup_path = unique_vault_backup_path(parent, destination)?;
+        let moved_destination_to_backup = if destination.exists() {
+            fs::rename(destination, &backup_path).map_err(|source| {
+                AttachmentServiceError::WriteFile {
+                    path: destination.to_path_buf(),
+                    source,
+                }
+            })?;
+            true
+        } else {
+            false
+        };
+
+        match fs::rename(tmp_path, destination) {
+            Ok(()) => {
+                if moved_destination_to_backup {
+                    fs::remove_file(&backup_path).map_err(|source| {
+                        AttachmentServiceError::WriteFile {
+                            path: backup_path,
+                            source,
+                        }
+                    })?;
+                }
+                return Ok(());
+            }
+            Err(source) => {
+                if moved_destination_to_backup {
+                    let _ = fs::rename(&backup_path, destination);
+                }
+                return Err(AttachmentServiceError::WriteFile {
+                    path: destination.to_path_buf(),
+                    source,
+                }
+                .into());
+            }
         }
     }
 
@@ -673,6 +780,7 @@ fn persist_vault_temp_file(tmp_path: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct CopyFromVaultResult {
     copied: bool,
 }
@@ -694,22 +802,58 @@ fn copy_from_vault(
         source,
     })?;
 
-    if destination_path.exists() {
-        let existing_hash = hash_file_blake3(destination_path)?;
-        if existing_hash == content_hash {
-            return Ok(CopyFromVaultResult { copied: false });
+    let mut source_file =
+        fs::File::open(source_path).map_err(|source| AttachmentServiceError::CopyFile {
+            source_path: source_path.to_path_buf(),
+            destination_path: destination_path.to_path_buf(),
+            source,
+        })?;
+    let mut destination_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination_path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing_hash = hash_file_blake3(destination_path)?;
+            if existing_hash == content_hash {
+                return Ok(CopyFromVaultResult { copied: false });
+            }
+            return Err(AttachmentServiceError::DestinationConflict {
+                path: destination_path.to_path_buf(),
+            }
+            .into());
         }
-        return Err(AttachmentServiceError::DestinationConflict {
-            path: destination_path.to_path_buf(),
+        Err(source) => {
+            return Err(AttachmentServiceError::CopyFile {
+                source_path: source_path.to_path_buf(),
+                destination_path: destination_path.to_path_buf(),
+                source,
+            }
+            .into());
         }
-        .into());
+    };
+    let write_result = (|| -> Result<()> {
+        std::io::copy(&mut source_file, &mut destination_file).map_err(|source| {
+            AttachmentServiceError::CopyFile {
+                source_path: source_path.to_path_buf(),
+                destination_path: destination_path.to_path_buf(),
+                source,
+            }
+        })?;
+        destination_file
+            .sync_all()
+            .map_err(|source| AttachmentServiceError::CopyFile {
+                source_path: source_path.to_path_buf(),
+                destination_path: destination_path.to_path_buf(),
+                source,
+            })?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(destination_path);
     }
-
-    fs::copy(source_path, destination_path).map_err(|source| AttachmentServiceError::CopyFile {
-        source_path: source_path.to_path_buf(),
-        destination_path: destination_path.to_path_buf(),
-        source,
-    })?;
+    write_result?;
     Ok(CopyFromVaultResult { copied: true })
 }
 
@@ -735,17 +879,14 @@ fn hash_file_blake3(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn map_vault_state_write_error(error: store::mailbox::MailboxWriteError) -> AttachmentServiceError {
+fn map_mailbox_write_error(error: store::mailbox::MailboxWriteError) -> AttachmentServiceError {
     match error {
         store::mailbox::MailboxWriteError::AttachmentNotFound { attachment_key, .. } => {
             AttachmentServiceError::AttachmentNotFound { attachment_key }
         }
-        store::mailbox::MailboxWriteError::Query(source) => AttachmentServiceError::StoreWrite {
-            source: source.into(),
+        error => AttachmentServiceError::StoreWrite {
+            source: error.into(),
         },
-        store::mailbox::MailboxWriteError::Unexpected(source) => {
-            AttachmentServiceError::StoreWrite { source }
-        }
     }
 }
 
@@ -768,11 +909,13 @@ fn harden_vault_file_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_from_vault, default_export_path, existing_vault_report, export_filename,
-        hash_file_blake3, map_vault_state_write_error, resolve_vault_relative_path,
-        write_vault_bytes,
+        AttachmentListRequest, AttachmentServiceError, copy_from_vault, default_export_path,
+        existing_vault_report, export, export_filename, hash_file_blake3, list,
+        map_mailbox_write_error, resolve_vault_relative_path, show, write_vault_bytes,
     };
-    use crate::store::mailbox::AttachmentDetailRecord;
+    use crate::config::resolve;
+    use crate::store::mailbox::{AttachmentDetailRecord, GmailAttachmentUpsertInput};
+    use crate::store::{accounts, init};
     use crate::workspace::WorkspacePaths;
     use std::fs;
     use std::path::PathBuf;
@@ -887,7 +1030,7 @@ mod tests {
 
     #[test]
     fn map_vault_state_write_error_maps_missing_rows_to_attachment_not_found() {
-        let mapped = map_vault_state_write_error(
+        let mapped = map_mailbox_write_error(
             crate::store::mailbox::MailboxWriteError::AttachmentNotFound {
                 account_id: String::from("gmail:operator@example.com"),
                 attachment_key: String::from("m-1:1.2"),
@@ -897,6 +1040,161 @@ mod tests {
             mapped,
             super::AttachmentServiceError::AttachmentNotFound { attachment_key }
             if attachment_key == "m-1:1.2"
+        ));
+    }
+
+    #[test]
+    fn copy_from_vault_returns_destination_conflict_for_different_existing_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.bin");
+        let destination_path = temp_dir.path().join("exports/export.bin");
+        fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, b"hello").unwrap();
+        fs::write(&destination_path, b"world").unwrap();
+
+        let error = copy_from_vault(
+            &source_path,
+            &destination_path,
+            blake3::hash(b"hello").to_hex().as_ref(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AttachmentServiceError>(),
+            Some(AttachmentServiceError::DestinationConflict { path })
+                if path == &destination_path
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_returns_invalid_limit_when_limit_is_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = resolve(&paths).unwrap();
+
+        let error = list(
+            &config_report,
+            AttachmentListRequest {
+                thread_id: None,
+                message_id: None,
+                filename: None,
+                mime_type: None,
+                fetched_only: false,
+                limit: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AttachmentServiceError>(),
+            Some(AttachmentServiceError::InvalidLimit)
+        ));
+    }
+
+    #[tokio::test]
+    async fn show_returns_no_active_account_without_account_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = resolve(&paths).unwrap();
+
+        let error = show(&config_report, String::from("m-1:1.2"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AttachmentServiceError>(),
+            Some(AttachmentServiceError::NoActiveAccount)
+        ));
+    }
+
+    #[tokio::test]
+    async fn export_returns_destination_conflict_for_existing_different_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+        accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: 1,
+                threads_total: 1,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+        crate::store::mailbox::upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[crate::store::mailbox::GmailMessageUpsertInput {
+                account_id: String::from("gmail:operator@example.com"),
+                message_id: String::from("m-1"),
+                thread_id: String::from("t-1"),
+                history_id: String::from("101"),
+                internal_date_epoch_ms: 1_700_000_000_000,
+                snippet: String::from("Attachment fixture"),
+                subject: String::from("Fixture"),
+                from_header: String::from("Fixture <fixture@example.com>"),
+                from_address: Some(String::from("fixture@example.com")),
+                recipient_headers: String::from("operator@example.com"),
+                to_header: String::from("operator@example.com"),
+                cc_header: String::new(),
+                bcc_header: String::new(),
+                reply_to_header: String::new(),
+                size_estimate: 256,
+                label_ids: vec![String::from("INBOX")],
+                label_names_text: String::from("INBOX"),
+                attachments: vec![GmailAttachmentUpsertInput {
+                    attachment_key: String::from("m-1:1.2"),
+                    part_id: String::from("1.2"),
+                    gmail_attachment_id: Some(String::from("att-1")),
+                    filename: String::from("fixture.bin"),
+                    mime_type: String::from("application/octet-stream"),
+                    size_bytes: 5,
+                    content_disposition: Some(String::from("attachment")),
+                    content_id: None,
+                    is_inline: false,
+                }],
+            }],
+            100,
+        )
+        .unwrap();
+        let vault_write = write_vault_bytes(&paths.vault_dir, b"hello".to_vec()).unwrap();
+        crate::store::mailbox::set_attachment_vault_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::mailbox::AttachmentVaultStateUpdate {
+                account_id: String::from("gmail:operator@example.com"),
+                attachment_key: String::from("m-1:1.2"),
+                content_hash: vault_write.content_hash.clone(),
+                relative_path: vault_write.relative_path,
+                size_bytes: vault_write.size_bytes,
+                fetched_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+
+        let destination_path = temp_dir.path().join("exports/conflict.bin");
+        fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
+        fs::write(&destination_path, b"world").unwrap();
+
+        let error = export(
+            &config_report,
+            String::from("m-1:1.2"),
+            Some(destination_path.clone()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<AttachmentServiceError>(),
+            Some(AttachmentServiceError::DestinationConflict { path })
+                if path == &destination_path
         ));
     }
 
