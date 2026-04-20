@@ -195,6 +195,22 @@ fn validate_rules(rule_set: &mut AutomationRuleSet) -> Result<(), AutomationServ
                     ),
                 });
             }
+
+            let remove_labels = remove.iter().cloned().collect::<BTreeSet<_>>();
+            let overlapping_labels = add
+                .iter()
+                .filter(|label| remove_labels.contains(*label))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !overlapping_labels.is_empty() {
+                return Err(AutomationServiceError::RuleValidation {
+                    message: format!(
+                        "automation rule `{}` label action cannot add and remove the same label: {}",
+                        rule.id,
+                        overlapping_labels.join(", ")
+                    ),
+                });
+            }
         }
     }
 
@@ -269,6 +285,37 @@ kind = "trash"
 
         let error = validate_rule_file(&config_report).unwrap_err();
         assert!(error.to_string().contains("duplicated"));
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn validate_rule_file_rejects_label_actions_with_overlapping_add_and_remove_labels() {
+        let repo_root = unique_temp_dir("mailroom-automation-rules-overlap");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        fs::write(
+            active_rules_path(&config_report),
+            r#"
+[[rules]]
+id = "label-overlap"
+priority = 100
+[rules.match]
+subject_contains = ["digest"]
+[rules.action]
+kind = "label"
+add = ["INBOX", " Review "]
+remove = ["INBOX"]
+"#,
+        )
+        .unwrap();
+
+        let error = validate_rule_file(&config_report).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "automation rule `label-overlap` label action cannot add and remove the same label: INBOX"
+        );
 
         fs::remove_dir_all(repo_root).unwrap();
     }

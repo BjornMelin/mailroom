@@ -166,6 +166,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             AutomationServiceError::NoActiveAccount => {
                 (ErrorCode::AuthRequired, "automation.account.required")
             }
+            AutomationServiceError::RunAccountMismatch { .. } => {
+                (ErrorCode::AuthRequired, "automation.account.mismatch")
+            }
             AutomationServiceError::InvalidLimit
             | AutomationServiceError::ExecuteRequired
             | AutomationServiceError::RuleFileMissing { .. }
@@ -399,6 +402,7 @@ mod tests {
     use super::{describe_error, exit_code, json_failure_value, json_success_value};
     use crate::CliInputError;
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
+    use crate::automation::AutomationServiceError;
     use crate::config::resolve;
     use crate::gmail::GmailClientError;
     use crate::store;
@@ -514,6 +518,23 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("validation_failed"));
         assert_eq!(value["error"]["kind"], json!("cli.validation"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn automation_run_account_mismatch_maps_to_auth_required_code() {
+        let error = anyhow!(AutomationServiceError::RunAccountMismatch {
+            run_id: 42,
+            expected_account_id: String::from("gmail:operator@example.com"),
+            actual_account_id: String::from("gmail:other@example.com"),
+        });
+
+        let report = describe_error(&error, "automation.apply");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("auth_required"));
+        assert_eq!(value["error"]["kind"], json!("automation.account.mismatch"));
+        assert_eq!(value["error"]["operation"], json!("automation.apply"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
     }
 
     #[test]

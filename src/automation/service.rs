@@ -33,6 +33,14 @@ pub enum AutomationServiceError {
     InvalidLimit,
     #[error("re-run with --execute to apply automation changes")]
     ExecuteRequired,
+    #[error(
+        "automation run {run_id} was previewed for {expected_account_id}, but the authenticated Gmail account is {actual_account_id}; re-run preview under the authenticated account"
+    )]
+    RunAccountMismatch {
+        run_id: i64,
+        expected_account_id: String,
+        actual_account_id: String,
+    },
     #[error("automation run {run_id} was not found")]
     RunNotFound { run_id: i64 },
     #[error("automation rules file is missing: {path}")]
@@ -150,7 +158,16 @@ pub async fn apply_run(
     init_store_task(config_report).await?;
     let detail = load_run_detail_task(config_report, run_id).await?;
     let gmail_client = crate::gmail_client_for_config(config_report)?;
-    gmail_client.get_profile_with_access_scope().await?;
+    let (profile, _) = gmail_client.get_profile_with_access_scope().await?;
+    let authenticated_account_id = gmail_account_id_for_email(&profile.email_address);
+    if authenticated_account_id != detail.run.account_id {
+        return Err(AutomationServiceError::RunAccountMismatch {
+            run_id,
+            expected_account_id: detail.run.account_id.clone(),
+            actual_account_id: authenticated_account_id,
+        }
+        .into());
+    }
     let pending_candidates = detail
         .candidates
         .iter()
@@ -829,13 +846,17 @@ fn resolve_automation_account_id(
     Err(AutomationServiceError::NoActiveAccount.into())
 }
 
+fn gmail_account_id_for_email(email_address: &str) -> String {
+    format!("gmail:{}", email_address.trim().to_ascii_lowercase())
+}
+
 fn configured_paths(config_report: &ConfigReport) -> Result<crate::workspace::WorkspacePaths> {
     crate::configured_paths(config_report)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PlannedRule, apply_run, build_run_candidates};
+    use super::{PlannedRule, apply_run, build_run_candidates, gmail_account_id_for_email};
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::automation::model::{AutomationMatchRule, AutomationRule};
     use crate::config::{ConfigReport, resolve};
@@ -914,6 +935,58 @@ mod tests {
         assert_eq!(detail.run.status, AutomationRunStatus::Previewed);
         assert_eq!(detail.candidates[0].apply_status, None);
         assert_eq!(detail.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_run_rejects_authenticated_account_mismatch_before_recording_apply_events() {
+        let mock_server = MockServer::start().await;
+        mount_profile_for_email(&mock_server, "Other.Operator@Example.com").await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, Some(&mock_server));
+        store::init(&config_report).unwrap();
+        seed_credentials_for_email(&config_report, "other.operator@example.com");
+        let account = seed_account(&config_report);
+        let detail = store::automation::create_automation_run(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &CreateAutomationRunInput {
+                account_id: account.account_id.clone(),
+                rule_file_path: String::from(".mailroom/automation.toml"),
+                rule_file_hash: String::from("hash"),
+                selected_rule_ids: vec![String::from("archive-digest")],
+                created_at_epoch_s: 100,
+                candidates: vec![sample_candidate("archive-digest", "thread-1")],
+            },
+        )
+        .unwrap();
+
+        let error = apply_run(&config_report, detail.run.run_id, true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "automation run {} was previewed for {}, but the authenticated Gmail account is gmail:other.operator@example.com; re-run preview under the authenticated account",
+                detail.run.run_id, account.account_id
+            )
+        );
+
+        let refreshed_run = store::automation::get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            detail.run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(refreshed_run.run.status, AutomationRunStatus::Previewed);
+        assert_eq!(refreshed_run.candidates[0].apply_status, None);
+        assert_eq!(refreshed_run.events.len(), 1);
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_str(), "GET");
+        assert_eq!(requests[0].url.path(), "/gmail/v1/users/me/profile");
     }
 
     #[tokio::test]
@@ -1158,6 +1231,10 @@ mod tests {
     }
 
     fn seed_credentials(config_report: &ConfigReport) {
+        seed_credentials_for_email(config_report, "operator@example.com");
+    }
+
+    fn seed_credentials_for_email(config_report: &ConfigReport, email_address: &str) {
         let credential_store = FileCredentialStore::new(
             config_report
                 .config
@@ -1166,7 +1243,7 @@ mod tests {
         );
         credential_store
             .save(&StoredCredentials {
-                account_id: String::from("gmail:operator@example.com"),
+                account_id: gmail_account_id_for_email(email_address),
                 access_token: SecretString::from(String::from("access-token")),
                 refresh_token: Some(SecretString::from(String::from("refresh-token"))),
                 expires_at_epoch_s: Some(u64::MAX),
@@ -1312,10 +1389,14 @@ mod tests {
     }
 
     async fn mount_profile(mock_server: &MockServer) {
+        mount_profile_for_email(mock_server, "operator@example.com").await;
+    }
+
+    async fn mount_profile_for_email(mock_server: &MockServer, email_address: &str) {
         Mock::given(method("GET"))
             .and(path("/gmail/v1/users/me/profile"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "emailAddress": "operator@example.com",
+                "emailAddress": email_address,
                 "messagesTotal": 1,
                 "threadsTotal": 1,
                 "historyId": "12345"

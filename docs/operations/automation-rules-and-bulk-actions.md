@@ -64,6 +64,9 @@ Supported actions:
 - `trash`
 - `label` with `add = []` and `remove = []`
 
+For `label` actions, at least one of `add` or `remove` must be non-empty after
+normalization, and the same normalized label name cannot appear in both lists.
+
 Example:
 
 ```toml
@@ -167,7 +170,8 @@ The JSON payload also includes header-derived unsubscribe hints:
 - `automation run` is preview-only and only writes a local snapshot
 - `automation apply` mutates Gmail only when `--execute` is present
 - `automation apply --execute` requires working Gmail auth up front and aborts
-  before persisting apply results if credentials are missing or expired
+  before persisting apply results if credentials are missing, expired, or point
+  at a different Gmail account than the saved run snapshot
 - apply uses the stored snapshot, not a live recompute
 - thread mutations reuse the same Gmail thread cleanup path as the manual
   cleanup commands
