@@ -1,3 +1,4 @@
+use crate::store::connection::DatabaseOpenError;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::path::Path;
@@ -45,6 +46,7 @@ impl FromStr for AutomationActionKind {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AutomationRunStatus {
     Previewed,
+    Applying,
     Applied,
     ApplyFailed,
 }
@@ -53,6 +55,7 @@ impl AutomationRunStatus {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Previewed => "previewed",
+            Self::Applying => "applying",
             Self::Applied => "applied",
             Self::ApplyFailed => "apply_failed",
         }
@@ -71,6 +74,7 @@ impl FromStr for AutomationRunStatus {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "previewed" => Ok(Self::Previewed),
+            "applying" => Ok(Self::Applying),
             "applied" => Ok(Self::Applied),
             "apply_failed" => Ok(Self::ApplyFailed),
             _ => Err(AutomationDecodeError::RunStatus(value.to_owned())),
@@ -295,7 +299,7 @@ pub(crate) enum AutomationStoreReadError {
     OpenDatabase {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: DatabaseOpenError,
     },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
@@ -306,7 +310,7 @@ pub(crate) enum AutomationStoreReadError {
 }
 
 impl AutomationStoreReadError {
-    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+    pub(crate) fn open_database(path: &Path, source: DatabaseOpenError) -> Self {
         Self::OpenDatabase {
             path: path.display().to_string(),
             source,
@@ -332,7 +336,7 @@ pub(crate) enum AutomationStoreWriteError {
     OpenDatabase {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: DatabaseOpenError,
     },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
@@ -351,7 +355,7 @@ pub(crate) enum AutomationStoreWriteError {
 }
 
 impl AutomationStoreWriteError {
-    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+    pub(crate) fn open_database(path: &Path, source: DatabaseOpenError) -> Self {
         Self::OpenDatabase {
             path: path.display().to_string(),
             source,

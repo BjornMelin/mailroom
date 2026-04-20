@@ -1,48 +1,73 @@
 use super::SQLITE_APPLICATION_ID;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::time::Duration;
+use thiserror::Error;
 
-pub fn open_or_create(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
+#[derive(Debug, Error)]
+pub(crate) enum DatabaseOpenError {
+    #[error(
+        "store.busy_timeout_ms must be greater than zero to avoid immediate SQLITE_BUSY failures"
+    )]
+    InvalidBusyTimeout { busy_timeout_ms: u64 },
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+pub fn open_or_create(
+    path: &Path,
+    busy_timeout_ms: u64,
+) -> std::result::Result<Connection, DatabaseOpenError> {
     let connection = Connection::open_with_flags(path, create_flags())?;
     configure_busy_timeout(&connection, busy_timeout_ms)?;
     configure_connection_pragmas(&connection)?;
     Ok(connection)
 }
 
-pub fn open_read_only_for_diagnostics(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
+pub fn open_read_only_for_diagnostics(
+    path: &Path,
+    busy_timeout_ms: u64,
+) -> std::result::Result<Connection, DatabaseOpenError> {
     let connection = Connection::open_with_flags(path, read_only_flags())?;
     configure_busy_timeout(&connection, busy_timeout_ms)?;
     configure_read_only_connection_pragmas(&connection)?;
     Ok(connection)
 }
 
-pub fn open_existing(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
+pub fn open_existing(
+    path: &Path,
+    busy_timeout_ms: u64,
+) -> std::result::Result<Connection, DatabaseOpenError> {
     let connection = Connection::open_with_flags(path, existing_flags())?;
     configure_busy_timeout(&connection, busy_timeout_ms)?;
     configure_connection_pragmas(&connection)?;
     Ok(connection)
 }
 
-fn configure_busy_timeout(connection: &Connection, busy_timeout_ms: u64) -> Result<()> {
+fn configure_busy_timeout(
+    connection: &Connection,
+    busy_timeout_ms: u64,
+) -> std::result::Result<(), DatabaseOpenError> {
     if busy_timeout_ms == 0 {
-        return Err(anyhow!(
-            "store.busy_timeout_ms must be greater than zero to avoid immediate SQLITE_BUSY failures"
-        ));
+        return Err(DatabaseOpenError::InvalidBusyTimeout { busy_timeout_ms });
     }
     connection.busy_timeout(Duration::from_millis(busy_timeout_ms))?;
     Ok(())
 }
 
-fn configure_connection_pragmas(connection: &Connection) -> Result<()> {
+fn configure_connection_pragmas(
+    connection: &Connection,
+) -> std::result::Result<(), DatabaseOpenError> {
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "trusted_schema", false)?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
 }
 
-fn configure_read_only_connection_pragmas(connection: &Connection) -> Result<()> {
+fn configure_read_only_connection_pragmas(
+    connection: &Connection,
+) -> std::result::Result<(), DatabaseOpenError> {
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "trusted_schema", false)?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;

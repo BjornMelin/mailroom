@@ -132,6 +132,9 @@ pub(crate) fn list_latest_thread_candidates(
          ORDER BY latest.internal_date_epoch_ms DESC, latest.message_rowid DESC",
     ) {
         Ok(statement) => statement,
+        Err(error) if is_missing_automation_thread_candidate_columns_error(&error) => {
+            return Ok(Vec::new());
+        }
         Err(error)
             if matches!(
                 &error,
@@ -170,6 +173,20 @@ pub(crate) fn list_latest_thread_candidates(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+fn is_missing_automation_thread_candidate_columns_error(error: &rusqlite::Error) -> bool {
+    let message = error.to_string();
+    message.contains("no such column")
+        && [
+            "list_id_header",
+            "list_unsubscribe_header",
+            "list_unsubscribe_post_header",
+            "precedence_header",
+            "auto_submitted_header",
+        ]
+        .iter()
+        .any(|column| message.contains(column))
 }
 
 pub(crate) fn get_automation_run_detail(

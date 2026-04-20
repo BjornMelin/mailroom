@@ -9,6 +9,7 @@ use super::{
 use crate::config::resolve;
 use crate::store::{accounts, init, mailbox};
 use crate::workspace::WorkspacePaths;
+use rusqlite::Connection;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -241,6 +242,57 @@ fn list_latest_thread_candidates_returns_latest_message_and_headers() {
         Some("<list.example.com>")
     );
     assert_eq!(candidates[0].label_names, vec![String::from("INBOX")]);
+
+    fs::remove_dir_all(repo_root).unwrap();
+}
+
+#[test]
+fn list_latest_thread_candidates_returns_empty_for_pre_migration_schemas() {
+    let repo_root = unique_temp_dir("mailroom-automation-thread-candidates-old-schema");
+    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+
+    let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(
+            "
+            CREATE TABLE gmail_messages (
+                message_rowid INTEGER PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                internal_date_epoch_ms INTEGER NOT NULL,
+                subject TEXT NOT NULL,
+                from_header TEXT NOT NULL,
+                from_address TEXT,
+                snippet TEXT NOT NULL
+            );
+            CREATE TABLE gmail_message_labels (
+                message_rowid INTEGER NOT NULL,
+                label_id TEXT NOT NULL
+            );
+            CREATE TABLE gmail_labels (
+                account_id TEXT NOT NULL,
+                label_id TEXT NOT NULL,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE gmail_message_attachments (
+                account_id TEXT NOT NULL,
+                message_rowid INTEGER NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+
+    let candidates = list_latest_thread_candidates(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+    )
+    .unwrap();
+
+    assert!(candidates.is_empty());
 
     fs::remove_dir_all(repo_root).unwrap();
 }

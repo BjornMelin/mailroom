@@ -19,7 +19,7 @@ CREATE TABLE automation_runs (
     rule_file_path TEXT NOT NULL,
     rule_file_hash TEXT NOT NULL,
     selected_rule_ids_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('previewed', 'applied', 'apply_failed')),
+    status TEXT NOT NULL CHECK (status IN ('previewed', 'applying', 'applied', 'apply_failed')),
     candidate_count INTEGER NOT NULL,
     created_at_epoch_s INTEGER NOT NULL,
     applied_at_epoch_s INTEGER,
