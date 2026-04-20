@@ -3,8 +3,8 @@ use super::{
     RemoteDraftStateInput, ReplyMode, RetireDraftStateInput, SetTriageStateInput, TriageBucket,
     UpsertDraftRevisionInput, WorkflowListFilter, WorkflowMessageSnapshot, WorkflowStage,
     apply_cleanup, get_workflow_detail, inspect_workflows, list_workflows, mark_sent,
-    retire_draft_state, set_remote_draft_state, set_triage_state, upsert_draft_revision,
-    upsert_stage,
+    retire_draft_state, set_remote_draft_state, set_remote_draft_state_with_expected_version,
+    set_triage_state, upsert_draft_revision, upsert_stage,
 };
 use crate::config::resolve;
 use crate::store::{accounts, init};
@@ -271,6 +271,61 @@ fn persist_workflow_rejects_stale_updates() {
             ..stale_workflow
         },
         Some(expected_workflow_version),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        super::WorkflowStoreWriteError::Conflict { .. }
+    ));
+}
+
+#[test]
+fn set_remote_draft_state_rejects_stale_caller_version() {
+    let repo_root = unique_temp_dir("mailroom-workflow-remote-draft-version-conflict");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    seed_drafting_workflow(&config_report, &account.account_id, "thread-1");
+    let stale_workflow = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-1",
+    )
+    .unwrap()
+    .unwrap()
+    .workflow;
+
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SetTriageStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::NeedsReplySoon,
+            note: None,
+            snapshot: snapshot("message-2", "advanced state"),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap();
+
+    let error = set_remote_draft_state_with_expected_version(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RemoteDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            gmail_draft_id: Some(String::from("gmail-draft-1")),
+            gmail_draft_message_id: Some(String::from("gmail-message-1")),
+            gmail_draft_thread_id: Some(String::from("gmail-thread-1")),
+            updated_at_epoch_s: 301,
+        },
+        Some(stale_workflow.workflow_version),
     )
     .unwrap_err();
 

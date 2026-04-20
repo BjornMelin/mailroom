@@ -285,6 +285,7 @@ async fn persist_remote_draft_state(
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let account_id = workflow.account_id.clone();
     let thread_id = workflow.thread_id.clone();
+    let expected_workflow_version = workflow.workflow_version;
     let mut last_error = None;
     for attempt in 0..REMOTE_DRAFT_STATE_MAX_ATTEMPTS {
         let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
@@ -297,7 +298,7 @@ async fn persist_remote_draft_state(
 
         match join_blocking(
             spawn_blocking(move || {
-                store::workflows::set_remote_draft_state(
+                store::workflows::set_remote_draft_state_with_expected_version(
                     &database_path,
                     busy_timeout_ms,
                     &store::workflows::RemoteDraftStateInput {
@@ -308,6 +309,7 @@ async fn persist_remote_draft_state(
                         gmail_draft_thread_id: Some(gmail_draft_thread_id),
                         updated_at_epoch_s,
                     },
+                    Some(expected_workflow_version),
                 )
             }),
             operation,
@@ -568,14 +570,9 @@ pub async fn promote_workflow(
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
     let mut promoted_close_gmail_client: Option<crate::gmail::GmailClient> = None;
     if to_stage == store::workflows::WorkflowStage::Closed {
-        let detail = workflow_detail(config_report, &account_id, &thread_id).await?;
-        let needs_draft_retirement = detail.workflow.current_draft_revision_id.is_some()
-            || detail.workflow.gmail_draft_id.is_some();
-        if needs_draft_retirement {
-            let gmail_client = crate::gmail_client_for_config(config_report)?;
-            gmail_client.get_profile_with_access_scope().await?;
-            promoted_close_gmail_client = Some(gmail_client);
-        }
+        let gmail_client = crate::gmail_client_for_config(config_report)?;
+        gmail_client.get_profile_with_access_scope().await?;
+        promoted_close_gmail_client = Some(gmail_client);
     }
     let mut workflow = join_blocking(
         spawn_blocking(move || {
@@ -1761,7 +1758,11 @@ fn remove_attachment_by_path_or_name(
 }
 
 fn normalize_attachment_match_path(path_or_name: &str, base_dir: &Path) -> Option<PathBuf> {
-    lexical_absolute_path(Path::new(path_or_name), base_dir).ok()
+    let path = Path::new(path_or_name);
+    if let Ok(canonical_path) = path.canonicalize() {
+        return Some(canonical_path);
+    }
+    lexical_absolute_path(path, base_dir).ok()
 }
 
 fn lexical_absolute_path(path: &Path, base_dir: &Path) -> std::io::Result<PathBuf> {

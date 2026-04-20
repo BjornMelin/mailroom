@@ -225,10 +225,20 @@ pub(crate) fn upsert_draft_revision(
     Ok((workflow, draft_revision))
 }
 
+#[cfg(test)]
 pub(crate) fn set_remote_draft_state(
     database_path: &Path,
     busy_timeout_ms: u64,
     input: &RemoteDraftStateInput,
+) -> Result<WorkflowRecord, WorkflowStoreWriteError> {
+    set_remote_draft_state_with_expected_version(database_path, busy_timeout_ms, input, None)
+}
+
+pub(crate) fn set_remote_draft_state_with_expected_version(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    input: &RemoteDraftStateInput,
+    expected_workflow_version: Option<i64>,
 ) -> Result<WorkflowRecord, WorkflowStoreWriteError> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
         .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
@@ -237,7 +247,7 @@ pub(crate) fn set_remote_draft_state(
         .ok_or_else(|| WorkflowStoreWriteError::MissingWorkflow {
             thread_id: input.thread_id.clone(),
         })?;
-    let expected_workflow_version = Some(workflow.workflow_version);
+    let expected_workflow_version = expected_workflow_version.or(Some(workflow.workflow_version));
 
     workflow.gmail_draft_id = input.gmail_draft_id.clone();
     workflow.gmail_draft_message_id = input.gmail_draft_message_id.clone();

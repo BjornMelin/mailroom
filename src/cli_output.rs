@@ -97,13 +97,7 @@ pub(crate) fn describe_error(error: &AnyhowError, operation: &str) -> JsonErrorB
         .chain()
         .skip(1)
         .map(|cause| cause.to_string())
-        .filter(|cause| !cause.is_empty() && cause != &message)
-        .fold(Vec::<String>::new(), |mut acc, cause| {
-            if !acc.iter().any(|existing| existing == &cause) {
-                acc.push(cause);
-            }
-            acc
-        });
+        .collect::<Vec<_>>();
 
     JsonErrorBody {
         code,
@@ -184,6 +178,12 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | WorkflowServiceError::AttachmentRead { .. } => {
                 return (ErrorCode::ValidationFailed, "workflow.validation");
             }
+            WorkflowServiceError::StoreInit { .. } => {
+                return (ErrorCode::StorageFailure, "workflow.store_init");
+            }
+            WorkflowServiceError::AccountState { .. } => {
+                return (ErrorCode::StorageFailure, "workflow.account_state");
+            }
             WorkflowServiceError::MessageBuild { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.message_build");
             }
@@ -191,9 +191,7 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | WorkflowServiceError::WorkflowStoreRead(_)
             | WorkflowServiceError::WorkflowStoreWrite(_)
             | WorkflowServiceError::MailboxRead(_)
-            | WorkflowServiceError::StoreInit { .. }
             | WorkflowServiceError::ActiveAccountRefresh { .. }
-            | WorkflowServiceError::AccountState { .. }
             | WorkflowServiceError::Json(_)
             | WorkflowServiceError::IntConversion(_)
             | WorkflowServiceError::Unexpected(_) => {}
@@ -507,6 +505,33 @@ mod tests {
         assert_eq!(value["error"]["kind"], json!("store.workflow.read"));
         assert_eq!(value["error"]["operation"], json!("workflow.promote"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn store_init_maps_to_workflow_storage_kind() {
+        let error = anyhow!(WorkflowServiceError::StoreInit {
+            source: anyhow!("disk offline"),
+        });
+
+        let report = describe_error(&error, "workflow.show");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.store_init"));
+        assert_eq!(value["error"]["operation"], json!("workflow.show"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn describe_error_preserves_ordered_cause_chain_with_duplicates() {
+        let nested = anyhow!("leaf");
+        let wrapped = nested.context("leaf").context("top");
+
+        let report = describe_error(&wrapped, "workflow.show");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["message"], json!("top"));
+        assert_eq!(value["error"]["causes"], json!(["leaf", "leaf"]));
     }
 
     #[test]
