@@ -1,6 +1,8 @@
 use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
 use crate::auth::oauth_client::resolve as resolve_oauth_client;
 use crate::config::GmailConfig;
+use base64::Engine as _;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenUrl, basic::BasicClient};
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
@@ -14,6 +16,29 @@ use tokio::time::sleep;
 const TOKEN_REFRESH_LEEWAY_SECS: u64 = 60;
 const GMAIL_MAX_RETRY_ATTEMPTS: usize = 4;
 const GMAIL_INITIAL_RETRY_DELAY_MS: u64 = 500;
+const MESSAGE_CATALOG_FULL_FIELDS: &str =
+    "id,threadId,labelIds,snippet,historyId,internalDate,sizeEstimate,payload";
+const MESSAGE_CATALOG_FIELDS: &str = concat!(
+    "id,threadId,labelIds,snippet,historyId,internalDate,sizeEstimate,",
+    "payload(",
+    "headers(name,value),",
+    "partId,mimeType,filename,headers(name,value),body(attachmentId,size),",
+    "parts(",
+    "partId,mimeType,filename,headers(name,value),body(attachmentId,size),",
+    "parts(",
+    "partId,mimeType,filename,headers(name,value),body(attachmentId,size),",
+    "parts(",
+    "partId,mimeType,filename,headers(name,value),body(attachmentId,size),",
+    "parts(",
+    "partId,mimeType,filename,headers(name,value),body(attachmentId,size),",
+    "parts(partId,mimeType,filename,headers(name,value),body(attachmentId,size),parts(partId))",
+    ")",
+    ")",
+    ")",
+    ")",
+    ")",
+    ")"
+);
 
 type GmailResult<T> = std::result::Result<T, GmailClientError>;
 
@@ -49,7 +74,7 @@ pub(crate) struct GmailLabel {
     pub threads_unread: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct GmailMessageMetadata {
     pub id: String,
     pub thread_id: String,
@@ -65,6 +90,25 @@ pub(crate) struct GmailMessageMetadata {
     pub cc_header: String,
     pub bcc_header: String,
     pub reply_to_header: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct GmailMessageCatalog {
+    pub metadata: GmailMessageMetadata,
+    pub attachments: Vec<GmailMessageAttachment>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct GmailMessageAttachment {
+    pub attachment_key: String,
+    pub part_id: String,
+    pub gmail_attachment_id: Option<String>,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+    pub content_disposition: Option<String>,
+    pub content_id: Option<String>,
+    pub is_inline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +226,10 @@ pub(crate) enum GmailClientError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("gmail message {message_id} did not include attachment part {part_id}")]
+    AttachmentPartMissing { message_id: String, part_id: String },
+    #[error("gmail message {message_id} did not include attachment bytes for part {part_id}")]
+    AttachmentBodyMissing { message_id: String, part_id: String },
     #[error("gmail API request to {path} failed with status {status}: {body}")]
     Api {
         path: String,
@@ -221,10 +269,26 @@ struct GmailMessageMetadataResponse {
     payload: Option<GmailMessagePayload>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct GmailMessagePayload {
+    #[serde(rename = "partId")]
+    part_id: Option<String>,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+    filename: Option<String>,
     #[serde(default)]
     headers: Vec<GmailHeader>,
+    body: Option<GmailMessagePartBody>,
+    #[serde(default)]
+    parts: Vec<GmailMessagePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GmailMessagePartBody {
+    #[serde(rename = "attachmentId")]
+    attachment_id: Option<String>,
+    size: Option<i64>,
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -415,42 +479,107 @@ impl GmailClient {
         })
     }
 
-    pub(crate) async fn get_message_metadata(
+    pub(crate) async fn get_message_catalog(
         &self,
         message_id: &str,
-    ) -> GmailResult<GmailMessageMetadata> {
+    ) -> GmailResult<GmailMessageCatalog> {
+        let message_path = format!("users/me/messages/{message_id}");
+        let response: GmailMessageMetadataResponse = self
+            .get_json(
+                &message_path,
+                &[
+                    ("format", String::from("full")),
+                    ("fields", String::from(MESSAGE_CATALOG_FIELDS)),
+                ],
+            )
+            .await?;
+        if response
+            .payload
+            .as_ref()
+            .is_some_and(payload_projection_truncated)
+        {
+            let full_response: GmailMessageMetadataResponse = self
+                .get_json(
+                    &message_path,
+                    &[
+                        ("format", String::from("full")),
+                        ("fields", String::from(MESSAGE_CATALOG_FULL_FIELDS)),
+                    ],
+                )
+                .await?;
+            return full_response.into_message_catalog();
+        }
+        response.into_message_catalog()
+    }
+
+    pub(crate) async fn get_message_catalog_if_present(
+        &self,
+        message_id: &str,
+    ) -> GmailResult<Option<GmailMessageCatalog>> {
+        match self.get_message_catalog(message_id).await {
+            Ok(catalog) => Ok(Some(catalog)),
+            Err(error) if matches_missing_message_error(&error, message_id) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) async fn get_attachment_bytes(
+        &self,
+        message_id: &str,
+        part_id: &str,
+        gmail_attachment_id: Option<&str>,
+    ) -> GmailResult<Vec<u8>> {
+        if let Some(gmail_attachment_id) = gmail_attachment_id {
+            let response: GmailMessagePartBody = self
+                .get_json(
+                    &format!("users/me/messages/{message_id}/attachments/{gmail_attachment_id}"),
+                    &[],
+                )
+                .await?;
+            let encoded = response
+                .data
+                .ok_or_else(|| GmailClientError::AttachmentBodyMissing {
+                    message_id: message_id.to_owned(),
+                    part_id: part_id.to_owned(),
+                })?;
+            return decode_base64url(
+                &encoded,
+                &format!("gmail.attachment.{message_id}.{part_id}.data"),
+            );
+        }
+
         let response: GmailMessageMetadataResponse = self
             .get_json(
                 &format!("users/me/messages/{message_id}"),
                 &[
-                    ("format", String::from("metadata")),
-                    (
-                        "fields",
-                        String::from(
-                            "id,threadId,labelIds,snippet,historyId,internalDate,sizeEstimate,payload/headers",
-                        ),
-                    ),
-                    ("metadataHeaders[]", String::from("Subject")),
-                    ("metadataHeaders[]", String::from("From")),
-                    ("metadataHeaders[]", String::from("To")),
-                    ("metadataHeaders[]", String::from("Cc")),
-                    ("metadataHeaders[]", String::from("Bcc")),
-                    ("metadataHeaders[]", String::from("Reply-To")),
+                    ("format", String::from("full")),
+                    ("fields", String::from("id,payload")),
                 ],
             )
             .await?;
-        response.into_message_metadata()
-    }
-
-    pub(crate) async fn get_message_metadata_if_present(
-        &self,
-        message_id: &str,
-    ) -> GmailResult<Option<GmailMessageMetadata>> {
-        match self.get_message_metadata(message_id).await {
-            Ok(metadata) => Ok(Some(metadata)),
-            Err(error) if matches_missing_message_error(&error, message_id) => Ok(None),
-            Err(error) => Err(error),
-        }
+        let payload = response
+            .payload
+            .ok_or_else(|| GmailClientError::AttachmentPartMissing {
+                message_id: message_id.to_owned(),
+                part_id: part_id.to_owned(),
+            })?;
+        let body = find_part_body(&payload, part_id).ok_or_else(|| {
+            GmailClientError::AttachmentPartMissing {
+                message_id: message_id.to_owned(),
+                part_id: part_id.to_owned(),
+            }
+        })?;
+        let encoded =
+            body.data
+                .as_deref()
+                .ok_or_else(|| GmailClientError::AttachmentBodyMissing {
+                    message_id: message_id.to_owned(),
+                    part_id: part_id.to_owned(),
+                })?;
+        decode_base64url(
+            encoded,
+            &format!("gmail.inline_attachment.{message_id}.{part_id}.data"),
+        )
     }
 
     pub(crate) async fn list_history(
@@ -910,32 +1039,35 @@ fn request_supports_automatic_retry(method: &Method) -> bool {
 }
 
 impl GmailMessageMetadataResponse {
-    fn into_message_metadata(self) -> GmailResult<GmailMessageMetadata> {
-        let headers = self
-            .payload
-            .map(|payload| payload.headers)
-            .unwrap_or_default();
-        Ok(GmailMessageMetadata {
-            id: self.id,
-            thread_id: self.thread_id,
-            label_ids: self.label_ids,
-            snippet: self.snippet.unwrap_or_default(),
-            history_id: self.history_id,
-            internal_date_epoch_ms: self.internal_date.parse::<i64>().map_err(|source| {
-                GmailClientError::ResponseDecode {
-                    path: String::from("gmail.message.internal_date"),
-                    source: source.into(),
-                }
-            })?,
-            size_estimate: self.size_estimate,
-            subject: header_value(&headers, "Subject").unwrap_or_default(),
-            from_header: header_value(&headers, "From").unwrap_or_default(),
-            from_address: header_value(&headers, "From")
-                .and_then(|value| extract_email_address(&value)),
-            to_header: header_value(&headers, "To").unwrap_or_default(),
-            cc_header: header_value(&headers, "Cc").unwrap_or_default(),
-            bcc_header: header_value(&headers, "Bcc").unwrap_or_default(),
-            reply_to_header: header_value(&headers, "Reply-To").unwrap_or_default(),
+    fn into_message_catalog(self) -> GmailResult<GmailMessageCatalog> {
+        let GmailMessageMetadataResponse {
+            id,
+            thread_id,
+            label_ids,
+            snippet,
+            history_id,
+            internal_date,
+            size_estimate,
+            payload,
+        } = self;
+        let payload = payload.unwrap_or_default();
+        let metadata = message_metadata_from_payload(
+            GmailMessageMetadataFields {
+                id: id.clone(),
+                thread_id,
+                label_ids,
+                snippet,
+                history_id,
+                internal_date,
+                size_estimate,
+            },
+            &payload,
+        )?;
+        let mut attachments = Vec::new();
+        collect_message_attachments(&id, &payload, &mut attachments);
+        Ok(GmailMessageCatalog {
+            metadata,
+            attachments,
         })
     }
 }
@@ -1110,6 +1242,151 @@ fn header_value(headers: &[GmailHeader], name: &str) -> Option<String> {
         .map(|header| header.value.trim().to_owned())
 }
 
+struct GmailMessageMetadataFields {
+    id: String,
+    thread_id: String,
+    label_ids: Vec<String>,
+    snippet: Option<String>,
+    history_id: String,
+    internal_date: String,
+    size_estimate: i64,
+}
+
+fn message_metadata_from_payload(
+    fields: GmailMessageMetadataFields,
+    payload: &GmailMessagePayload,
+) -> GmailResult<GmailMessageMetadata> {
+    Ok(GmailMessageMetadata {
+        id: fields.id,
+        thread_id: fields.thread_id,
+        label_ids: fields.label_ids,
+        snippet: fields.snippet.unwrap_or_default(),
+        history_id: fields.history_id,
+        internal_date_epoch_ms: fields.internal_date.parse::<i64>().map_err(|source| {
+            GmailClientError::ResponseDecode {
+                path: String::from("gmail.message.internal_date"),
+                source: source.into(),
+            }
+        })?,
+        size_estimate: fields.size_estimate,
+        subject: header_value(&payload.headers, "Subject").unwrap_or_default(),
+        from_header: header_value(&payload.headers, "From").unwrap_or_default(),
+        from_address: header_value(&payload.headers, "From")
+            .and_then(|value| extract_email_address(&value)),
+        to_header: header_value(&payload.headers, "To").unwrap_or_default(),
+        cc_header: header_value(&payload.headers, "Cc").unwrap_or_default(),
+        bcc_header: header_value(&payload.headers, "Bcc").unwrap_or_default(),
+        reply_to_header: header_value(&payload.headers, "Reply-To").unwrap_or_default(),
+    })
+}
+
+fn collect_message_attachments(
+    message_id: &str,
+    payload: &GmailMessagePayload,
+    attachments: &mut Vec<GmailMessageAttachment>,
+) {
+    if let Some(attachment) = attachment_from_part(message_id, payload) {
+        attachments.push(attachment);
+    }
+    for part in &payload.parts {
+        collect_message_attachments(message_id, part, attachments);
+    }
+}
+
+fn payload_projection_truncated(payload: &GmailMessagePayload) -> bool {
+    payload
+        .parts
+        .iter()
+        .any(|part| projection_depth_marker(part) || payload_projection_truncated(part))
+}
+
+fn projection_depth_marker(part: &GmailMessagePayload) -> bool {
+    part.part_id
+        .as_deref()
+        .is_some_and(|part_id| !part_id.trim().is_empty())
+        && part.mime_type.is_none()
+        && part.filename.is_none()
+        && part.headers.is_empty()
+        && part.body.is_none()
+        && part.parts.is_empty()
+}
+
+fn attachment_from_part(
+    message_id: &str,
+    part: &GmailMessagePayload,
+) -> Option<GmailMessageAttachment> {
+    let part_id = part.part_id.as_deref()?.trim();
+    if part_id.is_empty() {
+        return None;
+    }
+
+    let filename = part.filename.as_deref().unwrap_or_default().trim();
+    let content_disposition = header_value(&part.headers, "Content-Disposition");
+    let content_id = header_value(&part.headers, "Content-Id")
+        .or_else(|| header_value(&part.headers, "Content-ID"));
+    let gmail_attachment_id = part
+        .body
+        .as_ref()
+        .and_then(|body| body.attachment_id.clone())
+        .filter(|value| !value.trim().is_empty());
+    if filename.is_empty() && gmail_attachment_id.is_none() {
+        return None;
+    }
+
+    let is_inline = content_disposition.as_deref().is_some_and(|value| {
+        value
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("inline")
+    }) || content_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    Some(GmailMessageAttachment {
+        attachment_key: attachment_key(message_id, part_id),
+        part_id: part_id.to_owned(),
+        gmail_attachment_id,
+        filename: filename.to_owned(),
+        mime_type: part
+            .mime_type
+            .clone()
+            .unwrap_or_else(|| String::from("application/octet-stream")),
+        size_bytes: part.body.as_ref().and_then(|body| body.size).unwrap_or(0),
+        content_disposition,
+        content_id,
+        is_inline,
+    })
+}
+
+fn attachment_key(message_id: &str, part_id: &str) -> String {
+    format!("{message_id}:{part_id}")
+}
+
+fn find_part_body<'a>(
+    payload: &'a GmailMessagePayload,
+    part_id: &str,
+) -> Option<&'a GmailMessagePartBody> {
+    if payload.part_id.as_deref() == Some(part_id) {
+        return payload.body.as_ref();
+    }
+
+    payload
+        .parts
+        .iter()
+        .find_map(|part| find_part_body(part, part_id))
+}
+
+fn decode_base64url(encoded: &str, path: &str) -> GmailResult<Vec<u8>> {
+    let trimmed = encoded.trim();
+    URL_SAFE_NO_PAD
+        .decode(trimmed.as_bytes())
+        .or_else(|_| URL_SAFE.decode(trimmed.as_bytes()))
+        .map_err(|source| GmailClientError::ResponseDecode {
+            path: path.to_owned(),
+            source: source.into(),
+        })
+}
+
 fn extract_email_address(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() || value.contains('\n') || value.contains('\r') {
@@ -1236,8 +1513,9 @@ fn build_gmail_http_client(config: &GmailConfig) -> GmailResult<reqwest::Client>
 #[cfg(test)]
 mod tests {
     use super::{
-        GmailClient, GmailProfile, duration_to_retry_delay_ms, extract_email_address,
-        request_supports_automatic_retry, retry_after_delay,
+        GmailClient, GmailProfile, MESSAGE_CATALOG_FIELDS, MESSAGE_CATALOG_FULL_FIELDS,
+        duration_to_retry_delay_ms, extract_email_address, request_supports_automatic_retry,
+        retry_after_delay,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::{GmailConfig, WorkspaceConfig};
@@ -1247,7 +1525,7 @@ mod tests {
     use serde_json::json;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn workspace_for(temp_dir: &TempDir) -> WorkspaceConfig {
@@ -1588,6 +1866,214 @@ mod tests {
         );
         assert_eq!(thread.messages[0].reply_to_header, "replies@example.com");
         assert_eq!(thread.messages[1].references_header, "<m-1@example.com>");
+    }
+
+    #[tokio::test]
+    async fn get_message_catalog_collects_nested_attachments() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-1"))
+            .and(query_param("format", "full"))
+            .and(query_param("fields", MESSAGE_CATALOG_FIELDS))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m-1",
+                "threadId": "thread-1",
+                "labelIds": ["INBOX"],
+                "snippet": "Quarterly statement attached",
+                "historyId": "500",
+                "internalDate": "1700000000000",
+                "sizeEstimate": 123,
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Statement"},
+                        {"name": "From", "value": "Billing <billing@example.com>"},
+                        {"name": "To", "value": "operator@example.com"}
+                    ],
+                    "parts": [
+                        {
+                            "partId": "1.1",
+                            "mimeType": "application/pdf",
+                            "filename": "statement.pdf",
+                            "headers": [
+                                {"name": "Content-Disposition", "value": "attachment; filename=\"statement.pdf\""}
+                            ],
+                            "body": {
+                                "attachmentId": "att-1",
+                                "size": 42
+                            }
+                        },
+                        {
+                            "partId": "1.2",
+                            "mimeType": "image/png",
+                            "filename": "inline.png",
+                            "headers": [
+                                {"name": "Content-Id", "value": "<image-1>"}
+                            ],
+                            "body": {
+                                "size": 5
+                            }
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let catalog = client.get_message_catalog("m-1").await.unwrap();
+
+        assert_eq!(catalog.metadata.subject, "Statement");
+        assert_eq!(catalog.attachments.len(), 2);
+        assert_eq!(catalog.attachments[0].attachment_key, "m-1:1.1");
+        assert_eq!(
+            catalog.attachments[0].gmail_attachment_id.as_deref(),
+            Some("att-1")
+        );
+        assert!(catalog.attachments[1].is_inline);
+    }
+
+    #[tokio::test]
+    async fn get_message_catalog_refetches_full_payload_when_projection_hits_depth_marker() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-deep"))
+            .and(query_param("format", "full"))
+            .and(query_param("fields", MESSAGE_CATALOG_FIELDS))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m-deep",
+                "threadId": "thread-deep",
+                "labelIds": ["INBOX"],
+                "snippet": "deep part marker",
+                "historyId": "700",
+                "internalDate": "1700000000123",
+                "sizeEstimate": 222,
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Deep"},
+                        {"name": "From", "value": "Nested <nested@example.com>"},
+                        {"name": "To", "value": "operator@example.com"}
+                    ],
+                    "parts": [{"partId": "1"}]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-deep"))
+            .and(query_param("format", "full"))
+            .and(query_param("fields", MESSAGE_CATALOG_FULL_FIELDS))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m-deep",
+                "threadId": "thread-deep",
+                "labelIds": ["INBOX"],
+                "snippet": "deep attachment",
+                "historyId": "700",
+                "internalDate": "1700000000123",
+                "sizeEstimate": 333,
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Deep"},
+                        {"name": "From", "value": "Nested <nested@example.com>"},
+                        {"name": "To", "value": "operator@example.com"}
+                    ],
+                    "parts": [{
+                        "partId": "1.1.1.1.1.1.1",
+                        "mimeType": "application/pdf",
+                        "filename": "deep.pdf",
+                        "headers": [
+                            {"name": "Content-Disposition", "value": "attachment; filename=\"deep.pdf\""}
+                        ],
+                        "body": {
+                            "attachmentId": "att-deep",
+                            "size": 99
+                        }
+                    }]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let catalog = client.get_message_catalog("m-deep").await.unwrap();
+
+        assert_eq!(catalog.attachments.len(), 1);
+        assert_eq!(
+            catalog.attachments[0].attachment_key,
+            "m-deep:1.1.1.1.1.1.1"
+        );
+        assert_eq!(
+            catalog.attachments[0].gmail_attachment_id.as_deref(),
+            Some("att-deep")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_attachment_bytes_supports_remote_attachment_and_inline_part_bodies() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/gmail/v1/users/me/messages/m-remote/attachments/att-1",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": "cGRmLWJ5dGVz"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/gmail/v1/users/me/messages/m-remote-padded/attachments/att-2",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": "cGRmLWJ5dGVzPQ=="
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/messages/m-inline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m-inline",
+                "threadId": "thread-inline",
+                "labelIds": [],
+                "historyId": "501",
+                "internalDate": "1700000000000",
+                "sizeEstimate": 5,
+                "payload": {
+                    "parts": [
+                        {
+                            "partId": "1.2",
+                            "body": {
+                                "data": "aGVsbG8"
+                            }
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let remote = client
+            .get_attachment_bytes("m-remote", "1.1", Some("att-1"))
+            .await
+            .unwrap();
+        let remote_padded = client
+            .get_attachment_bytes("m-remote-padded", "1.1", Some("att-2"))
+            .await
+            .unwrap();
+        let inline = client
+            .get_attachment_bytes("m-inline", "1.2", None)
+            .await
+            .unwrap();
+
+        assert_eq!(remote, b"pdf-bytes");
+        assert_eq!(remote_padded, b"pdf-bytes=");
+        assert_eq!(inline, b"hello");
     }
 
     #[tokio::test]
