@@ -3928,6 +3928,7 @@ mod tests {
                 size_estimate: 123,
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
+                attachments: Vec::new(),
             }],
             100,
         )

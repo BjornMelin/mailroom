@@ -1,3 +1,4 @@
+mod attachments;
 mod auth;
 mod cli;
 mod cli_output;
@@ -13,7 +14,7 @@ mod workspace;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    AccountCommand, AuthCommand, CleanupCommand, Cli, Commands, ConfigCommand,
+    AccountCommand, AttachmentCommand, AuthCommand, CleanupCommand, Cli, Commands, ConfigCommand,
     DraftAttachmentCommand, DraftCommand, GmailCommand, GmailLabelsCommand, SearchArgs,
     StoreCommand, SyncCommand, TriageBucketArg, TriageCommand, WorkflowCommand,
     WorkflowPromoteTargetArg, WorkflowStageArg, WorkspaceCommand,
@@ -81,6 +82,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Gmail { command } => handle_gmail_command(&paths, command).await?,
         Commands::Roadmap => print_roadmap(),
         Commands::Search(args) => handle_search_command(&paths, args).await?,
+        Commands::Attachment { command } => handle_attachment_command(&paths, command).await?,
         Commands::Sync { command } => handle_sync_command(&paths, command).await?,
         Commands::Workflow { command } => handle_workflow_command(&paths, command).await?,
         Commands::Triage { command } => handle_triage_command(&paths, command).await?,
@@ -166,6 +168,24 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
         Commands::Search(args) => CommandMetadata {
             json: args.json,
             operation: "search.run",
+        },
+        Commands::Attachment { command } => match command {
+            AttachmentCommand::List { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "attachment.list",
+            },
+            AttachmentCommand::Show { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "attachment.show",
+            },
+            AttachmentCommand::Fetch { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "attachment.fetch",
+            },
+            AttachmentCommand::Export { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "attachment.export",
+            },
         },
         Commands::Sync { command } => match command {
             SyncCommand::Run { json, .. } => CommandMetadata {
@@ -334,7 +354,7 @@ async fn handle_gmail_command(
 
 fn print_roadmap() {
     println!(
-        "v1 milestone: search + thread workflow + draft/send + reviewed cleanup\n\
+        "v1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export\n\
          docs: docs/roadmap/v1-search-triage-draft-queue.md\n\
          architecture: docs/architecture/system-overview.md\n\
          plugin-assisted ops: docs/operations/plugin-assisted-workflows.md"
@@ -356,6 +376,58 @@ async fn handle_search_command(paths: &workspace::WorkspacePaths, args: SearchAr
     )
     .await?
     .print(args.json)?;
+
+    Ok(())
+}
+
+async fn handle_attachment_command(
+    paths: &workspace::WorkspacePaths,
+    command: AttachmentCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        AttachmentCommand::List {
+            thread_id,
+            message_id,
+            filename,
+            mime_type,
+            fetched_only,
+            limit,
+            json,
+        } => attachments::list(
+            &config_report,
+            attachments::AttachmentListRequest {
+                thread_id,
+                message_id,
+                filename,
+                mime_type,
+                fetched_only,
+                limit,
+            },
+        )
+        .await?
+        .print(json)?,
+        AttachmentCommand::Show {
+            attachment_key,
+            json,
+        } => attachments::show(&config_report, attachment_key)
+            .await?
+            .print(json)?,
+        AttachmentCommand::Fetch {
+            attachment_key,
+            json,
+        } => attachments::fetch(&config_report, attachment_key)
+            .await?
+            .print(json)?,
+        AttachmentCommand::Export {
+            attachment_key,
+            to,
+            json,
+        } => attachments::export(&config_report, attachment_key, to)
+            .await?
+            .print(json)?,
+    }
 
     Ok(())
 }

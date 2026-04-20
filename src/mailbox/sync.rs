@@ -1,5 +1,5 @@
 use crate::config::ConfigReport;
-use crate::gmail::{GmailClient, GmailLabel, GmailMessageMetadata};
+use crate::gmail::{GmailClient, GmailLabel, GmailMessageCatalog};
 use crate::mailbox::model::FinalizeSyncInput;
 use crate::mailbox::util::{
     bootstrap_query, is_stale_history_error, labels_by_id, message_is_excluded, newest_history_id,
@@ -158,13 +158,13 @@ async fn run_full_sync(
         pages_fetched += 1;
         messages_listed += page.messages.len();
 
-        let metadata = if let Some(first_message) = page.messages.first() {
-            let mut metadata = Vec::new();
-            if let Some(first_metadata) = gmail_client
-                .get_message_metadata_if_present(&first_message.id)
+        let catalogs = if let Some(first_message) = page.messages.first() {
+            let mut catalogs = Vec::new();
+            if let Some(first_catalog) = gmail_client
+                .get_message_catalog_if_present(&first_message.id)
                 .await?
             {
-                metadata.push(first_metadata);
+                catalogs.push(first_catalog);
             }
             let remaining_ids = page
                 .messages
@@ -172,19 +172,19 @@ async fn run_full_sync(
                 .skip(1)
                 .map(|message| message.id.clone())
                 .collect();
-            let (remaining_metadata, _) =
-                fetch_message_metadata(gmail_client.clone(), remaining_ids).await?;
-            metadata.extend(remaining_metadata);
-            metadata
+            let (remaining_catalogs, _) =
+                fetch_message_catalogs(gmail_client.clone(), remaining_ids).await?;
+            catalogs.extend(remaining_catalogs);
+            catalogs
         } else {
             Vec::new()
         };
 
-        for message in &metadata {
-            cursor_history_id = newest_history_id(cursor_history_id, &message.history_id);
+        for catalog in &catalogs {
+            cursor_history_id = newest_history_id(cursor_history_id, &catalog.metadata.history_id);
         }
 
-        let page_upserts = build_upsert_inputs(&account.account_id, metadata, label_names_by_id);
+        let page_upserts = build_upsert_inputs(&account.account_id, catalogs, label_names_by_id);
         messages_upserted += page_upserts.len();
         upserts.extend(page_upserts);
 
@@ -258,11 +258,11 @@ async fn run_incremental_sync(
     }
 
     let changed_message_ids: Vec<String> = changed_message_ids.into_iter().collect();
-    let (metadata, missing_message_ids) =
-        fetch_message_metadata(gmail_client.clone(), changed_message_ids).await?;
-    let messages_listed = metadata.len();
+    let (catalogs, missing_message_ids) =
+        fetch_message_catalogs(gmail_client.clone(), changed_message_ids).await?;
+    let messages_listed = catalogs.len();
     let (upserts, excluded_message_ids) =
-        build_incremental_changes(&account.account_id, metadata, label_names_by_id);
+        build_incremental_changes(&account.account_id, catalogs, label_names_by_id);
     let message_ids_to_delete = deleted_message_ids
         .into_iter()
         .chain(missing_message_ids)
@@ -385,10 +385,10 @@ fn preserve_sync_error(sync_error: anyhow::Error, persist_result: Result<()>) ->
     sync_error
 }
 
-async fn fetch_message_metadata(
+async fn fetch_message_catalogs(
     gmail_client: GmailClient,
     message_ids: Vec<String>,
-) -> Result<(Vec<GmailMessageMetadata>, Vec<String>)> {
+) -> Result<(Vec<GmailMessageCatalog>, Vec<String>)> {
     if message_ids.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -404,58 +404,58 @@ async fn fetch_message_metadata(
                 .acquire_owned()
                 .await
                 .context("failed to acquire message fetch permit")?;
-            let metadata = gmail_client
-                .get_message_metadata_if_present(&message_id)
+            let catalog = gmail_client
+                .get_message_catalog_if_present(&message_id)
                 .await?;
-            Ok::<_, anyhow::Error>((index, message_id, metadata))
+            Ok::<_, anyhow::Error>((index, message_id, catalog))
         });
     }
 
-    let mut metadata_by_index = Vec::new();
+    let mut catalogs_by_index = Vec::new();
     while let Some(result) = join_set.join_next().await {
-        metadata_by_index.push(result??);
+        catalogs_by_index.push(result??);
     }
-    metadata_by_index.sort_by_key(|(index, _, _)| *index);
+    catalogs_by_index.sort_by_key(|(index, _, _)| *index);
 
-    let mut metadata = Vec::new();
+    let mut catalogs = Vec::new();
     let mut missing_message_ids = Vec::new();
-    for (_, message_id, maybe_metadata) in metadata_by_index {
-        match maybe_metadata {
-            Some(metadata_row) => metadata.push(metadata_row),
+    for (_, message_id, maybe_catalog) in catalogs_by_index {
+        match maybe_catalog {
+            Some(catalog) => catalogs.push(catalog),
             None => missing_message_ids.push(message_id),
         }
     }
 
-    Ok((metadata, missing_message_ids))
+    Ok((catalogs, missing_message_ids))
 }
 
 fn build_upsert_inputs(
     account_id: &str,
-    metadata: Vec<GmailMessageMetadata>,
+    catalogs: Vec<GmailMessageCatalog>,
     label_names_by_id: &BTreeMap<String, String>,
 ) -> Vec<store::mailbox::GmailMessageUpsertInput> {
-    metadata
+    catalogs
         .into_iter()
-        .filter(|message| !message_is_excluded(&message.label_ids))
-        .map(|message| build_upsert_input(account_id.to_owned(), message, label_names_by_id))
+        .filter(|catalog| !message_is_excluded(&catalog.metadata.label_ids))
+        .map(|catalog| build_upsert_input(account_id.to_owned(), catalog, label_names_by_id))
         .collect()
 }
 
 fn build_incremental_changes(
     account_id: &str,
-    metadata: Vec<GmailMessageMetadata>,
+    catalogs: Vec<GmailMessageCatalog>,
     label_names_by_id: &BTreeMap<String, String>,
 ) -> (Vec<store::mailbox::GmailMessageUpsertInput>, Vec<String>) {
     let mut upserts = Vec::new();
     let mut excluded_message_ids = Vec::new();
 
-    for message in metadata {
-        if message_is_excluded(&message.label_ids) {
-            excluded_message_ids.push(message.id);
+    for catalog in catalogs {
+        if message_is_excluded(&catalog.metadata.label_ids) {
+            excluded_message_ids.push(catalog.metadata.id);
         } else {
             upserts.push(build_upsert_input(
                 account_id.to_owned(),
-                message,
+                catalog,
                 label_names_by_id,
             ));
         }
@@ -466,9 +466,10 @@ fn build_incremental_changes(
 
 fn build_upsert_input(
     account_id: String,
-    message: GmailMessageMetadata,
+    catalog: GmailMessageCatalog,
     label_names_by_id: &BTreeMap<String, String>,
 ) -> store::mailbox::GmailMessageUpsertInput {
+    let message = catalog.metadata;
     let label_names_text = message
         .label_ids
         .iter()
@@ -496,6 +497,21 @@ fn build_upsert_input(
         size_estimate: message.size_estimate,
         label_ids: message.label_ids,
         label_names_text,
+        attachments: catalog
+            .attachments
+            .into_iter()
+            .map(|attachment| store::mailbox::GmailAttachmentUpsertInput {
+                attachment_key: attachment.attachment_key,
+                part_id: attachment.part_id,
+                gmail_attachment_id: attachment.gmail_attachment_id,
+                filename: attachment.filename,
+                mime_type: attachment.mime_type,
+                size_bytes: attachment.size_bytes,
+                content_disposition: attachment.content_disposition,
+                content_id: attachment.content_id,
+                is_inline: attachment.is_inline,
+            })
+            .collect(),
     }
 }
 

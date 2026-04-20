@@ -1,6 +1,6 @@
 mod client;
 
 pub(crate) use client::{
-    GmailClient, GmailClientError, GmailLabel, GmailMessageMetadata, GmailThreadContext,
-    GmailThreadMessage,
+    GmailClient, GmailClientError, GmailLabel, GmailMessageCatalog, GmailMessageMetadata,
+    GmailThreadContext, GmailThreadMessage,
 };
