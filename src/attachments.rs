@@ -277,7 +277,7 @@ pub async fn fetch(
     store::init(config_report)?;
     let account_id = resolve_attachment_account_id_task(config_report).await?;
     let workspace_paths = configured_paths(config_report)?;
-    workspace_paths.ensure_runtime_dirs()?;
+    ensure_runtime_dirs_task(workspace_paths.clone()).await?;
     let detail = load_attachment_detail(config_report, &account_id, &attachment_key).await?;
 
     let existing_report = spawn_blocking({
@@ -350,18 +350,20 @@ pub async fn export(
 ) -> Result<AttachmentExportReport> {
     let fetched = fetch(config_report, attachment_key).await?;
     let workspace_paths = configured_paths(config_report)?;
-    workspace_paths.ensure_runtime_dirs()?;
+    ensure_runtime_dirs_task(workspace_paths.clone()).await?;
     let filename = export_filename(&fetched.filename, &fetched.attachment_key);
     let destination_path = spawn_blocking({
         let workspace_paths = workspace_paths.clone();
         let thread_id = fetched.thread_id.clone();
         let message_id = fetched.message_id.clone();
+        let attachment_key = fetched.attachment_key.clone();
         let filename = filename.clone();
         move || {
             resolve_export_destination_path(
                 &workspace_paths,
                 &thread_id,
                 &message_id,
+                &attachment_key,
                 &filename,
                 destination,
             )
@@ -396,6 +398,7 @@ pub async fn export(
     .await
     .map_err(|source| AttachmentServiceError::BlockingTask { source })?;
     if let Err(error) = record_result {
+        cleanup_export_file_task(destination_path.clone()).await;
         return Err(map_mailbox_write_error(error).into());
     }
 
@@ -419,6 +422,13 @@ async fn resolve_attachment_account_id_task(config_report: &ConfigReport) -> Res
     spawn_blocking(move || resolve_attachment_account_id(&database_path, busy_timeout_ms))
         .await
         .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+}
+
+async fn ensure_runtime_dirs_task(workspace_paths: WorkspacePaths) -> Result<()> {
+    spawn_blocking(move || workspace_paths.ensure_runtime_dirs())
+        .await
+        .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+        .map(|_| ())
 }
 
 fn resolve_attachment_account_id(database_path: &Path, busy_timeout_ms: u64) -> Result<String> {
@@ -555,14 +565,16 @@ fn default_export_path(
     workspace_paths: &WorkspacePaths,
     thread_id: &str,
     message_id: &str,
+    attachment_key: &str,
     filename: &str,
 ) -> PathBuf {
     workspace_paths
         .exports_dir
         .join(sanitize_non_empty(thread_id, "thread"))
         .join(format!(
-            "{}--{}",
+            "{}--{}--{}",
             sanitize_non_empty(message_id, "message"),
+            sanitize_non_empty(attachment_key, "attachment"),
             filename
         ))
 }
@@ -571,13 +583,20 @@ fn resolve_export_destination_path(
     workspace_paths: &WorkspacePaths,
     thread_id: &str,
     message_id: &str,
+    attachment_key: &str,
     filename: &str,
     destination: Option<PathBuf>,
 ) -> Result<PathBuf> {
     Ok(match destination {
         Some(path) if path.is_dir() => path.join(filename),
         Some(path) => path,
-        None => default_export_path(workspace_paths, thread_id, message_id, filename),
+        None => default_export_path(
+            workspace_paths,
+            thread_id,
+            message_id,
+            attachment_key,
+            filename,
+        ),
     })
 }
 
@@ -857,6 +876,23 @@ fn copy_from_vault(
     Ok(CopyFromVaultResult { copied: true })
 }
 
+async fn cleanup_export_file_task(destination_path: PathBuf) {
+    let cleanup_path = destination_path.clone();
+    let join_result = spawn_blocking(move || fs::remove_file(&cleanup_path)).await;
+    match join_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(Err(error)) => eprintln!(
+            "warning: failed to remove exported attachment after persistence failure: {} ({error})",
+            destination_path.display()
+        ),
+        Err(error) => eprintln!(
+            "warning: failed to join export cleanup task for {}: {error}",
+            destination_path.display()
+        ),
+    }
+}
+
 fn hash_file_blake3(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).map_err(|source| AttachmentServiceError::ReadFile {
         path: path.to_path_buf(),
@@ -935,23 +971,32 @@ mod tests {
     #[test]
     fn default_export_path_uses_thread_and_message_partitions() {
         let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
-        let path = default_export_path(&paths, "thread-1", "message-1", "note.pdf");
+        let path = default_export_path(&paths, "thread-1", "message-1", "m-1:1.2", "note.pdf");
 
         assert_eq!(
             path,
-            PathBuf::from("/tmp/mailroom/.mailroom/exports/thread-1/message-1--note.pdf")
+            PathBuf::from("/tmp/mailroom/.mailroom/exports/thread-1/message-1--m-11.2--note.pdf")
         );
     }
 
     #[test]
     fn default_export_path_falls_back_when_partition_ids_sanitize_to_empty() {
         let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
-        let path = default_export_path(&paths, "///", "\\\\", "note.pdf");
+        let path = default_export_path(&paths, "///", "\\\\", "///", "note.pdf");
 
         assert_eq!(
             path,
-            PathBuf::from("/tmp/mailroom/.mailroom/exports/thread/message--note.pdf")
+            PathBuf::from("/tmp/mailroom/.mailroom/exports/thread/message--attachment--note.pdf")
         );
+    }
+
+    #[test]
+    fn default_export_path_is_unique_per_attachment_key() {
+        let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
+        let first = default_export_path(&paths, "thread-1", "message-1", "m-1:1.1", "note.pdf");
+        let second = default_export_path(&paths, "thread-1", "message-1", "m-1:1.2", "note.pdf");
+
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -1196,6 +1241,109 @@ mod tests {
             Some(AttachmentServiceError::DestinationConflict { path })
                 if path == &destination_path
         ));
+    }
+
+    #[tokio::test]
+    async fn export_removes_copied_file_when_event_persistence_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+        accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: 1,
+                threads_total: 1,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+        crate::store::mailbox::upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[crate::store::mailbox::GmailMessageUpsertInput {
+                account_id: String::from("gmail:operator@example.com"),
+                message_id: String::from("m-1"),
+                thread_id: String::from("t-1"),
+                history_id: String::from("101"),
+                internal_date_epoch_ms: 1_700_000_000_000,
+                snippet: String::from("Attachment fixture"),
+                subject: String::from("Fixture"),
+                from_header: String::from("Fixture <fixture@example.com>"),
+                from_address: Some(String::from("fixture@example.com")),
+                recipient_headers: String::from("operator@example.com"),
+                to_header: String::from("operator@example.com"),
+                cc_header: String::new(),
+                bcc_header: String::new(),
+                reply_to_header: String::new(),
+                size_estimate: 256,
+                label_ids: vec![String::from("INBOX")],
+                label_names_text: String::from("INBOX"),
+                attachments: vec![GmailAttachmentUpsertInput {
+                    attachment_key: String::from("m-1:1.2"),
+                    part_id: String::from("1.2"),
+                    gmail_attachment_id: Some(String::from("att-1")),
+                    filename: String::from("fixture.bin"),
+                    mime_type: String::from("application/octet-stream"),
+                    size_bytes: 5,
+                    content_disposition: Some(String::from("attachment")),
+                    content_id: None,
+                    is_inline: false,
+                }],
+            }],
+            100,
+        )
+        .unwrap();
+        let vault_write = write_vault_bytes(&paths.vault_dir, b"hello".to_vec()).unwrap();
+        crate::store::mailbox::set_attachment_vault_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::mailbox::AttachmentVaultStateUpdate {
+                account_id: String::from("gmail:operator@example.com"),
+                attachment_key: String::from("m-1:1.2"),
+                content_hash: vault_write.content_hash.clone(),
+                relative_path: vault_write.relative_path,
+                size_bytes: vault_write.size_bytes,
+                fetched_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        let connection =
+            rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TRIGGER fail_attachment_export_event_insert
+                BEFORE INSERT ON attachment_export_events
+                BEGIN
+                    SELECT RAISE(FAIL, 'forced export event failure');
+                END;
+                ",
+            )
+            .unwrap();
+
+        let destination_path = temp_dir.path().join("exports/export.bin");
+        let error = export(
+            &config_report,
+            String::from("m-1:1.2"),
+            Some(destination_path.clone()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<AttachmentServiceError>(),
+                Some(AttachmentServiceError::StoreWrite { .. })
+            ),
+            "expected store write error, got {error:#}"
+        );
+        assert!(!destination_path.exists());
     }
 
     #[test]
