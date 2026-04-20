@@ -299,15 +299,14 @@ mod tests {
         assert!(rendered.contains("cleanup_remove_labels=Old Label"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn print_routes_show_report_to_json_and_plain_output() {
         let report = sample_show_report();
 
-        let plain_output = render_into_bytes(&report, false);
+        let plain_output = render_into_bytes(|writer| report.write(false, writer));
         assert_eq!(plain_output, report.render_plain().as_bytes());
 
-        let json_output = render_into_bytes(&report, true);
+        let json_output = render_into_bytes(|writer| report.write(true, writer));
         let json_value: Value = serde_json::from_slice(&json_output).unwrap();
         assert_eq!(json_value["success"], json!(true));
         assert_eq!(
@@ -328,15 +327,14 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn print_routes_action_report_to_json_and_plain_output() {
         let report = sample_action_report();
 
-        let plain_output = render_into_bytes(&report, false);
+        let plain_output = render_into_bytes(|writer| report.write(false, writer));
         assert_eq!(plain_output, report.render_plain().as_bytes());
 
-        let json_output = render_into_bytes(&report, true);
+        let json_output = render_into_bytes(|writer| report.write(true, writer));
         let json_value: Value = serde_json::from_slice(&json_output).unwrap();
         assert_eq!(json_value["success"], json!(true));
         assert_eq!(json_value["data"]["action"], json!("cleanup_applied"));
@@ -461,32 +459,12 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn render_into_bytes<T>(report: &T, json: bool) -> Vec<u8>
+    fn render_into_bytes<F>(mut write_report: F) -> Vec<u8>
     where
-        T: RenderableReport,
+        F: FnMut(&mut Cursor<Vec<u8>>) -> anyhow::Result<()>,
     {
         let mut output = Cursor::new(Vec::new());
-        report.write(json, &mut output).unwrap();
+        write_report(&mut output).unwrap();
         output.into_inner()
-    }
-
-    #[cfg(unix)]
-    trait RenderableReport {
-        fn write(&self, json: bool, writer: &mut Cursor<Vec<u8>>) -> anyhow::Result<()>;
-    }
-
-    #[cfg(unix)]
-    impl RenderableReport for WorkflowShowReport {
-        fn write(&self, json: bool, writer: &mut Cursor<Vec<u8>>) -> anyhow::Result<()> {
-            WorkflowShowReport::write(self, json, writer)
-        }
-    }
-
-    #[cfg(unix)]
-    impl RenderableReport for WorkflowActionReport {
-        fn write(&self, json: bool, writer: &mut Cursor<Vec<u8>>) -> anyhow::Result<()> {
-            WorkflowActionReport::write(self, json, writer)
-        }
     }
 }
