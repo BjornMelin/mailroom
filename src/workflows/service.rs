@@ -145,6 +145,15 @@ pub(crate) enum WorkflowServiceError {
         #[source]
         source: anyhow::Error,
     },
+    #[error(
+        "Gmail updated draft {draft_id} for thread {thread_id}, but mailroom could not record draft state locally; inspect the thread before retrying"
+    )]
+    RemoteDraftStateReconcile {
+        thread_id: String,
+        draft_id: String,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }
@@ -269,53 +278,104 @@ async fn persist_remote_draft_state(
     gmail_client: &crate::gmail::GmailClient,
     operation: &'static str,
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    const REMOTE_DRAFT_STATE_MAX_ATTEMPTS: usize = 5;
+    const REMOTE_DRAFT_STATE_RETRY_DELAY_MS: u64 = 50;
+
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
     let account_id = workflow.account_id.clone();
     let thread_id = workflow.thread_id.clone();
-    let gmail_draft_id = remote_draft.gmail_draft_id.clone();
-    let gmail_draft_message_id = remote_draft.gmail_draft_message_id.clone();
-    let gmail_draft_thread_id = remote_draft.gmail_draft_thread_id.clone();
+    let mut last_error = None;
+    for attempt in 0..REMOTE_DRAFT_STATE_MAX_ATTEMPTS {
+        let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+        let database_path = database_path.clone();
+        let account_id = account_id.clone();
+        let thread_id = thread_id.clone();
+        let gmail_draft_id = remote_draft.gmail_draft_id.clone();
+        let gmail_draft_message_id = remote_draft.gmail_draft_message_id.clone();
+        let gmail_draft_thread_id = remote_draft.gmail_draft_thread_id.clone();
 
-    let persisted = join_blocking(
-        spawn_blocking(move || {
-            store::workflows::set_remote_draft_state(
-                &database_path,
-                busy_timeout_ms,
-                &store::workflows::RemoteDraftStateInput {
-                    account_id,
-                    thread_id,
-                    gmail_draft_id: Some(gmail_draft_id),
-                    gmail_draft_message_id: Some(gmail_draft_message_id),
-                    gmail_draft_thread_id: Some(gmail_draft_thread_id),
-                    updated_at_epoch_s,
-                },
-            )
-        }),
-        operation,
-    )
-    .await;
-
-    match persisted {
-        Ok(workflow) => Ok(workflow),
-        Err(error) if !remote_draft.created_new => Err(error),
-        Err(error) => {
-            let rollback_result =
-                delete_remote_draft_if_present(gmail_client, Some(&remote_draft.gmail_draft_id))
+        match join_blocking(
+            spawn_blocking(move || {
+                store::workflows::set_remote_draft_state(
+                    &database_path,
+                    busy_timeout_ms,
+                    &store::workflows::RemoteDraftStateInput {
+                        account_id,
+                        thread_id,
+                        gmail_draft_id: Some(gmail_draft_id),
+                        gmail_draft_message_id: Some(gmail_draft_message_id),
+                        gmail_draft_thread_id: Some(gmail_draft_thread_id),
+                        updated_at_epoch_s,
+                    },
+                )
+            }),
+            operation,
+        )
+        .await
+        {
+            Ok(workflow) => return Ok(workflow),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < REMOTE_DRAFT_STATE_MAX_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        REMOTE_DRAFT_STATE_RETRY_DELAY_MS,
+                    ))
                     .await;
-            match rollback_result {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(WorkflowServiceError::RemoteDraftRollback {
-                    thread_id: workflow.thread_id,
-                    draft_id: remote_draft.gmail_draft_id.clone(),
-                    source: anyhow::Error::new(error).context(format!(
-                        "failed to delete Gmail draft {} after local state persistence failed: {rollback_error}",
-                        remote_draft.gmail_draft_id
-                    )),
-                }),
+                }
             }
         }
+    }
+
+    let error = last_error.expect("persist_remote_draft_state must record an error");
+    if !remote_draft.created_new {
+        let database_path = config_report.config.store.database_path.clone();
+        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+        let account_id = workflow.account_id.clone();
+        let thread_id = workflow.thread_id.clone();
+        let reloaded = join_blocking(
+            spawn_blocking(move || {
+                store::workflows::get_workflow_detail(
+                    &database_path,
+                    busy_timeout_ms,
+                    &account_id,
+                    &thread_id,
+                )
+            }),
+            "draft.remote_state.reconcile_read",
+        )
+        .await;
+
+        if let Ok(Some(detail)) = reloaded
+            && detail.workflow.gmail_draft_id.as_deref() == Some(&remote_draft.gmail_draft_id)
+            && detail.workflow.gmail_draft_message_id.as_deref()
+                == Some(&remote_draft.gmail_draft_message_id)
+            && detail.workflow.gmail_draft_thread_id.as_deref()
+                == Some(&remote_draft.gmail_draft_thread_id)
+        {
+            return Ok(detail.workflow);
+        }
+
+        let source = anyhow::Error::new(error);
+        return Err(WorkflowServiceError::RemoteDraftStateReconcile {
+            thread_id: workflow.thread_id,
+            draft_id: remote_draft.gmail_draft_id.clone(),
+            source,
+        });
+    }
+
+    let rollback_result =
+        delete_remote_draft_if_present(gmail_client, Some(&remote_draft.gmail_draft_id)).await;
+    match rollback_result {
+        Ok(()) => Err(error),
+        Err(rollback_error) => Err(WorkflowServiceError::RemoteDraftRollback {
+            thread_id: workflow.thread_id,
+            draft_id: remote_draft.gmail_draft_id.clone(),
+            source: anyhow::Error::new(error).context(format!(
+                "failed to delete Gmail draft {} after local state persistence failed: {rollback_error}",
+                remote_draft.gmail_draft_id
+            )),
+        }),
     }
 }
 
@@ -1715,11 +1775,11 @@ fn normalize_absolute_path_components(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttachmentRemovalResult, RemoteDraftUpsert, attachment_input_from_path,
-        best_effort_sync_report, build_reply_recipients, cleanup_archive, cleanup_label,
-        draft_body_set, draft_send, draft_start, list_workflows, mark_sent_after_remote_send,
-        persist_remote_draft_state, promote_workflow, remove_attachment_by_path_or_name,
-        show_workflow,
+        AttachmentRemovalResult, RemoteDraftUpsert, WorkflowServiceError,
+        attachment_input_from_path, best_effort_sync_report, build_reply_recipients,
+        cleanup_archive, cleanup_label, draft_body_set, draft_send, draft_start, list_workflows,
+        mark_sent_after_remote_send, persist_remote_draft_state, promote_workflow,
+        remove_attachment_by_path_or_name, show_workflow,
     };
     use crate::auth;
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
@@ -2122,6 +2182,170 @@ mod tests {
             .count();
         assert_eq!(create_count, 0);
         assert_eq!(delete_count, 1);
+    }
+
+    #[tokio::test]
+    async fn persist_remote_draft_state_retries_existing_remote_draft_write_after_transient_lock() {
+        let mock_server = MockServer::start().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut config_report = config_report_for(&temp_dir, &mock_server);
+        config_report.config.store.busy_timeout_ms = 1;
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot(&config_report);
+        let (workflow, _) = upsert_draft_revision(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &UpsertDraftRevisionInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                reply_mode: ReplyMode::Reply,
+                source_message_id: String::from("m-1"),
+                subject: String::from("Re: Project"),
+                to_addresses: vec![String::from("alice@example.com")],
+                cc_addresses: Vec::new(),
+                bcc_addresses: Vec::new(),
+                body_text: String::from("Draft body"),
+                attachments: Vec::new(),
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-2"),
+                    internal_date_epoch_ms: 101,
+                    subject: String::from("Re: Project"),
+                    from_header: String::from("Operator <operator@example.com>"),
+                    snippet: String::from("Draft body"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
+        let lock_handle = lock_workflow_store_after_delay(
+            config_report.config.store.database_path.clone(),
+            Duration::from_millis(0),
+            Duration::from_millis(80),
+        );
+
+        let persisted = persist_remote_draft_state(
+            &config_report,
+            workflow,
+            &RemoteDraftUpsert {
+                gmail_draft_id: String::from("draft-updated"),
+                gmail_draft_message_id: String::from("draft-message-updated"),
+                gmail_draft_thread_id: String::from("thread-1"),
+                created_new: false,
+            },
+            &gmail_client,
+            "draft.test.remote_state",
+        )
+        .await
+        .unwrap();
+        lock_handle.join().unwrap();
+
+        assert_eq!(persisted.gmail_draft_id.as_deref(), Some("draft-updated"));
+        assert_eq!(
+            persisted.gmail_draft_message_id.as_deref(),
+            Some("draft-message-updated")
+        );
+        assert_eq!(persisted.gmail_draft_thread_id.as_deref(), Some("thread-1"));
+
+        let detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            detail.workflow.gmail_draft_id.as_deref(),
+            Some("draft-updated")
+        );
+        assert_eq!(
+            detail.workflow.gmail_draft_message_id.as_deref(),
+            Some("draft-message-updated")
+        );
+        assert_eq!(
+            detail.workflow.gmail_draft_thread_id.as_deref(),
+            Some("thread-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_remote_draft_state_reports_reconcile_failure_after_retry_exhaustion() {
+        let mock_server = MockServer::start().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut config_report = config_report_for(&temp_dir, &mock_server);
+        config_report.config.store.busy_timeout_ms = 1;
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot(&config_report);
+        let (workflow, _) = upsert_draft_revision(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &UpsertDraftRevisionInput {
+                account_id: String::from("gmail:operator@example.com"),
+                thread_id: String::from("thread-1"),
+                reply_mode: ReplyMode::Reply,
+                source_message_id: String::from("m-1"),
+                subject: String::from("Re: Project"),
+                to_addresses: vec![String::from("alice@example.com")],
+                cc_addresses: Vec::new(),
+                bcc_addresses: Vec::new(),
+                body_text: String::from("Draft body"),
+                attachments: Vec::new(),
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-2"),
+                    internal_date_epoch_ms: 101,
+                    subject: String::from("Re: Project"),
+                    from_header: String::from("Operator <operator@example.com>"),
+                    snippet: String::from("Draft body"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
+        let (lock_handle, lock_ready) = lock_workflow_store_until_locked(
+            config_report.config.store.database_path.clone(),
+            Duration::from_millis(450),
+        );
+        lock_ready.recv().unwrap();
+
+        let error = persist_remote_draft_state(
+            &config_report,
+            workflow,
+            &RemoteDraftUpsert {
+                gmail_draft_id: String::from("draft-updated"),
+                gmail_draft_message_id: String::from("draft-message-updated"),
+                gmail_draft_thread_id: String::from("thread-1"),
+                created_new: false,
+            },
+            &gmail_client,
+            "draft.test.remote_state",
+        )
+        .await
+        .unwrap_err();
+        lock_handle.join().unwrap();
+
+        match error {
+            WorkflowServiceError::RemoteDraftStateReconcile {
+                thread_id,
+                draft_id,
+                ..
+            } => {
+                assert_eq!(thread_id, "thread-1");
+                assert_eq!(draft_id, "draft-updated");
+            }
+            other => panic!("expected RemoteDraftStateReconcile, got {other}"),
+        }
+
+        let detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(detail.workflow.gmail_draft_id, None);
     }
 
     #[tokio::test]

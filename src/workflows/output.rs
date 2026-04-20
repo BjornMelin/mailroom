@@ -2,11 +2,18 @@ use crate::workflows::{WorkflowActionReport, WorkflowListReport, WorkflowShowRep
 use anyhow::Result;
 use std::io::{self, Write};
 
+fn route_output_to_stdout<F>(json: bool, mut write_fn: F) -> Result<()>
+where
+    F: FnMut(bool, &mut io::StdoutLock<'_>) -> Result<()>,
+{
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    write_fn(json, &mut stdout)
+}
+
 impl WorkflowListReport {
     pub fn print(&self, json: bool) -> Result<()> {
-        let stdout = io::stdout();
-        let mut stdout = stdout.lock();
-        self.write(json, &mut stdout)
+        route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
     }
 
     fn render_plain(&self) -> String {
@@ -49,9 +56,7 @@ impl WorkflowListReport {
 
 impl WorkflowShowReport {
     pub fn print(&self, json: bool) -> Result<()> {
-        let stdout = io::stdout();
-        let mut stdout = stdout.lock();
-        self.write(json, &mut stdout)
+        route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
     }
 
     fn render_plain(&self) -> String {
@@ -100,9 +105,7 @@ impl WorkflowShowReport {
 
 impl WorkflowActionReport {
     pub fn print(&self, json: bool) -> Result<()> {
-        let stdout = io::stdout();
-        let mut stdout = stdout.lock();
-        self.write(json, &mut stdout)
+        route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
     }
 
     fn render_plain(&self) -> String {
