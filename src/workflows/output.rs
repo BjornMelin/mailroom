@@ -57,7 +57,7 @@ impl WorkflowShowReport {
     fn render_plain(&self) -> String {
         let workflow = &self.detail.workflow;
         let mut lines = vec![
-            format!("thread_id={}", workflow.thread_id),
+            format!("thread_id={}", sanitize(&workflow.thread_id)),
             format!("stage={}", workflow.current_stage),
         ];
         if let Some(bucket) = workflow.triage_bucket {
@@ -108,7 +108,7 @@ impl WorkflowActionReport {
     fn render_plain(&self) -> String {
         let mut lines = vec![
             format!("action={}", self.action),
-            format!("thread_id={}", self.workflow.thread_id),
+            format!("thread_id={}", sanitize(&self.workflow.thread_id)),
             format!("stage={}", self.workflow.current_stage),
         ];
         if let Some(bucket) = self.workflow.triage_bucket {
@@ -349,6 +349,23 @@ mod tests {
         assert_eq!(json_value["data"]["sync_report"]["mode"], json!("full"));
     }
 
+    #[test]
+    fn print_routes_list_report_to_json_and_plain_output() {
+        let report = sample_list_report();
+
+        let plain_output = render_into_bytes(|writer| report.write(false, writer));
+        assert_eq!(plain_output, report.render_plain().as_bytes());
+
+        let json_output = render_into_bytes(|writer| report.write(true, writer));
+        let json_value: Value = serde_json::from_slice(&json_output).unwrap();
+        assert_eq!(json_value["success"], json!(true));
+        assert!(json_value["data"]["workflows"].is_array());
+        assert_eq!(
+            json_value["data"]["workflows"][0]["thread_id"],
+            json!("thread-1")
+        );
+    }
+
     fn sample_workflow_record() -> WorkflowRecord {
         WorkflowRecord {
             workflow_id: 1,
@@ -396,6 +413,14 @@ mod tests {
                     created_at_epoch_s: 123,
                 }],
             },
+        }
+    }
+
+    fn sample_list_report() -> WorkflowListReport {
+        WorkflowListReport {
+            stage: Some(WorkflowStage::Drafting),
+            triage_bucket: Some(TriageBucket::Urgent),
+            workflows: vec![sample_workflow_record()],
         }
     }
 

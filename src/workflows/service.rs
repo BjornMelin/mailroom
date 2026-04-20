@@ -912,26 +912,6 @@ async fn cleanup_impl(
         None
     };
 
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
-
-    match action {
-        store::workflows::CleanupAction::Archive => {
-            gmail_client
-                .modify_thread_labels(&thread_id, &[], &[String::from("INBOX")])
-                .await?;
-        }
-        store::workflows::CleanupAction::Trash => {
-            gmail_client.trash_thread(&thread_id).await?;
-        }
-        store::workflows::CleanupAction::Label => {
-            let (add_ids, remove_ids) =
-                resolved_label_ids.ok_or(WorkflowServiceError::LabelCleanupInvariant)?;
-            gmail_client
-                .modify_thread_labels(&thread_id, &add_ids, &remove_ids)
-                .await?;
-        }
-    }
-
     let payload_json = serde_json::to_string(&serde_json::json!({
         "add_label_names": add_label_names,
         "remove_label_names": remove_label_names,
@@ -957,6 +937,24 @@ async fn cleanup_impl(
         "cleanup.apply",
     )
     .await?;
+    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    match action {
+        store::workflows::CleanupAction::Archive => {
+            gmail_client
+                .modify_thread_labels(&thread_id, &[], &[String::from("INBOX")])
+                .await?;
+        }
+        store::workflows::CleanupAction::Trash => {
+            gmail_client.trash_thread(&thread_id).await?;
+        }
+        store::workflows::CleanupAction::Label => {
+            let (add_ids, remove_ids) =
+                resolved_label_ids.ok_or(WorkflowServiceError::LabelCleanupInvariant)?;
+            gmail_client
+                .modify_thread_labels(&thread_id, &add_ids, &remove_ids)
+                .await?;
+        }
+    }
     let needs_draft_retirement =
         workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some();
     if needs_draft_retirement {
@@ -3227,7 +3225,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             detail.workflow.current_stage,
-            crate::store::workflows::WorkflowStage::Drafting
+            crate::store::workflows::WorkflowStage::Closed
+        );
+        assert_eq!(
+            detail.workflow.last_cleanup_action,
+            Some(CleanupAction::Archive)
         );
         assert_eq!(detail.workflow.gmail_draft_id.as_deref(), Some("draft-1"));
         assert!(detail.current_draft.is_some());
@@ -3307,11 +3309,11 @@ mod tests {
             },
         )
         .unwrap();
-        let lock_handle = lock_workflow_store_after_delay(
+        let (lock_handle, lock_ready) = lock_workflow_store_until_locked(
             config_report.config.store.database_path.clone(),
-            Duration::from_millis(120),
-            Duration::from_millis(200),
+            Duration::from_millis(150),
         );
+        lock_ready.recv().unwrap();
 
         let _error = cleanup_archive(&config_report, String::from("thread-1"), true)
             .await
@@ -3334,7 +3336,7 @@ mod tests {
         assert!(detail.current_draft.is_some());
 
         let requests = mock_server.received_requests().await.unwrap();
-        assert!(requests.iter().any(|request| {
+        assert!(!requests.iter().any(|request| {
             request.method.as_str() == "POST"
                 && request.url.path() == "/gmail/v1/users/me/threads/thread-1/modify"
         }));
