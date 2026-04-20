@@ -24,6 +24,7 @@ cargo run -- triage set thread-123 --bucket urgent --json
 cargo run -- workflow promote thread-123 --to follow_up --json
 cargo run -- draft start thread-123 --json
 cargo run -- cleanup archive thread-123 --json
+cargo run -- cleanup archive thread-123 --execute --json
 ```
 
 The same local workflow state is intended to back the later TUI.
