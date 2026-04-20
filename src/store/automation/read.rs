@@ -132,7 +132,6 @@ pub(crate) fn list_latest_thread_candidates(
          ORDER BY latest.internal_date_epoch_ms DESC, latest.message_rowid DESC",
     ) {
         Ok(statement) => statement,
-        Err(error) if super::is_missing_automation_table_error(&error) => return Ok(Vec::new()),
         Err(error)
             if matches!(
                 &error,

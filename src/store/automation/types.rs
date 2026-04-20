@@ -318,6 +318,14 @@ impl AutomationStoreReadError {
 pub(crate) enum AutomationStoreWriteError {
     #[error("automation run {run_id} was not found")]
     MissingRun { run_id: i64 },
+    #[error(
+        "automation run {run_id} belongs to {expected_account_id} but the event was written for {actual_account_id}"
+    )]
+    RunAccountMismatch {
+        run_id: i64,
+        expected_account_id: String,
+        actual_account_id: String,
+    },
     #[error("automation run candidate {candidate_id} was not found for run {run_id}")]
     MissingCandidate { run_id: i64, candidate_id: i64 },
     #[error("failed to open local automation store at {path}")]

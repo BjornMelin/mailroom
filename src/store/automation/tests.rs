@@ -1,10 +1,10 @@
 use super::{
     AppendAutomationRunEventInput, AutomationActionKind, AutomationActionSnapshot,
-    AutomationApplyStatus, AutomationMatchReason, AutomationRunStatus, CandidateApplyResultInput,
-    CreateAutomationRunInput, FinalizeAutomationRunInput, NewAutomationRunCandidate,
-    append_automation_run_event, create_automation_run, finalize_automation_run,
-    get_automation_run_detail, inspect_automation, list_latest_thread_candidates,
-    record_candidate_apply_result,
+    AutomationApplyStatus, AutomationMatchReason, AutomationRunStatus, AutomationStoreWriteError,
+    CandidateApplyResultInput, CreateAutomationRunInput, FinalizeAutomationRunInput,
+    NewAutomationRunCandidate, append_automation_run_event, create_automation_run,
+    finalize_automation_run, get_automation_run_detail, inspect_automation,
+    list_latest_thread_candidates, record_candidate_apply_result,
 };
 use crate::config::resolve;
 use crate::store::{accounts, init, mailbox};
@@ -99,6 +99,78 @@ fn create_automation_run_persists_detail_and_doctor_counts() {
     assert_eq!(doctor.previewed_run_count, 0);
     assert_eq!(doctor.applied_run_count, 1);
     assert_eq!(doctor.candidate_count, 1);
+
+    fs::remove_dir_all(repo_root).unwrap();
+}
+
+#[test]
+fn append_automation_run_event_rejects_account_mismatch() {
+    let repo_root = unique_temp_dir("mailroom-automation-run-account-mismatch");
+    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+    let detail = create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("abc123"),
+            selected_rule_ids: vec![String::from("archive-digest")],
+            created_at_epoch_s: 100,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+
+    let other_account = accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("other@example.com"),
+            history_id: String::from("54321"),
+            messages_total: 4,
+            threads_total: 2,
+            access_scope: String::from("scope:b"),
+            refreshed_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+
+    let error = append_automation_run_event(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AppendAutomationRunEventInput {
+            run_id: detail.run.run_id,
+            account_id: other_account.account_id.clone(),
+            event_kind: String::from("apply_started"),
+            payload_json: String::from("{\"candidate_count\":1}"),
+            created_at_epoch_s: 102,
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AutomationStoreWriteError::RunAccountMismatch {
+            run_id,
+            expected_account_id,
+            actual_account_id
+        } if run_id == detail.run.run_id
+            && expected_account_id == account.account_id
+            && actual_account_id == other_account.account_id
+    ));
+
+    let detail = get_automation_run_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        detail.run.run_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(detail.events.len(), 1);
 
     fs::remove_dir_all(repo_root).unwrap();
 }

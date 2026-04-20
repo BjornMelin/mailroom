@@ -238,17 +238,21 @@ pub(crate) fn append_automation_run_event(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
         .map_err(|source| AutomationStoreWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
-    let run_exists = transaction
+    let run_account_id = transaction
         .query_row(
-            "SELECT 1 FROM automation_runs WHERE run_id = ?1",
+            "SELECT account_id FROM automation_runs WHERE run_id = ?1",
             [input.run_id],
-            |_| Ok(()),
+            |row| row.get::<_, String>(0),
         )
         .optional()?
-        .is_some();
-    if !run_exists {
-        return Err(AutomationStoreWriteError::MissingRun {
+        .ok_or(AutomationStoreWriteError::MissingRun {
             run_id: input.run_id,
+        })?;
+    if run_account_id != input.account_id {
+        return Err(AutomationStoreWriteError::RunAccountMismatch {
+            run_id: input.run_id,
+            expected_account_id: run_account_id,
+            actual_account_id: input.account_id.clone(),
         });
     }
     transaction.execute(
