@@ -16,7 +16,7 @@ The current native flow owns:
 
 It does not yet own:
 
-- full body indexing
+- full-body indexing
 - attachment content indexing
 - bulk attachment export or document processing
 
