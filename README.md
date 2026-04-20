@@ -1,16 +1,16 @@
 # mailroom
 
-`mailroom` is a local-first repository for Gmail operations: search, triage, reply drafting, attachment capture, and eventually cleanup automation. The native center of gravity is a Rust CLI/TUI with a single local operational store. The operator loop can also use Codex Gmail/GitHub plugin workflows while the native product matures.
+`mailroom` is a local-first repository for Gmail operations: search, thread triage, reply drafting, reviewed cleanup actions, attachment capture, and later export automation. The native center of gravity is a Rust CLI/TUI with a single local operational store. The operator loop can also use Codex Gmail/GitHub plugin workflows where live inspection or ad hoc actions are still a better fit.
 
 ## Current posture
 
 - Primary stack: Rust + `clap`
 - Planned operator surfaces: CLI first, TUI second
 - Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
-- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, and local search
+- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, and reviewed cleanup actions
 - Versioned content: code, docs, examples, plans
 - Ignored runtime content: `.mailroom/` state, caches, exports, secrets, and attachment vaults
-- V1 milestone: search + triage + draft queue
+- V1 milestone: search + thread workflow + draft/send + reviewed cleanup
 
 ## Repository layout
 
@@ -43,7 +43,7 @@ Repo-local overrides also live under `.mailroom/`:
 
 ## Native commands
 
-The current binary can now resolve config, bootstrap the local store, manage Gmail auth, sync mailbox metadata, and search the local cache:
+The current binary can now resolve config, bootstrap the local store, manage Gmail auth, sync mailbox metadata, search the local cache, manage thread workflows, sync remote Gmail drafts, and execute reviewed cleanup actions:
 
 ```bash
 cargo run -- workspace init
@@ -62,13 +62,56 @@ cargo run -- store doctor --json
 cargo run -- sync run --json
 cargo run -- sync run --full --recent-days 30 --json
 cargo run -- search "project alpha" --label INBOX --limit 10 --json
+cargo run -- workflow list --json
+cargo run -- workflow show thread-123 --json
+cargo run -- triage set thread-123 --bucket urgent --note "reply today" --json
+cargo run -- workflow promote thread-123 --to follow_up --json
+cargo run -- workflow snooze thread-123 --until 2026-04-25 --json
+cargo run -- draft start thread-123 --reply-all --json
+cargo run -- draft body thread-123 --text "Thanks, sending details shortly." --json
+cargo run -- draft attach add thread-123 --path ./notes/reply.txt --json
+cargo run -- draft send thread-123 --json
+cargo run -- cleanup archive thread-123 --json
+cargo run -- cleanup archive thread-123 --execute --json
+cargo run -- cleanup label thread-123 --add 0.To-Reply --remove INBOX --execute --json
+cargo run -- cleanup trash thread-123 --json
 cargo run -- roadmap
 ```
+
+## JSON contract and exit codes
+
+All `--json` commands now use one normalized envelope:
+
+- success: `{ "success": true, "data": ... }`
+- failure: `{ "success": false, "error": { "code": "validation_failed", "message": "use --until YYYY-MM-DD or --clear", "kind": "workflow.validation", "operation": "workflow.snooze", "causes": ["use --until YYYY-MM-DD or --clear"] } }`
+
+`error.code` is stable and operator-oriented. Current exit buckets are:
+
+- `2`: validation or config failure
+- `3`: auth required
+- `4`: not found
+- `5`: conflict
+- `6`: timeout, rate limit, or remote failure
+- `7`: local storage failure
+- `10`: internal failure
+
+Operator input mistakes on the workflow surface now stay in the validation
+bucket. Examples:
+
+- `workflow snooze` requires exactly one of `--until` or `--clear`
+- `draft body` requires exactly one of `--text`, `--file`, or `--stdin`
+- `draft attach add` treats missing attachment files as validation failures
+- `draft attach remove` rejects ambiguous filename-only matches; use the stored
+  attachment path when multiple attachments share a filename
 
 Mailbox sync/search behavior, cursor fallback rules, and `doctor` field meanings
 live in [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md).
 Durable architectural ownership for the sync/search slice lives in
 [`docs/decisions/0003-message-canonical-sync.md`](docs/decisions/0003-message-canonical-sync.md).
+Thread workflow, remote draft, and cleanup behavior live in
+[`docs/operations/thread-workflow-and-cleanup.md`](docs/operations/thread-workflow-and-cleanup.md),
+with the durable design captured in
+[`docs/decisions/0004-unified-thread-workflow.md`](docs/decisions/0004-unified-thread-workflow.md).
 
 Config precedence is:
 
@@ -107,16 +150,17 @@ Advanced manual overrides still work:
 - [`docs/decisions/0001-foundation.md`](docs/decisions/0001-foundation.md): foundational architecture decision
 - [`docs/architecture/system-overview.md`](docs/architecture/system-overview.md): system boundaries and responsibilities
 - [`docs/decisions/0003-message-canonical-sync.md`](docs/decisions/0003-message-canonical-sync.md): mailbox sync and search design
+- [`docs/decisions/0004-unified-thread-workflow.md`](docs/decisions/0004-unified-thread-workflow.md): thread workflow, drafts, and cleanup ownership
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
 - [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
 - [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md): sync commands, search filters, and cursor behavior
+- [`docs/operations/thread-workflow-and-cleanup.md`](docs/operations/thread-workflow-and-cleanup.md): triage, draft/send, snooze, and reviewed cleanup commands
 - [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
 - [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 
 ## Near-term build plan
 
-1. Introduce triage state and durable workflow queues on top of the synced message store.
-2. Implement draft/reply queue records and operator notes.
-3. Add attachment catalog and intentional export flows.
-4. Provide safe reviewed mailbox mutations such as archive, label, and trash.
-5. Build a TUI over the native command core.
+1. Add attachment cataloging and intentional export/vault flows on top of the existing thread workflow state.
+2. Harden draft composition ergonomics, including better operator review and richer reply helpers.
+3. Add unsubscribe assistance and bulk-cleanup heuristics only after explicit review contracts exist.
+4. Build a TUI over the existing command core and SQLite workflow model.

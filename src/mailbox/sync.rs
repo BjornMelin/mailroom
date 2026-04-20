@@ -519,10 +519,10 @@ impl MailboxStoreHandle {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
-        spawn_blocking(move || {
+        Ok(spawn_blocking(move || {
             store::mailbox::get_sync_state(&database_path, busy_timeout_ms, &account_id)
         })
-        .await?
+        .await??)
     }
 
     async fn commit_full_sync(

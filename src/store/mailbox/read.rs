@@ -1,8 +1,8 @@
 use super::{
-    MailboxDoctorReport, SyncMode, SyncStateRecord, SyncStatus, is_missing_mailbox_table_error,
+    MailboxDoctorReport, MailboxReadError, SyncMode, SyncStateRecord, SyncStatus,
+    ThreadMessageSnapshot, is_missing_mailbox_table_error,
 };
 use crate::store::connection;
-use anyhow::Result;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
@@ -12,24 +12,26 @@ pub(crate) fn get_sync_state(
     database_path: &Path,
     busy_timeout_ms: u64,
     account_id: &str,
-) -> Result<Option<SyncStateRecord>> {
+) -> Result<Option<SyncStateRecord>, MailboxReadError> {
     if !database_path.try_exists()? {
         return Ok(None);
     }
 
-    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)?;
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
     read_sync_state(&connection, account_id)
 }
 
 pub(crate) fn inspect_mailbox(
     database_path: &Path,
     busy_timeout_ms: u64,
-) -> Result<Option<MailboxDoctorReport>> {
+) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
     if !database_path.try_exists()? {
         return Ok(None);
     }
 
-    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)?;
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
     let sync_state = latest_sync_state(&connection)?;
     let message_count = count_messages(&connection, None)?;
     let label_count = count_labels(&connection, None)?;
@@ -43,10 +45,97 @@ pub(crate) fn inspect_mailbox(
     }))
 }
 
+pub(crate) fn get_latest_thread_message(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    thread_id: &str,
+) -> Result<Option<ThreadMessageSnapshot>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    let snapshot = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 message_id,
+                 thread_id,
+                 internal_date_epoch_ms,
+                 subject,
+                 from_header,
+                 snippet
+             FROM gmail_messages
+             WHERE account_id = ?1
+               AND thread_id = ?2
+             ORDER BY internal_date_epoch_ms DESC, message_rowid DESC
+             LIMIT 1",
+            [account_id, thread_id],
+            |row| {
+                Ok(ThreadMessageSnapshot {
+                    account_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    internal_date_epoch_ms: row.get(3)?,
+                    subject: row.get(4)?,
+                    from_header: row.get(5)?,
+                    snippet: row.get(6)?,
+                })
+            },
+        )
+        .optional();
+
+    match snapshot {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn resolve_label_ids_by_names(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    names: &[String],
+) -> Result<Vec<(String, String)>, MailboxReadError> {
+    if !database_path.try_exists()? || names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    let mut statement = match connection.prepare(
+        "SELECT label_id, name
+         FROM gmail_labels
+         WHERE account_id = ?1
+           AND lower(name) = lower(?2)
+         ORDER BY name ASC
+         LIMIT 1",
+    ) {
+        Ok(statement) => statement,
+        Err(error) if is_missing_mailbox_table_error(&error) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut resolved = Vec::new();
+    for name in names {
+        let row = statement
+            .query_row([account_id, name], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        if let Some(row) = row {
+            resolved.push(row);
+        }
+    }
+
+    Ok(resolved)
+}
+
 pub(super) fn read_sync_state(
     connection: &Connection,
     account_id: &str,
-) -> Result<Option<SyncStateRecord>> {
+) -> Result<Option<SyncStateRecord>, MailboxReadError> {
     let record = connection
         .query_row(
             "SELECT
@@ -72,11 +161,11 @@ pub(super) fn read_sync_state(
     match record {
         Ok(record) => Ok(record),
         Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
-        Err(error) => Err(anyhow::Error::from(error)),
+        Err(error) => Err(error.into()),
     }
 }
 
-fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>> {
+fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>, MailboxReadError> {
     let record = connection
         .query_row(
             "SELECT
@@ -103,7 +192,7 @@ fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>>
     match record {
         Ok(record) => Ok(record),
         Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
-        Err(error) => Err(anyhow::Error::from(error)),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -139,7 +228,10 @@ fn decode_sync_status(value: String, column_index: usize) -> rusqlite::Result<Sy
     })
 }
 
-pub(super) fn count_messages(connection: &Connection, account_id: Option<&str>) -> Result<i64> {
+pub(super) fn count_messages(
+    connection: &Connection,
+    account_id: Option<&str>,
+) -> Result<i64, MailboxReadError> {
     count_with_optional_account(
         connection,
         "SELECT COUNT(*) FROM gmail_messages",
@@ -148,7 +240,10 @@ pub(super) fn count_messages(connection: &Connection, account_id: Option<&str>) 
     )
 }
 
-pub(super) fn count_labels(connection: &Connection, account_id: Option<&str>) -> Result<i64> {
+pub(super) fn count_labels(
+    connection: &Connection,
+    account_id: Option<&str>,
+) -> Result<i64, MailboxReadError> {
     count_with_optional_account(
         connection,
         "SELECT COUNT(*) FROM gmail_labels",
@@ -160,7 +255,7 @@ pub(super) fn count_labels(connection: &Connection, account_id: Option<&str>) ->
 pub(super) fn count_indexed_messages(
     connection: &Connection,
     account_id: Option<&str>,
-) -> Result<i64> {
+) -> Result<i64, MailboxReadError> {
     count_with_optional_account(
         connection,
         "SELECT COUNT(*) FROM gmail_message_search",
@@ -180,7 +275,7 @@ fn count_with_optional_account(
     count_all_sql: &str,
     count_account_sql: &str,
     account_id: Option<&str>,
-) -> Result<i64> {
+) -> Result<i64, MailboxReadError> {
     let count = match account_id {
         Some(account_id) => connection.query_row(count_account_sql, [account_id], |row| row.get(0)),
         None => connection.query_row(count_all_sql, [], |row| row.get(0)),

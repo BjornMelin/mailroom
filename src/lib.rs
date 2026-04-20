@@ -1,25 +1,73 @@
 mod auth;
 mod cli;
+mod cli_output;
 mod config;
 mod doctor;
 mod gmail;
 mod mailbox;
 mod store;
 mod time;
+mod workflows;
 mod workspace;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    AccountCommand, AuthCommand, Cli, Commands, ConfigCommand, GmailCommand, GmailLabelsCommand,
-    SearchArgs, StoreCommand, SyncCommand, WorkspaceCommand,
+    AccountCommand, AuthCommand, CleanupCommand, Cli, Commands, ConfigCommand,
+    DraftAttachmentCommand, DraftCommand, GmailCommand, GmailLabelsCommand, SearchArgs,
+    StoreCommand, SyncCommand, TriageBucketArg, TriageCommand, WorkflowCommand,
+    WorkflowPromoteTargetArg, WorkflowStageArg, WorkspaceCommand,
 };
 use serde::Serialize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use thiserror::Error;
 use time::current_epoch_seconds;
 
-pub async fn run() -> Result<()> {
+#[derive(Debug, Error)]
+pub(crate) enum CliInputError {
+    #[error("use --until YYYY-MM-DD or --clear")]
+    SnoozeRequiresUntilOrClear,
+    #[error("use either --until or --clear, not both")]
+    SnoozeUntilConflict,
+    #[error("use exactly one of --text, --file, or --stdin")]
+    DraftBodyInputSourceConflict,
+    #[error("failed to read {path}: {source}")]
+    DraftBodyFileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read draft body from stdin: {source}")]
+    DraftBodyStdinRead {
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub async fn run() -> ExitCode {
     let cli = Cli::parse();
+    let metadata = command_metadata(&cli.command);
+
+    match run_cli(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let report = cli_output::describe_error(&error, metadata.operation);
+            if metadata.json {
+                if let Err(output_error) = cli_output::print_json_failure(&report) {
+                    eprintln!("{output_error:#}");
+                    eprintln!("{error:#}");
+                }
+            } else {
+                eprintln!("{error:#}");
+            }
+            cli_output::exit_code(&report)
+        }
+    }
+}
+
+async fn run_cli(cli: Cli) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let repo_root = discover_repo_root(cwd)?;
     let paths = workspace::WorkspacePaths::from_repo_root(repo_root);
@@ -34,6 +82,10 @@ pub async fn run() -> Result<()> {
         Commands::Roadmap => print_roadmap(),
         Commands::Search(args) => handle_search_command(&paths, args).await?,
         Commands::Sync { command } => handle_sync_command(&paths, command).await?,
+        Commands::Workflow { command } => handle_workflow_command(&paths, command).await?,
+        Commands::Triage { command } => handle_triage_command(&paths, command).await?,
+        Commands::Draft { command } => handle_draft_command(&paths, command).await?,
+        Commands::Cleanup { command } => handle_cleanup_command(&paths, command).await?,
         Commands::Workspace { command } => handle_workspace_command(&paths, command)?,
         Commands::Store { command } => handle_store_command(&paths, command)?,
     }
@@ -48,6 +100,164 @@ fn handle_paths_command(paths: &workspace::WorkspacePaths, json: bool) -> Result
     }
 
     Ok(())
+}
+
+fn resolve_snooze_until(until: Option<String>, clear: bool) -> Result<Option<String>> {
+    if !clear && until.is_none() {
+        return Err(CliInputError::SnoozeRequiresUntilOrClear.into());
+    }
+    if clear && until.is_some() {
+        return Err(CliInputError::SnoozeUntilConflict.into());
+    }
+
+    if clear { Ok(None) } else { Ok(until) }
+}
+
+#[derive(Clone, Copy)]
+struct CommandMetadata {
+    json: bool,
+    operation: &'static str,
+}
+
+fn command_metadata(command: &Commands) -> CommandMetadata {
+    match command {
+        Commands::Auth { command } => match command {
+            AuthCommand::Setup { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "auth.setup",
+            },
+            AuthCommand::Login { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "auth.login",
+            },
+            AuthCommand::Status { json } => CommandMetadata {
+                json: *json,
+                operation: "auth.status",
+            },
+            AuthCommand::Logout { json } => CommandMetadata {
+                json: *json,
+                operation: "auth.logout",
+            },
+        },
+        Commands::Account { command } => match command {
+            AccountCommand::Show { json } => CommandMetadata {
+                json: *json,
+                operation: "account.show",
+            },
+        },
+        Commands::Config { command } => match command {
+            ConfigCommand::Show { json } => CommandMetadata {
+                json: *json,
+                operation: "config.show",
+            },
+        },
+        Commands::Paths { json } => CommandMetadata {
+            json: *json,
+            operation: "paths.show",
+        },
+        Commands::Doctor { json } => CommandMetadata {
+            json: *json,
+            operation: "doctor.show",
+        },
+        Commands::Roadmap => CommandMetadata {
+            json: false,
+            operation: "roadmap.show",
+        },
+        Commands::Search(args) => CommandMetadata {
+            json: args.json,
+            operation: "search.run",
+        },
+        Commands::Sync { command } => match command {
+            SyncCommand::Run { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "sync.run",
+            },
+        },
+        Commands::Workflow { command } => match command {
+            WorkflowCommand::List { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.list",
+            },
+            WorkflowCommand::Show { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.show",
+            },
+            WorkflowCommand::Promote { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.promote",
+            },
+            WorkflowCommand::Snooze { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "workflow.snooze",
+            },
+        },
+        Commands::Triage { command } => match command {
+            TriageCommand::Set { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "triage.set",
+            },
+        },
+        Commands::Draft { command } => match command {
+            DraftCommand::Start { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "draft.start",
+            },
+            DraftCommand::Body { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "draft.body.set",
+            },
+            DraftCommand::Send { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "draft.send",
+            },
+            DraftCommand::Attach { command } => match command {
+                DraftAttachmentCommand::Add { json, .. } => CommandMetadata {
+                    json: *json,
+                    operation: "draft.attachment.add",
+                },
+                DraftAttachmentCommand::Remove { json, .. } => CommandMetadata {
+                    json: *json,
+                    operation: "draft.attachment.remove",
+                },
+            },
+        },
+        Commands::Cleanup { command } => match command {
+            CleanupCommand::Archive { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "cleanup.archive",
+            },
+            CleanupCommand::Label { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "cleanup.label",
+            },
+            CleanupCommand::Trash { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "cleanup.trash",
+            },
+        },
+        Commands::Workspace { .. } => CommandMetadata {
+            json: false,
+            operation: "workspace.init",
+        },
+        Commands::Gmail { command } => match command {
+            GmailCommand::Labels {
+                command: GmailLabelsCommand::List { json },
+            } => CommandMetadata {
+                json: *json,
+                operation: "gmail.labels.list",
+            },
+        },
+        Commands::Store { command } => match command {
+            StoreCommand::Init { json } => CommandMetadata {
+                json: *json,
+                operation: "store.init",
+            },
+            StoreCommand::Doctor { json } => CommandMetadata {
+                json: *json,
+                operation: "store.doctor",
+            },
+        },
+    }
 }
 
 async fn handle_auth_command(
@@ -124,7 +334,7 @@ async fn handle_gmail_command(
 
 fn print_roadmap() {
     println!(
-        "v1 milestone: search + triage + draft queue\n\
+        "v1 milestone: search + thread workflow + draft/send + reviewed cleanup\n\
          docs: docs/roadmap/v1-search-triage-draft-queue.md\n\
          architecture: docs/architecture/system-overview.md\n\
          plugin-assisted ops: docs/operations/plugin-assisted-workflows.md"
@@ -162,6 +372,180 @@ async fn handle_sync_command(
             recent_days,
             json,
         } => mailbox::sync_run(&config_report, full, recent_days)
+            .await?
+            .print(json)?,
+    }
+
+    Ok(())
+}
+
+async fn handle_workflow_command(
+    paths: &workspace::WorkspacePaths,
+    command: WorkflowCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        WorkflowCommand::List {
+            stage,
+            triage_bucket,
+            json,
+        } => workflows::list_workflows(
+            &config_report,
+            stage.map(workflow_stage_from_arg),
+            triage_bucket.map(triage_bucket_from_arg),
+        )
+        .await?
+        .print(json)?,
+        WorkflowCommand::Show { thread_id, json } => {
+            workflows::show_workflow(&config_report, thread_id)
+                .await?
+                .print(json)?
+        }
+        WorkflowCommand::Promote {
+            thread_id,
+            to,
+            json,
+        } => workflows::promote_workflow(
+            &config_report,
+            thread_id,
+            workflow_promote_target_from_arg(to),
+        )
+        .await?
+        .print(json)?,
+        WorkflowCommand::Snooze {
+            thread_id,
+            until,
+            clear,
+            json,
+        } => {
+            let until = resolve_snooze_until(until, clear)?;
+            workflows::snooze_workflow(&config_report, thread_id, until)
+                .await?
+                .print(json)?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_triage_command(
+    paths: &workspace::WorkspacePaths,
+    command: TriageCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        TriageCommand::Set {
+            thread_id,
+            bucket,
+            note,
+            json,
+        } => workflows::set_triage(
+            &config_report,
+            thread_id,
+            triage_bucket_from_arg(bucket),
+            note,
+        )
+        .await?
+        .print(json)?,
+    }
+
+    Ok(())
+}
+
+async fn handle_draft_command(
+    paths: &workspace::WorkspacePaths,
+    command: DraftCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        DraftCommand::Start {
+            thread_id,
+            reply_all,
+            json,
+        } => workflows::draft_start(
+            &config_report,
+            thread_id,
+            if reply_all {
+                store::workflows::ReplyMode::ReplyAll
+            } else {
+                store::workflows::ReplyMode::Reply
+            },
+        )
+        .await?
+        .print(json)?,
+        DraftCommand::Body {
+            thread_id,
+            text,
+            file,
+            stdin,
+            json,
+        } => {
+            let body_text = resolve_draft_body_input(text, file, stdin)?;
+            workflows::draft_body_set(&config_report, thread_id, body_text)
+                .await?
+                .print(json)?;
+        }
+        DraftCommand::Attach { command } => match command {
+            DraftAttachmentCommand::Add {
+                thread_id,
+                path,
+                json,
+            } => workflows::draft_attach_add(&config_report, thread_id, path)
+                .await?
+                .print(json)?,
+            DraftAttachmentCommand::Remove {
+                thread_id,
+                path,
+                json,
+            } => workflows::draft_attach_remove(&config_report, thread_id, path)
+                .await?
+                .print(json)?,
+        },
+        DraftCommand::Send { thread_id, json } => workflows::draft_send(&config_report, thread_id)
+            .await?
+            .print(json)?,
+    }
+
+    Ok(())
+}
+
+async fn handle_cleanup_command(
+    paths: &workspace::WorkspacePaths,
+    command: CleanupCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        CleanupCommand::Archive {
+            thread_id,
+            execute,
+            json,
+        } => workflows::cleanup_archive(&config_report, thread_id, execute)
+            .await?
+            .print(json)?,
+        CleanupCommand::Label {
+            thread_id,
+            add_labels,
+            remove_labels,
+            execute,
+            json,
+        } => workflows::cleanup_label(
+            &config_report,
+            thread_id,
+            execute,
+            add_labels,
+            remove_labels,
+        )
+        .await?
+        .print(json)?,
+        CleanupCommand::Trash {
+            thread_id,
+            execute,
+            json,
+        } => workflows::cleanup_trash(&config_report, thread_id, execute)
             .await?
             .print(json)?,
     }
@@ -207,6 +591,62 @@ fn handle_store_command(paths: &workspace::WorkspacePaths, command: StoreCommand
     Ok(())
 }
 
+fn workflow_stage_from_arg(value: WorkflowStageArg) -> store::workflows::WorkflowStage {
+    match value {
+        WorkflowStageArg::Triage => store::workflows::WorkflowStage::Triage,
+        WorkflowStageArg::FollowUp => store::workflows::WorkflowStage::FollowUp,
+        WorkflowStageArg::Drafting => store::workflows::WorkflowStage::Drafting,
+        WorkflowStageArg::ReadyToSend => store::workflows::WorkflowStage::ReadyToSend,
+        WorkflowStageArg::Sent => store::workflows::WorkflowStage::Sent,
+        WorkflowStageArg::Closed => store::workflows::WorkflowStage::Closed,
+    }
+}
+
+fn workflow_promote_target_from_arg(
+    value: WorkflowPromoteTargetArg,
+) -> store::workflows::WorkflowStage {
+    match value {
+        WorkflowPromoteTargetArg::FollowUp => store::workflows::WorkflowStage::FollowUp,
+        WorkflowPromoteTargetArg::ReadyToSend => store::workflows::WorkflowStage::ReadyToSend,
+        WorkflowPromoteTargetArg::Closed => store::workflows::WorkflowStage::Closed,
+    }
+}
+
+fn triage_bucket_from_arg(value: TriageBucketArg) -> store::workflows::TriageBucket {
+    match value {
+        TriageBucketArg::Urgent => store::workflows::TriageBucket::Urgent,
+        TriageBucketArg::NeedsReplySoon => store::workflows::TriageBucket::NeedsReplySoon,
+        TriageBucketArg::Waiting => store::workflows::TriageBucket::Waiting,
+        TriageBucketArg::Fyi => store::workflows::TriageBucket::Fyi,
+    }
+}
+
+fn resolve_draft_body_input(
+    text: Option<String>,
+    file: Option<PathBuf>,
+    stdin: bool,
+) -> Result<String> {
+    let selected = usize::from(text.is_some()) + usize::from(file.is_some()) + usize::from(stdin);
+    if selected != 1 {
+        return Err(CliInputError::DraftBodyInputSourceConflict.into());
+    }
+
+    if let Some(text) = text {
+        return Ok(text);
+    }
+
+    if let Some(file) = file {
+        return std::fs::read_to_string(&file)
+            .map_err(|source| CliInputError::DraftBodyFileRead { path: file, source }.into());
+    }
+
+    let mut buffer = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buffer)
+        .map_err(|source| CliInputError::DraftBodyStdinRead { source })?;
+    Ok(buffer)
+}
+
 fn gmail_client(config_report: &config::ConfigReport) -> Result<gmail::GmailClient> {
     gmail_client_for_config(config_report)
 }
@@ -214,7 +654,7 @@ fn gmail_client(config_report: &config::ConfigReport) -> Result<gmail::GmailClie
 pub(crate) fn gmail_client_for_config(
     config_report: &config::ConfigReport,
 ) -> Result<gmail::GmailClient> {
-    gmail::GmailClient::new(
+    Ok(gmail::GmailClient::new(
         config_report.config.gmail.clone(),
         config_report.config.workspace.clone(),
         auth::file_store::FileCredentialStore::new(
@@ -223,7 +663,7 @@ pub(crate) fn gmail_client_for_config(
                 .gmail
                 .credential_path(&config_report.config.workspace),
         ),
-    )
+    )?)
 }
 
 pub(crate) fn configured_paths(
@@ -279,7 +719,10 @@ fn is_repo_root(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{discover_repo_root, handle_paths_command, refresh_active_account};
+    use super::{
+        CliInputError, discover_repo_root, handle_paths_command, refresh_active_account,
+        resolve_draft_body_input, resolve_snooze_until,
+    };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::resolve;
     use crate::workspace::WorkspacePaths;
@@ -504,6 +947,50 @@ runtime_root = "{}"
         assert!(!config_report.config.workspace.runtime_root.exists());
     }
 
+    #[test]
+    fn resolve_snooze_until_requires_explicit_until_or_clear() {
+        let error = resolve_snooze_until(None, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "use --until YYYY-MM-DD or --clear");
+    }
+
+    #[test]
+    fn resolve_snooze_until_rejects_conflicting_flags() {
+        let error = resolve_snooze_until(Some(String::from("2026-05-01")), true).unwrap_err();
+
+        assert_eq!(error.to_string(), "use either --until or --clear, not both");
+    }
+
+    #[test]
+    fn resolve_draft_body_input_requires_exactly_one_source() {
+        let error = resolve_draft_body_input(None, None, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "use exactly one of --text, --file, or --stdin"
+        );
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::DraftBodyInputSourceConflict)
+        ));
+    }
+
+    #[test]
+    fn resolve_draft_body_input_reports_file_read_as_typed_validation_error() {
+        let missing_path = PathBuf::from("/definitely/missing/mailroom-draft-body.txt");
+        let error = resolve_draft_body_input(None, Some(missing_path.clone()), false).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("failed to read /definitely/missing/mailroom-draft-body.txt:")
+        );
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::DraftBodyFileRead { path, .. }) if path == &missing_path
+        ));
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -521,7 +1008,7 @@ struct AccountShowReport {
 impl AccountShowReport {
     fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("account_id={}", self.account.account_id);
             println!("email_address={}", self.account.email_address);
@@ -545,7 +1032,7 @@ struct GmailLabelsReport {
 impl GmailLabelsReport {
     fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             for label in &self.labels {
                 println!("{} {} {}", label.id, label.name, label.label_type);

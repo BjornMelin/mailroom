@@ -29,7 +29,7 @@ impl DoctorReport {
 
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("repo_root={}", self.workspace.repo_root.display());
             println!("runtime_root_exists={}", self.workspace.runtime_root_exists);

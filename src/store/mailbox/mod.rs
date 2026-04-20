@@ -5,11 +5,13 @@ mod tests;
 mod types;
 mod write;
 
-pub(crate) use read::{get_sync_state, inspect_mailbox};
+pub(crate) use read::{
+    get_latest_thread_message, get_sync_state, inspect_mailbox, resolve_label_ids_by_names,
+};
 pub(crate) use search::search_messages;
 pub(crate) use types::{
-    GmailMessageUpsertInput, MailboxDoctorReport, SearchQuery, SearchResult, SyncMode,
-    SyncStateRecord, SyncStateUpdate, SyncStatus,
+    GmailMessageUpsertInput, MailboxDoctorReport, MailboxReadError, SearchQuery, SearchResult,
+    SyncMode, SyncStateRecord, SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
 };
 pub(crate) use write::{
     IncrementalSyncCommit, commit_full_sync, commit_incremental_sync, upsert_sync_state,

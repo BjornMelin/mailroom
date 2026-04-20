@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::fmt::{Display, Formatter};
+use std::path::Path;
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -77,6 +78,17 @@ pub(crate) struct SearchResult {
     pub(crate) label_names: Vec<String>,
     pub(crate) thread_message_count: i64,
     pub(crate) rank: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct ThreadMessageSnapshot {
+    pub(crate) account_id: String,
+    pub(crate) message_id: String,
+    pub(crate) thread_id: String,
+    pub(crate) internal_date_epoch_ms: i64,
+    pub(crate) subject: String,
+    pub(crate) from_header: String,
+    pub(crate) snippet: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -161,4 +173,27 @@ pub(crate) enum SyncStateStatusDecodeError {
     InvalidMode(String),
     #[error("invalid mailbox sync status `{0}`")]
     InvalidStatus(String),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum MailboxReadError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("failed to open local mailbox store at {path}")]
+    OpenDatabase {
+        path: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error(transparent)]
+    Query(#[from] rusqlite::Error),
+}
+
+impl MailboxReadError {
+    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+        Self::OpenDatabase {
+            path: path.display().to_string(),
+            source,
+        }
+    }
 }

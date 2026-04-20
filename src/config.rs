@@ -273,7 +273,7 @@ pub struct ConfigReport {
 impl ConfigReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!(
                 "user_config={}",

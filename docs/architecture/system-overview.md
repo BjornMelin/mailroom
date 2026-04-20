@@ -25,7 +25,9 @@ The native Rust core owns:
 - mailbox metadata sync and cursor management
 - mailbox state modeling
 - local search over synced mailbox state
-- future triage and draft queue workflows
+- thread-scoped workflow state and append-only workflow events
+- remote Gmail draft projection and send orchestration
+- reviewed cleanup actions for archive, label, and trash
 - structured CLI output
 
 ### TUI layer
@@ -70,15 +72,23 @@ The current native substrate is intentionally narrow but now usable:
 - live Gmail profile and label inspection through the native client
 - one-shot mailbox sync over Gmail message metadata and history replay
 - local SQLite FTS5 search over metadata and snippet text
+- thread-scoped workflow state with triage buckets, snooze, and stage promotion
+- local draft revisions with file attachments and remote Gmail draft synchronization
+- explicit draft send and reviewed cleanup actions that resync the mailbox afterward
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
-This substrate exists to support later search, sync, triage, and draft
-workflows without inventing a second config, auth, or storage path later.
+This substrate now covers the first complete operator loop for search, thread
+triage, drafting, sending, and reviewed cleanup without inventing a second
+config, auth, or storage path later.
 
 Detailed sync/search ownership, including the “last attempt” versus “last successful
 full or incremental sync” contract, is defined in
 `docs/decisions/0003-message-canonical-sync.md` and
 `docs/operations/mailbox-sync-and-search.md`.
+
+Detailed thread workflow ownership is defined in
+`docs/decisions/0004-unified-thread-workflow.md` and
+`docs/operations/thread-workflow-and-cleanup.md`.
 
 ## Non-goals for v1
 

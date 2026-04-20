@@ -2,6 +2,7 @@ pub mod accounts;
 mod connection;
 pub mod mailbox;
 mod migrations;
+pub mod workflows;
 
 use crate::config::ConfigReport;
 use anyhow::{Result, anyhow};
@@ -32,6 +33,7 @@ pub struct StoreDoctorReport {
     pub pending_migrations: Option<usize>,
     pub pragmas: Option<StorePragmas>,
     pub mailbox: Option<mailbox::MailboxDoctorReport>,
+    pub workflows: Option<workflows::WorkflowDoctorReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,7 +50,7 @@ pub struct StorePragmas {
 impl StoreInitReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("database_path={}", self.database_path.display());
             println!(
@@ -68,7 +70,7 @@ impl StoreInitReport {
 impl StoreDoctorReport {
     pub fn print(&self, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(self)?);
+            crate::cli_output::print_json_success(self)?;
         } else {
             println!("database_path={}", self.database_path.display());
             println!("database_exists={}", self.database_exists);
@@ -139,6 +141,16 @@ impl StoreDoctorReport {
                     None => println!("mailbox_sync_status=<never-run>"),
                 }
             }
+            if let Some(workflows) = &self.workflows {
+                println!("workflow_count={}", workflows.workflow_count);
+                println!("workflow_open_count={}", workflows.open_workflow_count);
+                println!("workflow_draft_count={}", workflows.draft_workflow_count);
+                println!("workflow_event_count={}", workflows.event_count);
+                println!(
+                    "workflow_draft_revision_count={}",
+                    workflows.draft_revision_count
+                );
+            }
         }
 
         Ok(())
@@ -189,6 +201,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
             pending_migrations: None,
             pragmas: None,
             mailbox: None,
+            workflows: None,
         });
     }
 
@@ -200,6 +213,8 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
     let pending_migrations = pending_migrations(known_migrations, pragmas.user_version)?;
     let mailbox =
         mailbox::inspect_mailbox(&database_path, config_report.config.store.busy_timeout_ms)?;
+    let workflows =
+        workflows::inspect_workflows(&database_path, config_report.config.store.busy_timeout_ms)?;
 
     Ok(StoreDoctorReport {
         config: config_report,
@@ -210,6 +225,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
         pending_migrations: Some(pending_migrations),
         pragmas: Some(pragmas),
         mailbox,
+        workflows,
     })
 }
 
@@ -331,7 +347,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 3);
+        assert_eq!(report.schema_version, 5);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -461,11 +477,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(1, 3).unwrap_err();
+        let error = super::pending_migrations(5, 6).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 3 is newer than embedded migrations (1)")
+                .contains("database schema version 6 is newer than embedded migrations (5)")
         );
     }
 

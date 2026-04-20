@@ -17,9 +17,10 @@ It does not yet own:
 
 - full body indexing
 - attachment extraction
-- triage queues
-- draft/reply workflows
-- destructive mailbox actions
+- attachment catalog/export flows
+
+Thread workflow, draft/send, and cleanup behavior live in
+`docs/operations/thread-workflow-and-cleanup.md`.
 
 ## Commands
 
@@ -52,6 +53,11 @@ Inspect sync state through doctor output:
 ```bash
 cargo run -- doctor --json
 ```
+
+All `--json` commands in this slice return the normalized Mailroom envelope:
+
+- success: `{ "success": true, "data": ... }`
+- failure: `{ "success": false, "error": { code, message, kind, operation, causes } }`
 
 ## Sync behavior
 
@@ -132,5 +138,6 @@ Relevant sync fields in JSON output include:
 
 - sync is read-only against Gmail
 - search is fully local
-- Mailroom does not mutate mailbox state in this slice
+- Mailroom mutates mailbox state only through the explicit thread workflow
+  cleanup and draft/send commands, not through sync/search itself
 - repo-local `.mailroom/` remains the only runtime storage location by default

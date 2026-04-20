@@ -1,6 +1,6 @@
 # Inbox Triage Workflow
 
-The target operator loop for inbox triage is:
+The current operator loop for inbox triage is:
 
 1. collect or inspect candidate messages
 2. search and shortlist
@@ -15,5 +15,18 @@ Preferred buckets:
 - waiting
 - fyi
 
-This workflow should eventually exist in both CLI and TUI forms, backed by the same local state.
+The native CLI now supports this flow directly:
 
+```bash
+cargo run -- sync run --json
+cargo run -- search "project alpha" --json
+cargo run -- triage set thread-123 --bucket urgent --json
+cargo run -- workflow promote thread-123 --to follow_up --json
+cargo run -- draft start thread-123 --json
+cargo run -- cleanup archive thread-123 --json
+cargo run -- cleanup archive thread-123 --execute --json
+```
+
+The same local workflow state is intended to back the later TUI.
+Codex Gmail/GitHub plugin-assisted reads remain useful for live inspection, but
+keep the write path in the native CLI so the local store stays authoritative.
