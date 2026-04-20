@@ -281,6 +281,87 @@ fn persist_workflow_rejects_stale_updates() {
 }
 
 #[test]
+fn mark_sent_reports_missing_workflow_for_unknown_thread() {
+    let repo_root = unique_temp_dir("mailroom-workflow-mark-sent-missing");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    let error = mark_sent(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &MarkSentInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-missing"),
+            sent_message_id: String::from("sent-message-1"),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "no workflow found for thread thread-missing"
+    );
+}
+
+#[test]
+fn apply_cleanup_reports_missing_workflow_for_unknown_thread() {
+    let repo_root = unique_temp_dir("mailroom-workflow-apply-cleanup-missing");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    let error = apply_cleanup(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &ApplyCleanupInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-missing"),
+            cleanup_action: CleanupAction::Archive,
+            payload_json: String::from(r#"{"execute":true}"#),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "no workflow found for thread thread-missing"
+    );
+}
+
+#[test]
+fn retire_draft_state_reports_missing_workflow_for_unknown_thread() {
+    let repo_root = unique_temp_dir("mailroom-workflow-retire-draft-missing");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    let error = retire_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RetireDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-missing"),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "no workflow found for thread thread-missing"
+    );
+}
+
+#[test]
 fn upsert_draft_revision_persists_current_draft_and_attachments() {
     let repo_root = unique_temp_dir("mailroom-workflow-draft");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());

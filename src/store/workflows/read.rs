@@ -485,3 +485,107 @@ fn count_query(connection: &Connection, sql: &str) -> Result<i64, WorkflowStoreR
     };
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::lookup_workflow_account_id;
+    use crate::config::resolve;
+    use crate::store::init;
+    use crate::workspace::WorkspacePaths;
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    #[test]
+    fn lookup_workflow_account_id_returns_none_for_empty_and_ambiguous_thread_matches() {
+        let repo_root = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+
+        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+        let database_path = &config_report.config.store.database_path;
+        let thread_id = "thread-1";
+
+        assert_eq!(
+            lookup_workflow_account_id(database_path, busy_timeout_ms, Some(thread_id)).unwrap(),
+            None
+        );
+
+        let mut connection =
+            crate::store::connection::open_or_create(database_path, busy_timeout_ms).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                "INSERT INTO accounts (
+                     account_id,
+                     provider,
+                     email_address,
+                     history_id,
+                     messages_total,
+                     threads_total,
+                     access_scope,
+                     is_active,
+                     created_at_epoch_s,
+                     updated_at_epoch_s,
+                     last_profile_refresh_epoch_s
+                 )
+                 VALUES (?1, 'gmail', ?2, '1', 0, 0, 'scope:a', 0, 100, 100, 100)",
+                params!["gmail:alice@example.com", "alice@example.com"],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO accounts (
+                     account_id,
+                     provider,
+                     email_address,
+                     history_id,
+                     messages_total,
+                     threads_total,
+                     access_scope,
+                     is_active,
+                     created_at_epoch_s,
+                     updated_at_epoch_s,
+                     last_profile_refresh_epoch_s
+                 )
+                 VALUES (?1, 'gmail', ?2, '1', 0, 0, 'scope:a', 0, 100, 100, 100)",
+                params!["gmail:bob@example.com", "bob@example.com"],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO thread_workflows (
+                     workflow_id,
+                     account_id,
+                     thread_id,
+                     current_stage,
+                     created_at_epoch_s,
+                     updated_at_epoch_s
+                 )
+                 VALUES (?1, ?2, ?3, 'triage', 100, 100)",
+                params![1_i64, "gmail:alice@example.com", thread_id],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO thread_workflows (
+                     workflow_id,
+                     account_id,
+                     thread_id,
+                     current_stage,
+                     created_at_epoch_s,
+                     updated_at_epoch_s
+                 )
+                 VALUES (?1, ?2, ?3, 'triage', 100, 100)",
+                params![2_i64, "gmail:bob@example.com", thread_id],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+
+        assert_eq!(
+            lookup_workflow_account_id(database_path, busy_timeout_ms, Some(thread_id)).unwrap(),
+            None
+        );
+    }
+}

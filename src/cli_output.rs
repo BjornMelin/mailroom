@@ -8,6 +8,7 @@ use crate::store::{
 use crate::workflows::WorkflowServiceError;
 use anyhow::Error as AnyhowError;
 use serde::Serialize;
+use std::io::Write;
 use std::process::ExitCode;
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -60,18 +61,32 @@ struct JsonFailureEnvelope<'a> {
 }
 
 pub(crate) fn print_json_success<T: Serialize>(data: &T) -> anyhow::Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json_success_value(data))?
-    );
-    Ok(())
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    write_json_success(&mut stdout, data)
 }
 
 pub(crate) fn print_json_failure(error: &JsonErrorBody) -> anyhow::Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json_failure_value(error))?
-    );
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    write_json_failure(&mut stdout, error)
+}
+
+pub(crate) fn write_json_success<W: Write, T: Serialize>(
+    writer: &mut W,
+    data: &T,
+) -> anyhow::Result<()> {
+    serde_json::to_writer_pretty(&mut *writer, &json_success_value(data))?;
+    writeln!(writer)?;
+    Ok(())
+}
+
+pub(crate) fn write_json_failure<W: Write>(
+    writer: &mut W,
+    error: &JsonErrorBody,
+) -> anyhow::Result<()> {
+    serde_json::to_writer_pretty(&mut *writer, &json_failure_value(error))?;
+    writeln!(writer)?;
     Ok(())
 }
 

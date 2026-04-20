@@ -1,14 +1,12 @@
 use crate::workflows::{WorkflowActionReport, WorkflowListReport, WorkflowShowReport};
 use anyhow::Result;
+use std::io::{self, Write};
 
 impl WorkflowListReport {
     pub fn print(&self, json: bool) -> Result<()> {
-        if json {
-            crate::cli_output::print_json_success(self)?;
-        } else {
-            print!("{}", self.render_plain());
-        }
-        Ok(())
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        self.write(json, &mut stdout)
     }
 
     fn render_plain(&self) -> String {
@@ -38,16 +36,22 @@ impl WorkflowListReport {
         }));
         lines.join("\n") + "\n"
     }
+
+    fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {
+        if json {
+            crate::cli_output::write_json_success(writer, self)?;
+        } else {
+            writer.write_all(self.render_plain().as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 impl WorkflowShowReport {
     pub fn print(&self, json: bool) -> Result<()> {
-        if json {
-            crate::cli_output::print_json_success(self)?;
-        } else {
-            print!("{}", self.render_plain());
-        }
-        Ok(())
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        self.write(json, &mut stdout)
     }
 
     fn render_plain(&self) -> String {
@@ -83,16 +87,22 @@ impl WorkflowShowReport {
         }
         lines.join("\n") + "\n"
     }
+
+    fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {
+        if json {
+            crate::cli_output::write_json_success(writer, self)?;
+        } else {
+            writer.write_all(self.render_plain().as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 impl WorkflowActionReport {
     pub fn print(&self, json: bool) -> Result<()> {
-        if json {
-            crate::cli_output::print_json_success(self)?;
-        } else {
-            print!("{}", self.render_plain());
-        }
-        Ok(())
+        let stdout = io::stdout();
+        let mut stdout = stdout.lock();
+        self.write(json, &mut stdout)
     }
 
     fn render_plain(&self) -> String {
@@ -110,13 +120,23 @@ impl WorkflowActionReport {
             if !preview.add_label_names.is_empty() {
                 lines.push(format!(
                     "cleanup_add_labels={}",
-                    preview.add_label_names.join(",")
+                    preview
+                        .add_label_names
+                        .iter()
+                        .map(|label| sanitize_label(label))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 ));
             }
             if !preview.remove_label_names.is_empty() {
                 lines.push(format!(
                     "cleanup_remove_labels={}",
-                    preview.remove_label_names.join(",")
+                    preview
+                        .remove_label_names
+                        .iter()
+                        .map(|label| sanitize_label(label))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 ));
             }
         }
@@ -140,6 +160,15 @@ impl WorkflowActionReport {
         }
         lines.join("\n") + "\n"
     }
+
+    fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {
+        if json {
+            crate::cli_output::write_json_success(writer, self)?;
+        } else {
+            writer.write_all(self.render_plain().as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 fn sanitize(value: &str) -> String {
@@ -155,10 +184,22 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
+fn sanitize_label(value: &str) -> String {
+    sanitize(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{WorkflowListReport, sanitize};
-    use crate::store::workflows::{TriageBucket, WorkflowRecord, WorkflowStage};
+    use crate::mailbox::SyncRunReport;
+    use crate::store::mailbox::SyncMode;
+    use crate::store::workflows::{
+        CleanupAction, DraftAttachmentRecord, DraftRevisionDetail, DraftRevisionRecord,
+        TriageBucket, WorkflowDetail, WorkflowEventRecord, WorkflowRecord, WorkflowStage,
+    };
+    use crate::workflows::{WorkflowAction, WorkflowActionReport, WorkflowShowReport};
+    use serde_json::{Value, json};
+    use std::io::Cursor;
 
     #[test]
     fn sanitize_replaces_all_control_characters() {
@@ -188,6 +229,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_plain_show_report_includes_workflow_and_draft_fields() {
+        let report = sample_show_report();
+
+        let rendered = report.render_plain();
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(
+            lines,
+            vec![
+                "thread_id=thread-1",
+                "stage=drafting",
+                "triage_bucket=urgent",
+                "note=Prepare release notes",
+                "latest_subject=Alpha [31m launch",
+                "event_count=1",
+                "current_draft_revision_id=7",
+                "current_draft_reply_mode=reply_all",
+                "current_draft_attachment_count=1",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_plain_action_report_includes_cleanup_and_sync_sections() {
+        let report = sample_action_report();
+
+        let rendered = report.render_plain();
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(
+            lines,
+            vec![
+                "action=cleanup_applied",
+                "thread_id=thread-1",
+                "stage=closed",
+                "triage_bucket=urgent",
+                "cleanup_action=archive",
+                "cleanup_execute=true",
+                "cleanup_add_labels=Important",
+                "draft_revision_id=7",
+                "draft_reply_mode=reply_all",
+                "draft_attachment_count=1",
+                "sync_mode=full",
+                "sync_cursor_history_id=cursor-1",
+            ]
+        );
+    }
+
+    #[test]
+    fn render_plain_action_report_sanitizes_cleanup_label_names() {
+        let report = WorkflowActionReport {
+            cleanup_preview: Some(crate::workflows::CleanupPreview {
+                action: CleanupAction::Archive,
+                execute: false,
+                add_label_names: vec![
+                    String::from("Important\u{1b}[31m"),
+                    String::from("Ops\tTeam"),
+                ],
+                remove_label_names: vec![String::from("Old\nLabel")],
+            }),
+            ..sample_action_report()
+        };
+
+        let rendered = report.render_plain();
+
+        assert!(rendered.contains("cleanup_add_labels=Important [31m,Ops Team"));
+        assert!(rendered.contains("cleanup_remove_labels=Old Label"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn print_routes_show_report_to_json_and_plain_output() {
+        let report = sample_show_report();
+
+        let plain_output = render_into_bytes(&report, false);
+        assert_eq!(plain_output, report.render_plain().as_bytes());
+
+        let json_output = render_into_bytes(&report, true);
+        let json_value: Value = serde_json::from_slice(&json_output).unwrap();
+        assert_eq!(json_value["success"], json!(true));
+        assert_eq!(
+            json_value["data"]["detail"]["workflow"]["thread_id"],
+            json!("thread-1")
+        );
+        assert_eq!(
+            json_value["data"]["detail"]["workflow"]["current_stage"],
+            json!("drafting")
+        );
+        assert_eq!(
+            json_value["data"]["detail"]["current_draft"]["revision"]["reply_mode"],
+            json!("reply_all")
+        );
+        assert_eq!(
+            json_value["data"]["detail"]["events"][0]["event_kind"],
+            json!("triage_set")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn print_routes_action_report_to_json_and_plain_output() {
+        let report = sample_action_report();
+
+        let plain_output = render_into_bytes(&report, false);
+        assert_eq!(plain_output, report.render_plain().as_bytes());
+
+        let json_output = render_into_bytes(&report, true);
+        let json_value: Value = serde_json::from_slice(&json_output).unwrap();
+        assert_eq!(json_value["success"], json!(true));
+        assert_eq!(json_value["data"]["action"], json!("cleanup_applied"));
+        assert_eq!(
+            json_value["data"]["workflow"]["thread_id"],
+            json!("thread-1")
+        );
+        assert_eq!(
+            json_value["data"]["cleanup_preview"]["action"],
+            json!("archive")
+        );
+        assert_eq!(json_value["data"]["sync_report"]["mode"], json!("full"));
+    }
+
     fn sample_workflow_record() -> WorkflowRecord {
         WorkflowRecord {
             workflow_id: 1,
@@ -195,7 +358,7 @@ mod tests {
             thread_id: String::from("thread-1"),
             current_stage: WorkflowStage::Drafting,
             triage_bucket: Some(TriageBucket::Urgent),
-            note: String::from("note"),
+            note: String::from("Prepare release notes"),
             snoozed_until_epoch_s: None,
             follow_up_due_epoch_s: None,
             latest_message_id: Some(String::from("message-1")),
@@ -213,6 +376,117 @@ mod tests {
             workflow_version: 1,
             created_at_epoch_s: 1,
             updated_at_epoch_s: 123,
+        }
+    }
+
+    fn sample_show_report() -> WorkflowShowReport {
+        WorkflowShowReport {
+            detail: WorkflowDetail {
+                workflow: sample_workflow_record(),
+                current_draft: Some(sample_draft_detail()),
+                events: vec![WorkflowEventRecord {
+                    event_id: 1,
+                    workflow_id: 1,
+                    account_id: String::from("account-1"),
+                    thread_id: String::from("thread-1"),
+                    event_kind: String::from("triage_set"),
+                    from_stage: None,
+                    to_stage: Some(WorkflowStage::Drafting),
+                    triage_bucket: Some(TriageBucket::Urgent),
+                    note: Some(String::from("manually triaged")),
+                    payload_json: String::from("{\"kind\":\"triage_set\"}"),
+                    created_at_epoch_s: 123,
+                }],
+            },
+        }
+    }
+
+    fn sample_action_report() -> WorkflowActionReport {
+        WorkflowActionReport {
+            action: WorkflowAction::CleanupApplied,
+            workflow: WorkflowRecord {
+                current_stage: WorkflowStage::Closed,
+                last_cleanup_action: Some(CleanupAction::Archive),
+                ..sample_workflow_record()
+            },
+            current_draft: Some(sample_draft_detail()),
+            cleanup_preview: Some(crate::workflows::CleanupPreview {
+                action: CleanupAction::Archive,
+                execute: true,
+                add_label_names: vec![String::from("Important")],
+                remove_label_names: vec![],
+            }),
+            sync_report: Some(SyncRunReport {
+                mode: SyncMode::Full,
+                fallback_from_history: false,
+                bootstrap_query: String::from("newer_than:7d"),
+                cursor_history_id: String::from("cursor-1"),
+                pages_fetched: 1,
+                messages_listed: 2,
+                messages_upserted: 1,
+                messages_deleted: 0,
+                labels_synced: 3,
+                store_message_count: 4,
+                store_label_count: 5,
+                store_indexed_message_count: 6,
+            }),
+        }
+    }
+
+    fn sample_draft_detail() -> DraftRevisionDetail {
+        DraftRevisionDetail {
+            revision: DraftRevisionRecord {
+                draft_revision_id: 7,
+                workflow_id: 1,
+                account_id: String::from("account-1"),
+                thread_id: String::from("thread-1"),
+                source_message_id: String::from("message-1"),
+                reply_mode: crate::store::workflows::ReplyMode::ReplyAll,
+                subject: String::from("Re: Alpha launch"),
+                to_addresses: vec![String::from("alice@example.com")],
+                cc_addresses: vec![String::from("bob@example.com")],
+                bcc_addresses: vec![],
+                body_text: String::from("Draft body"),
+                created_at_epoch_s: 124,
+            },
+            attachments: vec![DraftAttachmentRecord {
+                attachment_id: 1,
+                draft_revision_id: 7,
+                path: String::from("/tmp/reply.txt"),
+                file_name: String::from("reply.txt"),
+                mime_type: String::from("text/plain"),
+                size_bytes: 42,
+                created_at_epoch_s: 124,
+            }],
+        }
+    }
+
+    #[cfg(unix)]
+    fn render_into_bytes<T>(report: &T, json: bool) -> Vec<u8>
+    where
+        T: RenderableReport,
+    {
+        let mut output = Cursor::new(Vec::new());
+        report.write(json, &mut output).unwrap();
+        output.into_inner()
+    }
+
+    #[cfg(unix)]
+    trait RenderableReport {
+        fn write(&self, json: bool, writer: &mut Cursor<Vec<u8>>) -> anyhow::Result<()>;
+    }
+
+    #[cfg(unix)]
+    impl RenderableReport for WorkflowShowReport {
+        fn write(&self, json: bool, writer: &mut Cursor<Vec<u8>>) -> anyhow::Result<()> {
+            WorkflowShowReport::write(self, json, writer)
+        }
+    }
+
+    #[cfg(unix)]
+    impl RenderableReport for WorkflowActionReport {
+        fn write(&self, json: bool, writer: &mut Cursor<Vec<u8>>) -> anyhow::Result<()> {
+            WorkflowActionReport::write(self, json, writer)
         }
     }
 }
