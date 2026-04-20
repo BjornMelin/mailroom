@@ -7,10 +7,11 @@ use anyhow::Result;
 use sanitize_filename::sanitize;
 use serde::Serialize;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::task::spawn_blocking;
 
@@ -583,13 +584,7 @@ fn write_vault_bytes(vault_dir: &Path, bytes: Vec<u8>) -> Result<VaultWriteResul
         path: parent.to_path_buf(),
         source,
     })?;
-    if !path.exists() {
-        fs::write(&path, &bytes).map_err(|source| AttachmentServiceError::WriteFile {
-            path: path.clone(),
-            source,
-        })?;
-        harden_vault_file_permissions(&path)?;
-    }
+    write_vault_file_atomically(&path, &bytes)?;
     let size_bytes = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
 
     Ok(VaultWriteResult {
@@ -598,6 +593,84 @@ fn write_vault_bytes(vault_dir: &Path, bytes: Vec<u8>) -> Result<VaultWriteResul
         path,
         size_bytes,
     })
+}
+
+fn write_vault_file_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AttachmentServiceError::WriteFile {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("vault path has no parent"),
+        })?;
+    let temp_path = unique_vault_temp_path(parent, path)?;
+    let write_result = (|| -> Result<()> {
+        let mut temp_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|source| AttachmentServiceError::WriteFile {
+                path: temp_path.clone(),
+                source,
+            })?;
+        temp_file
+            .write_all(bytes)
+            .map_err(|source| AttachmentServiceError::WriteFile {
+                path: temp_path.clone(),
+                source,
+            })?;
+        temp_file
+            .sync_all()
+            .map_err(|source| AttachmentServiceError::WriteFile {
+                path: temp_path.clone(),
+                source,
+            })?;
+        drop(temp_file);
+        harden_vault_file_permissions(&temp_path)?;
+        persist_vault_temp_file(&temp_path, path)?;
+        harden_vault_file_permissions(path)
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    write_result
+}
+
+fn unique_vault_temp_path(parent: &Path, path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AttachmentServiceError::WriteFile {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("vault path has no filename"),
+        })?;
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Ok(parent.join(format!(
+        ".{}.tmp-{}-{now_nanos}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    )))
+}
+
+fn persist_vault_temp_file(tmp_path: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if destination.exists() {
+            fs::remove_file(destination).map_err(|source| AttachmentServiceError::WriteFile {
+                path: destination.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+
+    fs::rename(tmp_path, destination).map_err(|source| AttachmentServiceError::WriteFile {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 struct CopyFromVaultResult {
@@ -697,6 +770,7 @@ mod tests {
     use super::{
         copy_from_vault, default_export_path, existing_vault_report, export_filename,
         hash_file_blake3, map_vault_state_write_error, resolve_vault_relative_path,
+        write_vault_bytes,
     };
     use crate::store::mailbox::AttachmentDetailRecord;
     use crate::workspace::WorkspacePaths;
@@ -788,6 +862,27 @@ mod tests {
 
         assert!(report.is_some());
         assert!(!report.unwrap().downloaded);
+    }
+
+    #[test]
+    fn write_vault_bytes_rewrites_existing_hash_path_blob() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+
+        let expected_bytes = b"hello".to_vec();
+        let content_hash = blake3::hash(&expected_bytes).to_hex().to_string();
+        let relative_path = format!("blake3/{}/{}", &content_hash[..2], content_hash);
+        let vault_path = paths.vault_dir.join(&relative_path);
+        fs::create_dir_all(vault_path.parent().unwrap()).unwrap();
+        fs::write(&vault_path, b"corrupt").unwrap();
+
+        let write = write_vault_bytes(&paths.vault_dir, expected_bytes.clone()).unwrap();
+
+        assert_eq!(write.path, vault_path);
+        assert_eq!(fs::read(&vault_path).unwrap(), expected_bytes);
+        assert_eq!(hash_file_blake3(&vault_path).unwrap(), write.content_hash);
+        assert_eq!(write.size_bytes, 5);
     }
 
     #[test]
