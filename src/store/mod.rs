@@ -333,6 +333,7 @@ fn harden_database_permissions(_path: &Path) -> Result<()> {
 mod tests {
     use super::{SQLITE_APPLICATION_ID, harden_database_permissions, init, inspect, migrations};
     use crate::config::resolve;
+    use crate::store::{accounts, mailbox};
     use crate::workspace::WorkspacePaths;
     use rusqlite::Connection;
     use std::fs;
@@ -549,6 +550,257 @@ mod tests {
         assert_eq!(database_mode, 0o600);
         assert_eq!(wal_mode, 0o600);
         assert_eq!(shm_mode, 0o600);
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn migration_from_v6_backfills_attachment_account_scope_for_realistic_fixture() {
+        const MESSAGE_COUNT_PER_ACCOUNT: usize = 160;
+        const ATTACHMENTS_PER_MESSAGE: usize = 2;
+        let repo_root = unique_temp_dir("mailroom-store-migration-v6-backfill");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+
+        let account_specs = [
+            ("operator@example.com", "gmail:operator@example.com", "op"),
+            ("other@example.com", "gmail:other@example.com", "other"),
+        ];
+        for (email, account_id, prefix) in account_specs {
+            accounts::upsert_active(
+                &config_report.config.store.database_path,
+                config_report.config.store.busy_timeout_ms,
+                &accounts::UpsertAccountInput {
+                    email_address: email.to_owned(),
+                    history_id: String::from("100"),
+                    messages_total: MESSAGE_COUNT_PER_ACCOUNT as i64,
+                    threads_total: MESSAGE_COUNT_PER_ACCOUNT as i64,
+                    access_scope: String::from("scope:a"),
+                    refreshed_at_epoch_s: 100,
+                },
+            )
+            .unwrap();
+            mailbox::replace_labels(
+                &config_report.config.store.database_path,
+                config_report.config.store.busy_timeout_ms,
+                account_id,
+                &[crate::gmail::GmailLabel {
+                    id: String::from("INBOX"),
+                    name: String::from("INBOX"),
+                    label_type: String::from("system"),
+                    message_list_visibility: None,
+                    label_list_visibility: None,
+                    messages_total: None,
+                    messages_unread: None,
+                    threads_total: None,
+                    threads_unread: None,
+                }],
+                100,
+            )
+            .unwrap();
+
+            let messages = (0..MESSAGE_COUNT_PER_ACCOUNT)
+                .map(|index| mailbox::GmailMessageUpsertInput {
+                    account_id: account_id.to_owned(),
+                    message_id: format!("{prefix}-m-{index}"),
+                    thread_id: format!("{prefix}-t-{index}"),
+                    history_id: format!("{}", 200 + index),
+                    internal_date_epoch_ms: 1_700_000_000_000 + i64::try_from(index).unwrap(),
+                    snippet: format!("Mailbox fixture message {index}"),
+                    subject: format!("Fixture {index}"),
+                    from_header: format!("Fixture <{prefix}@example.com>"),
+                    from_address: Some(format!("{prefix}@example.com")),
+                    recipient_headers: email.to_owned(),
+                    to_header: email.to_owned(),
+                    cc_header: String::new(),
+                    bcc_header: String::new(),
+                    reply_to_header: String::new(),
+                    size_estimate: 2048,
+                    label_ids: vec![String::from("INBOX")],
+                    label_names_text: String::from("INBOX"),
+                    attachments: (0..ATTACHMENTS_PER_MESSAGE)
+                        .map(|part_index| mailbox::GmailAttachmentUpsertInput {
+                            attachment_key: format!("{prefix}-m-{index}:1.{}", part_index + 1),
+                            part_id: format!("1.{}", part_index + 1),
+                            gmail_attachment_id: Some(format!("att-{prefix}-{index}-{part_index}")),
+                            filename: format!("fixture-{index}-{part_index}.bin"),
+                            mime_type: String::from("application/octet-stream"),
+                            size_bytes: 256,
+                            content_disposition: Some(String::from("attachment")),
+                            content_id: None,
+                            is_inline: false,
+                        })
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            mailbox::upsert_messages(
+                &config_report.config.store.database_path,
+                config_report.config.store.busy_timeout_ms,
+                &messages,
+                200,
+            )
+            .unwrap();
+        }
+
+        let expected_attachment_count = i64::try_from(
+            account_specs.len() * MESSAGE_COUNT_PER_ACCOUNT * ATTACHMENTS_PER_MESSAGE,
+        )
+        .unwrap();
+        let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+        let seeded_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_message_attachments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(seeded_count, expected_attachment_count);
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/07-account-scoped-attachment-keys/down.sql"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 6_i64)
+            .unwrap();
+        let account_column_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM pragma_table_info('gmail_message_attachments')
+                 WHERE name = 'account_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_column_count, 0);
+        drop(connection);
+
+        let migration_report = init(&config_report).unwrap();
+        assert_eq!(migration_report.schema_version, 7);
+        assert_eq!(migration_report.pending_migrations, 0);
+
+        let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+        let migrated_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_message_attachments",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_count, expected_attachment_count);
+
+        let null_account_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_message_attachments WHERE account_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_account_count, 0);
+
+        let mismatched_account_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM gmail_message_attachments gma
+                 INNER JOIN gmail_messages gm
+                   ON gm.message_rowid = gma.message_rowid
+                 WHERE gma.account_id != gm.account_id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mismatched_account_count, 0);
+
+        let shared_key = String::from("post-migration-shared:1.1");
+        let operator_message = mailbox::GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("post-op-m-1"),
+            thread_id: String::from("post-op-t-1"),
+            history_id: String::from("9991"),
+            internal_date_epoch_ms: 1_800_000_000_001,
+            snippet: String::from("Post migration"),
+            subject: String::from("Post migration"),
+            from_header: String::from("Fixture <operator@example.com>"),
+            from_address: Some(String::from("operator@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![mailbox::GmailAttachmentUpsertInput {
+                attachment_key: shared_key.clone(),
+                part_id: String::from("1.1"),
+                gmail_attachment_id: Some(String::from("att-post-op")),
+                filename: String::from("post.bin"),
+                mime_type: String::from("application/octet-stream"),
+                size_bytes: 1,
+                content_disposition: Some(String::from("attachment")),
+                content_id: None,
+                is_inline: false,
+            }],
+        };
+        let other_message = mailbox::GmailMessageUpsertInput {
+            account_id: String::from("gmail:other@example.com"),
+            message_id: String::from("post-other-m-1"),
+            thread_id: String::from("post-other-t-1"),
+            history_id: String::from("9992"),
+            internal_date_epoch_ms: 1_800_000_000_002,
+            snippet: String::from("Post migration"),
+            subject: String::from("Post migration"),
+            from_header: String::from("Fixture <other@example.com>"),
+            from_address: Some(String::from("other@example.com")),
+            recipient_headers: String::from("other@example.com"),
+            to_header: String::from("other@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![mailbox::GmailAttachmentUpsertInput {
+                attachment_key: shared_key.clone(),
+                part_id: String::from("1.1"),
+                gmail_attachment_id: Some(String::from("att-post-other")),
+                filename: String::from("post.bin"),
+                mime_type: String::from("application/octet-stream"),
+                size_bytes: 1,
+                content_disposition: Some(String::from("attachment")),
+                content_id: None,
+                is_inline: false,
+            }],
+        };
+        mailbox::upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[operator_message],
+            300,
+        )
+        .unwrap();
+        mailbox::upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[other_message],
+            300,
+        )
+        .unwrap();
+
+        let shared_key_count: i64 = Connection::open(&config_report.config.store.database_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM gmail_message_attachments
+                 WHERE attachment_key = ?1",
+                [&shared_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(shared_key_count, 2);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
