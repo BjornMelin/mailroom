@@ -1194,6 +1194,7 @@ mod tests {
                 bcc_header: String::new(),
                 reply_to_header: String::new(),
                 size_estimate: 256,
+                automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
                 attachments: vec![GmailAttachmentUpsertInput {
@@ -1284,6 +1285,7 @@ mod tests {
                 bcc_header: String::new(),
                 reply_to_header: String::new(),
                 size_estimate: 256,
+                automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
                 attachments: vec![GmailAttachmentUpsertInput {
@@ -1387,6 +1389,7 @@ mod tests {
                 bcc_header: String::new(),
                 reply_to_header: String::new(),
                 size_estimate: 256,
+                automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
                 attachments: vec![GmailAttachmentUpsertInput {

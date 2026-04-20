@@ -1,0 +1,52 @@
+# Copy this file to `.mailroom/automation.toml` and enable rules intentionally.
+# Mailroom only reads the repo-local runtime file; this tracked file is the
+# template and documentation contract.
+#
+# Safety posture:
+# - rules evaluate against the latest synced local message per thread
+# - `mailroom automation run` only creates a review snapshot
+# - nothing mutates Gmail until `mailroom automation apply <run-id> --execute`
+# - label actions require the named labels to exist in the local Gmail label cache
+
+[[rules]]
+id = "archive-newsletters"
+description = "Archive older list mail that still sits in INBOX."
+enabled = false
+priority = 200
+
+[rules.match]
+label_any = ["INBOX"]
+older_than_days = 14
+has_list_unsubscribe = true
+
+[rules.action]
+kind = "archive"
+
+[[rules]]
+id = "trash-bulk-notices"
+description = "Trash older automated notices after review."
+enabled = false
+priority = 150
+
+[rules.match]
+older_than_days = 30
+precedence = ["bulk", "list", "junk"]
+
+[rules.action]
+kind = "trash"
+
+[[rules]]
+id = "label-billing-follow-up"
+description = "Tag billing mail with attachments for manual review."
+enabled = false
+priority = 125
+
+[rules.match]
+from_address = "billing@example.com"
+subject_contains = ["invoice", "receipt"]
+has_attachments = true
+
+[rules.action]
+kind = "label"
+add = ["0.To-Reply"]
+remove = ["INBOX"]

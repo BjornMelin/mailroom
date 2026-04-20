@@ -12,9 +12,9 @@ pub(crate) use read::{
 pub(crate) use search::search_messages;
 pub(crate) use types::{
     AttachmentDetailRecord, AttachmentExportEventInput, AttachmentListItem, AttachmentListQuery,
-    AttachmentVaultStateUpdate, GmailAttachmentUpsertInput, GmailMessageUpsertInput,
-    MailboxDoctorReport, MailboxReadError, MailboxWriteError, SearchQuery, SearchResult, SyncMode,
-    SyncStateRecord, SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
+    AttachmentVaultStateUpdate, GmailAttachmentUpsertInput, GmailAutomationHeaders,
+    GmailMessageUpsertInput, MailboxDoctorReport, MailboxReadError, MailboxWriteError, SearchQuery,
+    SearchResult, SyncMode, SyncStateRecord, SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
 };
 pub(crate) use write::{
     IncrementalSyncCommit, commit_full_sync, commit_incremental_sync, record_attachment_export,

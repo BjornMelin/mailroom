@@ -17,6 +17,15 @@ pub(crate) struct GmailAttachmentUpsertInput {
     pub(crate) is_inline: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct GmailAutomationHeaders {
+    pub(crate) list_id_header: Option<String>,
+    pub(crate) list_unsubscribe_header: Option<String>,
+    pub(crate) list_unsubscribe_post_header: Option<String>,
+    pub(crate) precedence_header: Option<String>,
+    pub(crate) auto_submitted_header: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct GmailMessageUpsertInput {
     pub(crate) account_id: String,
@@ -34,6 +43,7 @@ pub(crate) struct GmailMessageUpsertInput {
     pub(crate) bcc_header: String,
     pub(crate) reply_to_header: String,
     pub(crate) size_estimate: i64,
+    pub(crate) automation_headers: GmailAutomationHeaders,
     pub(crate) label_ids: Vec<String>,
     pub(crate) label_names_text: String,
     pub(crate) attachments: Vec<GmailAttachmentUpsertInput>,

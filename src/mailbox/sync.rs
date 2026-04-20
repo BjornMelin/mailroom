@@ -480,6 +480,13 @@ fn build_upsert_input(
         bcc_header: message.bcc_header,
         reply_to_header: message.reply_to_header,
         size_estimate: message.size_estimate,
+        automation_headers: store::mailbox::GmailAutomationHeaders {
+            list_id_header: message.automation_headers.list_id_header,
+            list_unsubscribe_header: message.automation_headers.list_unsubscribe_header,
+            list_unsubscribe_post_header: message.automation_headers.list_unsubscribe_post_header,
+            precedence_header: message.automation_headers.precedence_header,
+            auto_submitted_header: message.automation_headers.auto_submitted_header,
+        },
         label_ids: message.label_ids,
         label_names_text,
         attachments: catalog

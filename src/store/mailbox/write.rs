@@ -530,9 +530,14 @@ fn write_messages(
              bcc_header,
              reply_to_header,
              size_estimate,
+             list_id_header,
+             list_unsubscribe_header,
+             list_unsubscribe_post_header,
+             precedence_header,
+             auto_submitted_header,
              updated_at_epoch_s
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT (account_id, message_id) DO UPDATE SET
              thread_id = excluded.thread_id,
              history_id = excluded.history_id,
@@ -547,6 +552,11 @@ fn write_messages(
              bcc_header = excluded.bcc_header,
              reply_to_header = excluded.reply_to_header,
              size_estimate = excluded.size_estimate,
+             list_id_header = excluded.list_id_header,
+             list_unsubscribe_header = excluded.list_unsubscribe_header,
+             list_unsubscribe_post_header = excluded.list_unsubscribe_post_header,
+             precedence_header = excluded.precedence_header,
+             auto_submitted_header = excluded.auto_submitted_header,
              updated_at_epoch_s = excluded.updated_at_epoch_s
          RETURNING message_rowid",
     )?;
@@ -614,6 +624,11 @@ fn write_messages(
                 &message.bcc_header,
                 &message.reply_to_header,
                 message.size_estimate,
+                &message.automation_headers.list_id_header,
+                &message.automation_headers.list_unsubscribe_header,
+                &message.automation_headers.list_unsubscribe_post_header,
+                &message.automation_headers.precedence_header,
+                &message.automation_headers.auto_submitted_header,
                 updated_at_epoch_s,
             ],
             |row| row.get(0),

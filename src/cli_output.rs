@@ -1,8 +1,10 @@
 use crate::CliInputError;
 use crate::attachments::AttachmentServiceError;
 use crate::auth::{self, oauth_client::OAuthClientError};
+use crate::automation::AutomationServiceError;
 use crate::gmail::GmailClientError;
 use crate::store::{
+    automation::{AutomationStoreReadError, AutomationStoreWriteError},
     mailbox::MailboxReadError,
     workflows::{WorkflowStoreReadError, WorkflowStoreWriteError},
 };
@@ -155,6 +157,45 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
                 (ErrorCode::StorageFailure, "attachment.storage")
             }
         };
+    }
+
+    if let Some(automation_error) = find_cause::<AutomationServiceError>(error)
+        && !matches!(automation_error, AutomationServiceError::Gmail { .. })
+    {
+        return match automation_error {
+            AutomationServiceError::NoActiveAccount => {
+                (ErrorCode::AuthRequired, "automation.account.required")
+            }
+            AutomationServiceError::InvalidLimit
+            | AutomationServiceError::ExecuteRequired
+            | AutomationServiceError::RuleFileMissing { .. }
+            | AutomationServiceError::RuleFileRead { .. }
+            | AutomationServiceError::RuleFileParse { .. }
+            | AutomationServiceError::RuleValidation { .. } => {
+                (ErrorCode::ValidationFailed, "automation.validation")
+            }
+            AutomationServiceError::RunNotFound { .. } => {
+                (ErrorCode::NotFound, "automation.not_found")
+            }
+            AutomationServiceError::BlockingTask { .. } => {
+                (ErrorCode::InternalFailure, "automation.blocking_join")
+            }
+            AutomationServiceError::StoreInit { .. }
+            | AutomationServiceError::MailboxRead { .. }
+            | AutomationServiceError::AutomationRead { .. }
+            | AutomationServiceError::AutomationWrite { .. } => {
+                (ErrorCode::StorageFailure, "automation.storage")
+            }
+            AutomationServiceError::Gmail { .. } => unreachable!(),
+        };
+    }
+
+    if find_cause::<AutomationStoreWriteError>(error).is_some() {
+        return (ErrorCode::StorageFailure, "store.automation.write");
+    }
+
+    if find_cause::<AutomationStoreReadError>(error).is_some() {
+        return (ErrorCode::StorageFailure, "store.automation.read");
     }
 
     if let Some(workflow_error) = find_cause::<WorkflowServiceError>(error) {
@@ -362,6 +403,10 @@ mod tests {
     use crate::gmail::GmailClientError;
     use crate::store;
     use crate::store::accounts;
+    use crate::store::automation::{
+        AutomationActionKind, AutomationActionSnapshot, AutomationMatchReason,
+        CreateAutomationRunInput, NewAutomationRunCandidate, create_automation_run,
+    };
     use crate::store::mailbox::{GmailAttachmentUpsertInput, GmailMessageUpsertInput};
     use crate::store::workflows::{WorkflowStoreReadError, WorkflowStoreWriteError};
     use crate::workflows::WorkflowServiceError;
@@ -739,6 +784,133 @@ mod tests {
         assert!(human_stderr_lower.contains("mailroom auth login"));
     }
 
+    #[test]
+    fn automation_apply_auth_failure_uses_auth_exit_code_in_json_and_human_modes() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo"));
+        let manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let repo_root = TempDir::new().unwrap();
+        std::fs::create_dir(repo_root.path().join(".git")).unwrap();
+
+        let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        store::init(&config_report).unwrap();
+        let account = accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: 1,
+                threads_total: 1,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+        let detail = create_automation_run(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &CreateAutomationRunInput {
+                account_id: account.account_id,
+                rule_file_path: String::from(".mailroom/automation.toml"),
+                rule_file_hash: String::from("hash"),
+                selected_rule_ids: vec![String::from("archive-digest")],
+                created_at_epoch_s: 100,
+                candidates: vec![NewAutomationRunCandidate {
+                    rule_id: String::from("archive-digest"),
+                    thread_id: String::from("thread-1"),
+                    message_id: String::from("message-1"),
+                    internal_date_epoch_ms: 1_700_000_000_000,
+                    subject: String::from("Daily digest"),
+                    from_header: String::from("Digest <digest@example.com>"),
+                    from_address: Some(String::from("digest@example.com")),
+                    snippet: String::from("Digest snippet"),
+                    label_names: vec![String::from("INBOX")],
+                    attachment_count: 0,
+                    has_list_unsubscribe: true,
+                    list_id_header: Some(String::from("<digest.example.com>")),
+                    list_unsubscribe_header: Some(String::from("<mailto:unsubscribe@example.com>")),
+                    list_unsubscribe_post_header: None,
+                    precedence_header: Some(String::from("bulk")),
+                    auto_submitted_header: None,
+                    action: AutomationActionSnapshot {
+                        kind: AutomationActionKind::Archive,
+                        add_label_ids: Vec::new(),
+                        add_label_names: Vec::new(),
+                        remove_label_ids: vec![String::from("INBOX")],
+                        remove_label_names: vec![String::from("INBOX")],
+                    },
+                    reason: AutomationMatchReason {
+                        from_address: Some(String::from("digest@example.com")),
+                        subject_terms: vec![String::from("digest")],
+                        label_names: vec![String::from("INBOX")],
+                        older_than_days: Some(7),
+                        has_attachments: Some(false),
+                        has_list_unsubscribe: Some(true),
+                        list_id_terms: vec![String::from("digest")],
+                        precedence_values: vec![String::from("bulk")],
+                    },
+                }],
+            },
+        )
+        .unwrap();
+
+        let report = describe_error(
+            &anyhow!(GmailClientError::MissingCredentials),
+            "automation.apply",
+        );
+        let expected_json = to_value(json_failure_value(&report)).unwrap();
+
+        let json_output = Command::new(&cargo)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                &manifest_path,
+                "--",
+                "automation",
+                "apply",
+                &detail.run.run_id.to_string(),
+                "--execute",
+                "--json",
+            ])
+            .current_dir(repo_root.path())
+            .output()
+            .unwrap();
+        assert_eq!(json_output.status.code(), Some(3));
+        assert!(json_output.stderr.is_empty());
+
+        let json_stdout = String::from_utf8(json_output.stdout).unwrap();
+        let json_value: serde_json::Value = serde_json::from_str(&json_stdout).unwrap();
+        assert_eq!(json_value, expected_json);
+
+        let human_output = Command::new(&cargo)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                &manifest_path,
+                "--",
+                "automation",
+                "apply",
+                &detail.run.run_id.to_string(),
+                "--execute",
+            ])
+            .current_dir(repo_root.path())
+            .output()
+            .unwrap();
+        assert_eq!(human_output.status.code(), Some(3));
+        assert!(human_output.stdout.is_empty());
+        let human_stderr = String::from_utf8(human_output.stderr).unwrap();
+        let human_stderr_lower = human_stderr.to_lowercase();
+        assert!(human_stderr_lower.contains("mailroom is not authenticated"));
+        assert!(human_stderr_lower.contains("mailroom auth login"));
+    }
+
     #[tokio::test]
     async fn attachment_fetch_cli_contract_maps_zero_row_vault_update_to_not_found() {
         use std::process::Command;
@@ -787,6 +959,7 @@ mod tests {
                 bcc_header: String::new(),
                 reply_to_header: String::new(),
                 size_estimate: 256,
+                automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
                 attachments: vec![GmailAttachmentUpsertInput {

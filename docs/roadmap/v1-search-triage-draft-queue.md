@@ -9,6 +9,7 @@ Deliver the first complete operational slice:
 - triage-oriented workflow state
 - draft/reply queue state
 - reviewed cleanup actions
+- review-first automation rules and bulk actions
 - CLI flows first, TUI surfaces second
 
 ## Included
@@ -23,6 +24,7 @@ Deliver the first complete operational slice:
 - thread-scoped triage and status tracking
 - draft queue records, remote Gmail draft sync, and operator notes
 - reviewed archive, label, and trash actions
+- review-first automation rules with persisted snapshots
 - plugin-assisted operator documentation
 
 ## Current status
@@ -56,14 +58,21 @@ The attachment catalog/export foundation is now in place too:
 - deliberate export into `.mailroom/exports/` or an explicit destination
 - append-only attachment export event tracking
 
-The next implementation slice should improve operator review ergonomics and
-higher-level cleanup assistance, not re-open auth, account, config, store,
-sync, workflow, or attachment ownership.
+The review-first automation slice is now in place too:
+
+- typed TOML rules under `.mailroom/automation.toml`
+- persisted automation run snapshots and append-only run events
+- thread-first archive, label, and trash bulk actions gated behind `--execute`
+- unsubscribe assistance through list headers in candidate inspection output
+
+The next implementation slice should improve operator review ergonomics and the
+future TUI surface, not re-open auth, account, config, store, sync, workflow,
+attachment, or automation ownership.
 
 ## Deferred
 
-- unsubscribe automation
-- bulk cleanup heuristics
+- direct one-click unsubscribe execution
+- autonomous background automation
 - attachment content indexing or OCR
 - advanced semantic/vector search
 - external search engines
@@ -74,4 +83,5 @@ sync, workflow, or attachment ownership.
 
 An operator can set up the workspace, sync mailbox metadata locally, search it
 quickly, classify thread work for follow-up, stage and send replies in a durable
-local system, and execute reviewed cleanup actions intentionally.
+local system, catalog/export attachments intentionally, and execute reviewed
+manual or automation-driven cleanup actions intentionally.

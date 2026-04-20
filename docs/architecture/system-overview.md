@@ -8,7 +8,7 @@ Build a local-first mailbox operations system that can:
 - support triage decisions with durable local state
 - stage and manage drafts/replies
 - locate and export attachments intentionally
-- support later cleanup automation without hiding destructive actions
+- support review-first cleanup automation without hiding destructive actions
 
 ## Core boundaries
 
@@ -29,6 +29,7 @@ The native Rust core owns:
 - thread-scoped workflow state and append-only workflow events
 - remote Gmail draft projection and send orchestration
 - reviewed cleanup actions for archive, label, and trash
+- typed automation rule parsing, snapshot persistence, and thread-first bulk apply
 - structured CLI output
 
 ### TUI layer
@@ -77,6 +78,7 @@ The current native substrate is intentionally narrow but now usable:
 - thread-scoped workflow state with triage buckets, snooze, and stage promotion
 - local draft revisions with file attachments and remote Gmail draft synchronization
 - explicit draft send and reviewed cleanup actions that resync the mailbox afterward
+- typed TOML automation rules and persisted review snapshots for bulk cleanup
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
 This substrate now covers the first complete operator loop for search, thread
@@ -96,10 +98,14 @@ Detailed attachment ownership is defined in
 `docs/decisions/0005-attachment-canonical-model.md` and
 `docs/operations/attachment-catalog-and-export.md`.
 
+Detailed automation ownership is defined in
+`docs/decisions/0006-review-first-automation-rules.md` and
+`docs/operations/automation-rules-and-bulk-actions.md`.
+
 ## Non-goals for v1
 
 - full mailbox mirroring by default
 - full body and MIME indexing in the first native search slice
-- immediate unsubscribe automation as the primary feature
+- autonomous background rule execution or one-click unsubscribe as the primary feature
 - external search infrastructure
 - shared multi-user collaboration

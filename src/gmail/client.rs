@@ -74,6 +74,15 @@ pub(crate) struct GmailLabel {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct GmailAutomationHeaders {
+    pub list_id_header: Option<String>,
+    pub list_unsubscribe_header: Option<String>,
+    pub list_unsubscribe_post_header: Option<String>,
+    pub precedence_header: Option<String>,
+    pub auto_submitted_header: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct GmailMessageMetadata {
     pub id: String,
     pub thread_id: String,
@@ -89,6 +98,7 @@ pub(crate) struct GmailMessageMetadata {
     pub cc_header: String,
     pub bcc_header: String,
     pub reply_to_header: String,
+    pub automation_headers: GmailAutomationHeaders,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -1281,6 +1291,13 @@ fn message_metadata_from_payload(
         cc_header: header_value(&payload.headers, "Cc").unwrap_or_default(),
         bcc_header: header_value(&payload.headers, "Bcc").unwrap_or_default(),
         reply_to_header: header_value(&payload.headers, "Reply-To").unwrap_or_default(),
+        automation_headers: GmailAutomationHeaders {
+            list_id_header: header_value(&payload.headers, "List-Id"),
+            list_unsubscribe_header: header_value(&payload.headers, "List-Unsubscribe"),
+            list_unsubscribe_post_header: header_value(&payload.headers, "List-Unsubscribe-Post"),
+            precedence_header: header_value(&payload.headers, "Precedence"),
+            auto_submitted_header: header_value(&payload.headers, "Auto-Submitted"),
+        },
     })
 }
 
