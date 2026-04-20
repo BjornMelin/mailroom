@@ -71,6 +71,24 @@ pub(crate) fn inspect_workflows(
     }))
 }
 
+pub(crate) fn lookup_workflow_account_id(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    thread_id: Option<&str>,
+) -> Result<Option<String>, WorkflowStoreReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| WorkflowStoreReadError::open_database(database_path, source))?;
+    match lookup_workflow_account_id_with_connection(&connection, thread_id) {
+        Ok(account_id) => Ok(account_id),
+        Err(error) if is_missing_workflow_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(super) fn load_workflow(
     connection: &Connection,
     account_id: &str,
@@ -114,6 +132,31 @@ pub(super) fn load_workflow(
         Err(error) if is_missing_workflow_table_error(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn lookup_workflow_account_id_with_connection(
+    connection: &Connection,
+    thread_id: Option<&str>,
+) -> Result<Option<String>, rusqlite::Error> {
+    let query = if thread_id.is_some() {
+        "SELECT DISTINCT account_id FROM thread_workflows WHERE thread_id = ?1 ORDER BY account_id LIMIT 2"
+    } else {
+        "SELECT DISTINCT account_id FROM thread_workflows ORDER BY account_id LIMIT 2"
+    };
+    let mut statement = connection.prepare(query)?;
+    let account_ids = if let Some(thread_id) = thread_id {
+        statement
+            .query_map([thread_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(match account_ids.as_slice() {
+        [account_id] => Some(account_id.clone()),
+        _ => None,
+    })
 }
 
 fn list_workflows_with_connection(

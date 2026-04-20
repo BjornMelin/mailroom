@@ -408,7 +408,7 @@ pub async fn list_workflows(
     triage_bucket: Option<store::workflows::TriageBucket>,
 ) -> WorkflowResult<WorkflowListReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report)?;
+    let account_id = resolve_workflow_account_id(config_report, None).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let workflows = join_blocking(
@@ -439,7 +439,7 @@ pub async fn show_workflow(
     thread_id: String,
 ) -> WorkflowResult<WorkflowShowReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report)?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let thread_id_for_query = thread_id.clone();
@@ -469,7 +469,7 @@ pub async fn set_triage(
     note: Option<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report)?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -501,7 +501,7 @@ pub async fn promote_workflow(
     to_stage: store::workflows::WorkflowStage,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report)?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -580,7 +580,7 @@ pub async fn snooze_workflow(
     until: Option<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report)?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let snoozed_until_epoch_s = until.as_deref().map(parse_day_to_epoch_s).transpose()?;
     let database_path = config_report.config.store.database_path.clone();
@@ -649,7 +649,7 @@ pub async fn draft_start(
     )
     .await?;
     let raw_message =
-        build_raw_message(&account.email_address, latest_message, &draft_revision, &[])?;
+        build_raw_message(&account.email_address, latest_message, &draft_revision, &[]).await?;
     let remote_draft = upsert_remote_draft(
         &gmail_client,
         workflow.gmail_draft_id.as_deref(),
@@ -691,7 +691,11 @@ pub async fn draft_attach_add(
     thread_id: String,
     path: PathBuf,
 ) -> WorkflowResult<WorkflowActionReport> {
-    let attachment = attachment_input_from_path(&path)?;
+    let attachment = join_blocking(
+        spawn_blocking(move || attachment_input_from_path(&path)),
+        "draft.attach.input",
+    )
+    .await?;
     update_draft_revision(
         config_report,
         thread_id,
@@ -764,12 +768,23 @@ pub async fn draft_send(
     let gmail_client = crate::gmail_client_for_config(config_report)?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
     let source_message = thread_message_by_id(&thread, &draft.revision.source_message_id)?;
+    let attachments = draft
+        .attachments
+        .iter()
+        .map(|attachment| store::workflows::AttachmentInput {
+            path: attachment.path.clone(),
+            file_name: attachment.file_name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            size_bytes: attachment.size_bytes,
+        })
+        .collect::<Vec<_>>();
     let raw_message = build_raw_message(
         &account.email_address,
         source_message,
         &draft.revision,
-        &draft.attachments,
-    )?;
+        &attachments,
+    )
+    .await?;
     let remote_draft =
         update_remote_draft_for_send(&gmail_client, &gmail_draft_id, &raw_message, &thread_id)
             .await?;
@@ -861,7 +876,7 @@ async fn cleanup_impl(
     remove_label_names: Vec<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report)?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let detail = workflow_detail(config_report, &account_id, &thread_id).await?;
     let cleanup_preview = CleanupPreview {
         action,
@@ -1068,17 +1083,13 @@ where
         "draft.update.persist",
     )
     .await?;
-    let attachments = draft
-        .attachments
-        .iter()
-        .map(attachment_detail)
-        .collect::<WorkflowResult<Vec<_>>>()?;
     let raw_message = build_raw_message(
         &account.email_address,
         source_message,
         &draft_revision,
-        &attachments,
-    )?;
+        &draft.attachments,
+    )
+    .await?;
     let remote_draft = upsert_remote_draft(
         &gmail_client,
         detail.workflow.gmail_draft_id.as_deref(),
@@ -1250,12 +1261,42 @@ fn normalize_reply_subject(subject: &str) -> String {
     }
 }
 
-fn build_raw_message(
+async fn build_raw_message(
     account_email: &str,
     source_message: &GmailThreadMessage,
     draft_revision: &store::workflows::DraftRevisionRecord,
-    attachments: &[store::workflows::DraftAttachmentRecord],
+    attachments: &[store::workflows::AttachmentInput],
 ) -> WorkflowResult<String> {
+    let message_id = source_message
+        .message_id_header
+        .as_ref()
+        .and_then(|header| normalize_message_id(header));
+    let references_header = source_message.references_header.clone();
+    let attachments: Vec<(store::workflows::AttachmentInput, Vec<u8>)> = if attachments.is_empty() {
+        Vec::new()
+    } else {
+        let attachments = attachments.to_vec();
+        // Keep filesystem reads off the async runtime thread.
+        join_blocking(
+            spawn_blocking(move || {
+                attachments
+                    .into_iter()
+                    .map(|attachment| {
+                        let bytes = fs::read(&attachment.path).map_err(|source| {
+                            WorkflowServiceError::AttachmentRead {
+                                path: attachment.path.clone(),
+                                source,
+                            }
+                        })?;
+                        Ok::<_, WorkflowServiceError>((attachment, bytes))
+                    })
+                    .collect::<WorkflowResult<Vec<_>>>()
+            }),
+            "workflow.attachments.read",
+        )
+        .await?
+    };
+
     let mut builder = MessageBuilder::new()
         .from(account_email.to_owned())
         .to(draft_revision.to_addresses.clone())
@@ -1268,29 +1309,17 @@ fn build_raw_message(
     if !draft_revision.bcc_addresses.is_empty() {
         builder = builder.bcc(draft_revision.bcc_addresses.clone());
     }
-    if let Some(message_id) = source_message
-        .message_id_header
-        .as_ref()
-        .and_then(|header| normalize_message_id(header))
-    {
-        builder = builder.in_reply_to(message_id.clone());
-        let references = build_references(&source_message.references_header, &message_id);
+    if let Some(message_id) = message_id {
+        let references = build_references(&references_header, &message_id);
+        builder = builder.in_reply_to(message_id);
         if !references.is_empty() {
             builder = builder.references(references);
         }
     }
 
     for attachment in attachments {
-        let bytes =
-            fs::read(&attachment.path).map_err(|source| WorkflowServiceError::AttachmentRead {
-                path: attachment.path.clone(),
-                source,
-            })?;
-        builder = builder.attachment(
-            attachment.mime_type.clone(),
-            attachment.file_name.clone(),
-            bytes,
-        );
+        let (attachment, bytes) = attachment;
+        builder = builder.attachment(attachment.mime_type, attachment.file_name, bytes);
     }
 
     let mut output = Vec::new();
@@ -1479,20 +1508,6 @@ fn best_effort_sync_report(
     }
 }
 
-fn attachment_detail(
-    attachment: &store::workflows::AttachmentInput,
-) -> WorkflowResult<store::workflows::DraftAttachmentRecord> {
-    Ok(store::workflows::DraftAttachmentRecord {
-        attachment_id: 0,
-        draft_revision_id: 0,
-        path: attachment.path.clone(),
-        file_name: attachment.file_name.clone(),
-        mime_type: attachment.mime_type.clone(),
-        size_bytes: attachment.size_bytes,
-        created_at_epoch_s: 0,
-    })
-}
-
 fn parse_day_to_epoch_s(value: &str) -> WorkflowResult<i64> {
     let epoch_ms = parse_start_of_day_epoch_ms(value)?;
     Ok(epoch_ms / 1000)
@@ -1570,22 +1585,47 @@ fn is_leap_year(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn resolve_workflow_account_id(config_report: &ConfigReport) -> WorkflowResult<String> {
-    if let Some(active_account) = store::accounts::get_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
+async fn resolve_workflow_account_id(
+    config_report: &ConfigReport,
+    thread_id: Option<&str>,
+) -> WorkflowResult<String> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let thread_id = thread_id.map(str::to_owned);
+    join_blocking(
+        spawn_blocking(move || {
+            resolve_workflow_account_id_blocking(
+                &database_path,
+                busy_timeout_ms,
+                thread_id.as_deref(),
+            )
+        }),
+        "workflow.account.lookup",
     )
-    .map_err(|source| WorkflowServiceError::AccountState { source })?
+    .await
+}
+
+fn resolve_workflow_account_id_blocking(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    thread_id: Option<&str>,
+) -> WorkflowResult<String> {
+    if let Some(active_account) = store::accounts::get_active(database_path, busy_timeout_ms)
+        .map_err(|source| WorkflowServiceError::AccountState { source })?
     {
         return Ok(active_account.account_id);
     }
 
-    if let Some(mailbox) = store::mailbox::inspect_mailbox(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-    )? && let Some(sync_state) = mailbox.sync_state
+    if let Some(mailbox) = store::mailbox::inspect_mailbox(database_path, busy_timeout_ms)?
+        && let Some(sync_state) = mailbox.sync_state
     {
         return Ok(sync_state.account_id);
+    }
+
+    if let Some(account_id) =
+        store::workflows::lookup_workflow_account_id(database_path, busy_timeout_ms, thread_id)?
+    {
+        return Ok(account_id);
     }
 
     Err(WorkflowServiceError::NoActiveAccount)
@@ -1701,6 +1741,7 @@ mod tests {
         best_effort_sync_report, build_reply_recipients, cleanup_archive, cleanup_label,
         draft_body_set, draft_send, draft_start, list_workflows, mark_sent_after_remote_send,
         persist_remote_draft_state, promote_workflow, remove_attachment_by_path_or_name,
+        show_workflow,
     };
     use crate::auth;
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
@@ -2549,6 +2590,59 @@ mod tests {
 
         let report = list_workflows(&config_report, None, None).await.unwrap();
 
+        assert_eq!(report.workflows.len(), 1);
+        assert_eq!(report.workflows[0].thread_id, "thread-1");
+    }
+
+    #[tokio::test]
+    async fn workflow_commands_use_persisted_workflow_account_after_logout_without_sync_state() {
+        let mock_server = MockServer::start().await;
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, &mock_server);
+        seed_credentials(&config_report);
+        init(&config_report).unwrap();
+        let account = accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("100"),
+                messages_total: 1,
+                threads_total: 1,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 100,
+            },
+        )
+        .unwrap();
+        set_triage_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &crate::store::workflows::SetTriageStateInput {
+                account_id: account.account_id.clone(),
+                thread_id: String::from("thread-1"),
+                triage_bucket: TriageBucket::NeedsReplySoon,
+                note: None,
+                snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                    message_id: String::from("m-1"),
+                    internal_date_epoch_ms: 100,
+                    subject: String::from("Project"),
+                    from_header: String::from("Alice <alice@example.com>"),
+                    snippet: String::from("Project status"),
+                },
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+
+        let logout_report = auth::logout(&config_report).unwrap();
+        assert_eq!(logout_report.deactivated_accounts, 1);
+
+        let show = show_workflow(&config_report, String::from("thread-1"))
+            .await
+            .unwrap();
+        assert_eq!(show.detail.workflow.thread_id, "thread-1");
+
+        let report = list_workflows(&config_report, None, None).await.unwrap();
         assert_eq!(report.workflows.len(), 1);
         assert_eq!(report.workflows[0].thread_id, "thread-1");
     }

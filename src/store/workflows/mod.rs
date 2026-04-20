@@ -4,7 +4,9 @@ mod tests;
 mod types;
 mod write;
 
-pub(crate) use read::{get_workflow_detail, inspect_workflows, list_workflows};
+pub(crate) use read::{
+    get_workflow_detail, inspect_workflows, list_workflows, lookup_workflow_account_id,
+};
 pub(crate) use types::{
     ApplyCleanupInput, AttachmentInput, CleanupAction, DraftAttachmentRecord, DraftRevisionDetail,
     DraftRevisionRecord, MarkSentInput, PromoteWorkflowInput, RemoteDraftStateInput, ReplyMode,
