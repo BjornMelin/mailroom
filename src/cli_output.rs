@@ -150,7 +150,8 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | AttachmentServiceError::WriteFile { .. }
             | AttachmentServiceError::ReadFile { .. }
             | AttachmentServiceError::CopyFile { .. }
-            | AttachmentServiceError::StoreWrite { .. } => {
+            | AttachmentServiceError::StoreWrite { .. }
+            | AttachmentServiceError::StoreRead { .. } => {
                 (ErrorCode::StorageFailure, "attachment.storage")
             }
         };
@@ -487,6 +488,36 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("storage_failure"));
         assert_eq!(value["error"]["kind"], json!("attachment.storage"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn attachment_store_read_errors_map_to_storage_failure_code() {
+        let error = anyhow!(crate::attachments::AttachmentServiceError::StoreRead {
+            source: crate::store::mailbox::MailboxReadError::Query(rusqlite::Error::InvalidQuery),
+        });
+
+        let report = describe_error(&error, "attachment.list");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("attachment.storage"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn attachment_not_found_maps_to_not_found_exit_code() {
+        let error = anyhow!(
+            crate::attachments::AttachmentServiceError::AttachmentNotFound {
+                attachment_key: String::from("m-1:1.2"),
+            }
+        );
+
+        let report = describe_error(&error, "attachment.fetch");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("not_found"));
+        assert_eq!(value["error"]["kind"], json!("attachment.not_found"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(4));
     }
 
     #[test]

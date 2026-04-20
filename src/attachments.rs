@@ -73,6 +73,11 @@ pub enum AttachmentServiceError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("failed to read attachment state from local mailbox store: {source}")]
+    StoreRead {
+        #[source]
+        source: store::mailbox::MailboxReadError,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,7 +239,8 @@ pub async fn list(
         store::mailbox::list_attachments(&database_path, busy_timeout_ms, &query)
     })
     .await
-    .map_err(|source| AttachmentServiceError::BlockingTask { source })??;
+    .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+    .map_err(|source| AttachmentServiceError::StoreRead { source })?;
 
     Ok(AttachmentListReport {
         account_id,
@@ -435,7 +441,8 @@ async fn load_attachment_detail(
         )
     })
     .await
-    .map_err(|source| AttachmentServiceError::BlockingTask { source })??;
+    .map_err(|source| AttachmentServiceError::BlockingTask { source })?
+    .map_err(|source| AttachmentServiceError::StoreRead { source })?;
 
     detail.ok_or_else(|| {
         AttachmentServiceError::AttachmentNotFound {
@@ -688,7 +695,8 @@ fn harden_vault_file_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_export_path, existing_vault_report, export_filename, resolve_vault_relative_path,
+        default_export_path, existing_vault_report, export_filename, map_vault_state_write_error,
+        resolve_vault_relative_path,
     };
     use crate::store::mailbox::AttachmentDetailRecord;
     use crate::workspace::WorkspacePaths;
@@ -779,6 +787,21 @@ mod tests {
 
         assert!(report.is_some());
         assert!(!report.unwrap().downloaded);
+    }
+
+    #[test]
+    fn map_vault_state_write_error_maps_missing_rows_to_attachment_not_found() {
+        let mapped = map_vault_state_write_error(
+            crate::store::mailbox::MailboxWriteError::AttachmentNotFound {
+                account_id: String::from("gmail:operator@example.com"),
+                attachment_key: String::from("m-1:1.2"),
+            },
+        );
+        assert!(matches!(
+            mapped,
+            super::AttachmentServiceError::AttachmentNotFound { attachment_key }
+            if attachment_key == "m-1:1.2"
+        ));
     }
 
     fn detail_with_vault(

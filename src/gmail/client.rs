@@ -1513,9 +1513,9 @@ fn build_gmail_http_client(config: &GmailConfig) -> GmailResult<reqwest::Client>
 #[cfg(test)]
 mod tests {
     use super::{
-        GmailClient, GmailProfile, MESSAGE_CATALOG_FIELDS, MESSAGE_CATALOG_FULL_FIELDS,
-        duration_to_retry_delay_ms, extract_email_address, request_supports_automatic_retry,
-        retry_after_delay,
+        GmailClient, GmailMessagePayload, GmailProfile, MESSAGE_CATALOG_FIELDS,
+        MESSAGE_CATALOG_FULL_FIELDS, duration_to_retry_delay_ms, extract_email_address,
+        payload_projection_truncated, request_supports_automatic_retry, retry_after_delay,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::{GmailConfig, WorkspaceConfig};
@@ -2009,6 +2009,26 @@ mod tests {
             catalog.attachments[0].gmail_attachment_id.as_deref(),
             Some("att-deep")
         );
+    }
+
+    #[test]
+    fn payload_projection_truncated_detects_nested_depth_markers() {
+        let payload: GmailMessagePayload = serde_json::from_value(json!({
+            "partId": "0",
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "partId": "1",
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        { "partId": "1.1" }
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert!(payload_projection_truncated(&payload));
     }
 
     #[tokio::test]
