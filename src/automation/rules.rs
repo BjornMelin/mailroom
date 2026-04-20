@@ -6,6 +6,7 @@ use super::model::{
 use crate::config::ConfigReport;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use tokio::task::spawn_blocking;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAutomationRules {
@@ -14,10 +15,19 @@ pub(crate) struct ResolvedAutomationRules {
     pub(crate) rules: Vec<AutomationRule>,
 }
 
-pub(crate) fn validate_rule_file(
+pub(crate) async fn validate_rule_file(
     config_report: &ConfigReport,
 ) -> Result<AutomationRulesValidateReport, AutomationServiceError> {
-    let (path, contents) = load_rule_file(config_report)?;
+    let config_report = config_report.clone();
+    spawn_blocking(move || validate_rule_file_blocking(&config_report))
+        .await
+        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+}
+
+pub(crate) fn validate_rule_file_blocking(
+    config_report: &ConfigReport,
+) -> Result<AutomationRulesValidateReport, AutomationServiceError> {
+    let (path, contents) = load_rule_file_blocking(config_report)?;
     let rule_file_hash = blake3::hash(contents.as_bytes()).to_hex().to_string();
     let rule_set = parse_rule_file(&path, &contents)?;
 
@@ -40,11 +50,22 @@ pub(crate) fn validate_rule_file(
     })
 }
 
-pub(crate) fn resolve_rule_selection(
+pub(crate) async fn resolve_rule_selection(
     config_report: &ConfigReport,
     selected_rule_ids: &[String],
 ) -> Result<ResolvedAutomationRules, AutomationServiceError> {
-    let (path, contents) = load_rule_file(config_report)?;
+    let config_report = config_report.clone();
+    let selected_rule_ids = selected_rule_ids.to_owned();
+    spawn_blocking(move || resolve_rule_selection_blocking(&config_report, &selected_rule_ids))
+        .await
+        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+}
+
+pub(crate) fn resolve_rule_selection_blocking(
+    config_report: &ConfigReport,
+    selected_rule_ids: &[String],
+) -> Result<ResolvedAutomationRules, AutomationServiceError> {
+    let (path, contents) = load_rule_file_blocking(config_report)?;
     let rule_file_hash = blake3::hash(contents.as_bytes()).to_hex().to_string();
     let rule_set = parse_rule_file(&path, &contents)?;
     let requested = normalize_string_list(selected_rule_ids);
@@ -107,12 +128,19 @@ pub(crate) fn active_rules_path(config_report: &ConfigReport) -> PathBuf {
         .join("automation.toml")
 }
 
-fn load_rule_file(
+fn load_rule_file_blocking(
     config_report: &ConfigReport,
 ) -> Result<(PathBuf, String), AutomationServiceError> {
     let path = active_rules_path(config_report);
-    if !path.exists() {
-        return Err(AutomationServiceError::RuleFileMissing { path });
+    match path.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return Err(AutomationServiceError::RuleFileMissing { path }),
+        Err(source) => {
+            return Err(AutomationServiceError::RuleFileRead {
+                path: path.clone(),
+                source,
+            });
+        }
     }
     let contents =
         std::fs::read_to_string(&path).map_err(|source| AutomationServiceError::RuleFileRead {
@@ -251,7 +279,7 @@ fn normalize_string_list(values: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{active_rules_path, resolve_rule_selection, validate_rule_file};
+    use super::{active_rules_path, resolve_rule_selection_blocking, validate_rule_file_blocking};
     use crate::config::resolve;
     use crate::workspace::WorkspacePaths;
     use std::fs;
@@ -286,7 +314,7 @@ kind = "trash"
         )
         .unwrap();
 
-        let error = validate_rule_file(&config_report).unwrap_err();
+        let error = validate_rule_file_blocking(&config_report).unwrap_err();
         assert!(error.to_string().contains("duplicated"));
 
         fs::remove_dir_all(repo_root).unwrap();
@@ -314,7 +342,7 @@ remove = ["INBOX"]
         )
         .unwrap();
 
-        let error = validate_rule_file(&config_report).unwrap_err();
+        let error = validate_rule_file_blocking(&config_report).unwrap_err();
         assert_eq!(
             error.to_string(),
             "automation rule `label-overlap` label action cannot add and remove the same label: INBOX"
@@ -345,7 +373,7 @@ remove = ["INBOX"]
         )
         .unwrap();
 
-        let error = validate_rule_file(&config_report).unwrap_err();
+        let error = validate_rule_file_blocking(&config_report).unwrap_err();
         assert_eq!(
             error.to_string(),
             "automation rule `label-overlap` label action cannot add and remove the same label: Inbox"
@@ -384,7 +412,8 @@ kind = "trash"
         .unwrap();
 
         let resolved =
-            resolve_rule_selection(&config_report, &[String::from("archive-digest")]).unwrap();
+            resolve_rule_selection_blocking(&config_report, &[String::from("archive-digest")])
+                .unwrap();
         assert_eq!(resolved.rules.len(), 1);
         assert_eq!(resolved.rules[0].id, "archive-digest");
 
