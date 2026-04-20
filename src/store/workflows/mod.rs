@@ -15,12 +15,12 @@ pub(crate) use types::{
     WorkflowListFilter, WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage,
     WorkflowStoreReadError, WorkflowStoreWriteError,
 };
+#[cfg(test)]
+pub(crate) use write::set_remote_draft_state;
 pub(crate) use write::{
     apply_cleanup, mark_sent, retire_draft_state, set_remote_draft_state_with_expected_version,
     set_triage_state, snooze_workflow, upsert_draft_revision, upsert_stage,
 };
-#[cfg(test)]
-pub(crate) use write::set_remote_draft_state;
 
 fn is_missing_workflow_table_error(error: &rusqlite::Error) -> bool {
     matches!(

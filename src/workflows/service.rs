@@ -1136,7 +1136,7 @@ where
     .await?;
     let remote_draft = upsert_remote_draft(
         &gmail_client,
-        detail.workflow.gmail_draft_id.as_deref(),
+        workflow.gmail_draft_id.as_deref(),
         &raw_message,
         &thread_id,
     )

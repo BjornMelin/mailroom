@@ -491,6 +491,23 @@ fn upsert_draft_revision_persists_current_draft_and_attachments() {
     assert_eq!(workflow.gmail_draft_thread_id, None);
     assert_eq!(workflow.last_remote_sync_epoch_s, None);
 
+    let ready_error = upsert_stage(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &PromoteWorkflowInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            to_stage: WorkflowStage::ReadyToSend,
+            snapshot: snapshot("message-2", "Re: Project status"),
+            updated_at_epoch_s: 201,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        ready_error.to_string(),
+        "ready_to_send requires a current draft revision and synced Gmail draft"
+    );
+
     let detail = get_workflow_detail(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
@@ -500,6 +517,10 @@ fn upsert_draft_revision_persists_current_draft_and_attachments() {
     .unwrap()
     .unwrap();
     let draft = detail.current_draft.unwrap();
+    assert_ne!(detail.workflow.current_stage, WorkflowStage::ReadyToSend);
+    assert_eq!(detail.workflow.gmail_draft_message_id, None);
+    assert_eq!(detail.workflow.gmail_draft_thread_id, None);
+    assert_eq!(detail.workflow.last_remote_sync_epoch_s, None);
 
     assert_eq!(draft.revision.reply_mode, ReplyMode::ReplyAll);
     assert_eq!(draft.revision.subject, "Re: Project status");
