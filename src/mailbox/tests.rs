@@ -191,7 +191,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(4));
+    assert_eq!(store_report.schema_version, Some(5));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 

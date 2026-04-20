@@ -210,6 +210,7 @@ mod tests {
             last_remote_sync_epoch_s: None,
             last_sent_message_id: None,
             last_cleanup_action: None,
+            workflow_version: 1,
             created_at_epoch_s: 1,
             updated_at_epoch_s: 123,
         }

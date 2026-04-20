@@ -118,7 +118,8 @@ pub(super) fn load_workflow(
                  last_sent_message_id,
                  last_cleanup_action,
                  created_at_epoch_s,
-                 updated_at_epoch_s
+                 updated_at_epoch_s,
+                 workflow_version
              FROM thread_workflows
              WHERE account_id = ?1
                AND thread_id = ?2",
@@ -186,7 +187,8 @@ fn list_workflows_with_connection(
              last_sent_message_id,
              last_cleanup_action,
              created_at_epoch_s,
-             updated_at_epoch_s
+             updated_at_epoch_s,
+             workflow_version
          FROM thread_workflows
          WHERE account_id = ?",
     );
@@ -383,6 +385,7 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRecord> 
         last_cleanup_action: decode_optional_cleanup_action(row.get(19)?, 19)?,
         created_at_epoch_s: row.get(20)?,
         updated_at_epoch_s: row.get(21)?,
+        workflow_version: row.get(22)?,
     })
 }
 

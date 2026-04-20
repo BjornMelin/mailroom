@@ -247,7 +247,7 @@ fn persist_workflow_rejects_stale_updates() {
     .unwrap()
     .unwrap()
     .workflow;
-    let expected_updated_at_epoch_s = stale_workflow.updated_at_epoch_s;
+    let expected_workflow_version = stale_workflow.workflow_version;
 
     let mut connection = crate::store::connection::open_or_create(
         &config_report.config.store.database_path,
@@ -257,7 +257,7 @@ fn persist_workflow_rejects_stale_updates() {
     connection
         .execute(
             "UPDATE thread_workflows
-             SET updated_at_epoch_s = updated_at_epoch_s + 1
+             SET workflow_version = workflow_version + 1
              WHERE workflow_id = ?1",
             rusqlite::params![stale_workflow.workflow_id],
         )
@@ -268,10 +268,9 @@ fn persist_workflow_rejects_stale_updates() {
         &transaction,
         super::WorkflowRecord {
             note: String::from("conflicting note"),
-            updated_at_epoch_s: expected_updated_at_epoch_s + 10,
             ..stale_workflow
         },
-        Some(expected_updated_at_epoch_s),
+        Some(expected_workflow_version),
     )
     .unwrap_err();
 

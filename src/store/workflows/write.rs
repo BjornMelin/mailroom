@@ -30,9 +30,7 @@ pub(crate) fn set_triage_state(
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
     let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
-    let expected_updated_at_epoch_s = existing
-        .as_ref()
-        .map(|workflow| workflow.updated_at_epoch_s);
+    let expected_workflow_version = existing.as_ref().map(|workflow| workflow.workflow_version);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -49,7 +47,7 @@ pub(crate) fn set_triage_state(
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
     apply_snapshot(&mut workflow, &input.snapshot);
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     insert_event(
         &transaction,
         &workflow,
@@ -80,9 +78,7 @@ pub(crate) fn upsert_stage(
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
     let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
-    let expected_updated_at_epoch_s = existing
-        .as_ref()
-        .map(|workflow| workflow.updated_at_epoch_s);
+    let expected_workflow_version = existing.as_ref().map(|workflow| workflow.workflow_version);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -103,7 +99,7 @@ pub(crate) fn upsert_stage(
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
     apply_snapshot(&mut workflow, &input.snapshot);
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     insert_event(
         &transaction,
         &workflow,
@@ -134,9 +130,7 @@ pub(crate) fn snooze_workflow(
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
     let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
-    let expected_updated_at_epoch_s = existing
-        .as_ref()
-        .map(|workflow| workflow.updated_at_epoch_s);
+    let expected_workflow_version = existing.as_ref().map(|workflow| workflow.workflow_version);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -152,7 +146,7 @@ pub(crate) fn snooze_workflow(
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
     apply_snapshot(&mut workflow, &input.snapshot);
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     insert_event(
         &transaction,
         &workflow,
@@ -183,9 +177,7 @@ pub(crate) fn upsert_draft_revision(
     let transaction = connection.transaction()?;
     let existing = load_workflow(&transaction, &input.account_id, &input.thread_id)?;
     let from_stage = existing.as_ref().map(|workflow| workflow.current_stage);
-    let expected_updated_at_epoch_s = existing
-        .as_ref()
-        .map(|workflow| workflow.updated_at_epoch_s);
+    let expected_workflow_version = existing.as_ref().map(|workflow| workflow.workflow_version);
     let mut workflow = existing.unwrap_or_else(|| {
         new_workflow(
             &input.account_id,
@@ -199,7 +191,7 @@ pub(crate) fn upsert_draft_revision(
     workflow.current_stage = WorkflowStage::Drafting;
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
     apply_snapshot(&mut workflow, &input.snapshot);
-    let mut workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let mut workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
 
     let draft_revision = insert_draft_revision(&transaction, workflow.workflow_id, input)?;
     workflow.current_draft_revision_id = Some(draft_revision.draft_revision_id);
@@ -207,8 +199,8 @@ pub(crate) fn upsert_draft_revision(
     workflow.gmail_draft_thread_id = None;
     workflow.last_remote_sync_epoch_s = None;
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
-    let expected_updated_at_epoch_s = Some(workflow.updated_at_epoch_s);
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let expected_workflow_version = Some(workflow.workflow_version);
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
 
     let payload_json = json!({
         "draft_revision_id": draft_revision.draft_revision_id,
@@ -245,7 +237,7 @@ pub(crate) fn set_remote_draft_state(
         .ok_or_else(|| WorkflowStoreWriteError::MissingWorkflow {
             thread_id: input.thread_id.clone(),
         })?;
-    let expected_updated_at_epoch_s = Some(workflow.updated_at_epoch_s);
+    let expected_workflow_version = Some(workflow.workflow_version);
 
     workflow.gmail_draft_id = input.gmail_draft_id.clone();
     workflow.gmail_draft_message_id = input.gmail_draft_message_id.clone();
@@ -253,7 +245,7 @@ pub(crate) fn set_remote_draft_state(
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     let payload_json = json!({
         "gmail_draft_id": input.gmail_draft_id,
         "gmail_draft_message_id": input.gmail_draft_message_id,
@@ -290,7 +282,7 @@ pub(crate) fn mark_sent(
             thread_id: input.thread_id.clone(),
         })?;
     let from_stage = Some(workflow.current_stage);
-    let expected_updated_at_epoch_s = Some(workflow.updated_at_epoch_s);
+    let expected_workflow_version = Some(workflow.workflow_version);
 
     workflow.current_stage = WorkflowStage::Sent;
     clear_draft_state(&mut workflow);
@@ -298,7 +290,7 @@ pub(crate) fn mark_sent(
     workflow.last_sent_message_id = Some(input.sent_message_id.clone());
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     let payload_json = json!({
         "sent_message_id": input.sent_message_id,
     })
@@ -333,14 +325,14 @@ pub(crate) fn apply_cleanup(
             thread_id: input.thread_id.clone(),
         })?;
     let from_stage = Some(workflow.current_stage);
-    let expected_updated_at_epoch_s = Some(workflow.updated_at_epoch_s);
+    let expected_workflow_version = Some(workflow.workflow_version);
 
     workflow.current_stage = WorkflowStage::Closed;
     workflow.last_cleanup_action = Some(input.cleanup_action);
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     insert_event(
         &transaction,
         &workflow,
@@ -370,13 +362,13 @@ pub(crate) fn retire_draft_state(
         .ok_or_else(|| WorkflowStoreWriteError::MissingWorkflow {
             thread_id: input.thread_id.clone(),
         })?;
-    let expected_updated_at_epoch_s = Some(workflow.updated_at_epoch_s);
+    let expected_workflow_version = Some(workflow.workflow_version);
 
     clear_draft_state(&mut workflow);
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
-    let workflow = persist_workflow(&transaction, workflow, expected_updated_at_epoch_s)?;
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
     transaction.commit()?;
     Ok(workflow)
 }
@@ -416,6 +408,7 @@ fn new_workflow(
         last_remote_sync_epoch_s: None,
         last_sent_message_id: None,
         last_cleanup_action: None,
+        workflow_version: 0,
         created_at_epoch_s: now_epoch_s,
         updated_at_epoch_s: now_epoch_s,
     }
@@ -439,10 +432,13 @@ fn apply_snapshot(workflow: &mut WorkflowRecord, snapshot: &WorkflowMessageSnaps
 pub(super) fn persist_workflow(
     transaction: &Transaction<'_>,
     workflow: WorkflowRecord,
-    expected_updated_at_epoch_s: Option<i64>,
+    expected_workflow_version: Option<i64>,
 ) -> Result<WorkflowRecord, WorkflowStoreWriteError> {
     let account_id = workflow.account_id.clone();
     let thread_id = workflow.thread_id.clone();
+    let next_workflow_version = workflow.workflow_version.saturating_add(1);
+    let mut workflow = workflow;
+    workflow.workflow_version = next_workflow_version;
 
     if workflow.workflow_id == 0 {
         let rows_affected = transaction.execute(
@@ -467,8 +463,9 @@ pub(super) fn persist_workflow(
                  last_sent_message_id,
                  last_cleanup_action,
                  created_at_epoch_s,
-                 updated_at_epoch_s
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                 updated_at_epoch_s,
+                 workflow_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
              ON CONFLICT(account_id, thread_id) DO NOTHING",
             params![
                 account_id.clone(),
@@ -492,14 +489,15 @@ pub(super) fn persist_workflow(
                 workflow.last_cleanup_action.map(CleanupAction::as_str),
                 workflow.created_at_epoch_s,
                 workflow.updated_at_epoch_s,
+                workflow.workflow_version,
             ],
         )?;
         if rows_affected == 0 {
             return Err(WorkflowStoreWriteError::Conflict { thread_id });
         }
     } else {
-        let expected_updated_at_epoch_s =
-            expected_updated_at_epoch_s.ok_or_else(|| WorkflowStoreWriteError::Conflict {
+        let expected_workflow_version =
+            expected_workflow_version.ok_or_else(|| WorkflowStoreWriteError::Conflict {
                 thread_id: thread_id.clone(),
             })?;
         let rows_affected = transaction.execute(
@@ -521,9 +519,10 @@ pub(super) fn persist_workflow(
                  last_remote_sync_epoch_s = ?16,
                  last_sent_message_id = ?17,
                  last_cleanup_action = ?18,
-                 updated_at_epoch_s = ?19
+                 updated_at_epoch_s = ?19,
+                 workflow_version = ?20
              WHERE workflow_id = ?1
-               AND updated_at_epoch_s = ?20",
+               AND workflow_version = ?21",
             params![
                 workflow.workflow_id,
                 workflow.current_stage.as_str(),
@@ -544,7 +543,8 @@ pub(super) fn persist_workflow(
                 workflow.last_sent_message_id,
                 workflow.last_cleanup_action.map(CleanupAction::as_str),
                 workflow.updated_at_epoch_s,
-                expected_updated_at_epoch_s,
+                workflow.workflow_version,
+                expected_workflow_version,
             ],
         )?;
         if rows_affected == 0 {

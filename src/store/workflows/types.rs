@@ -192,6 +192,8 @@ pub(crate) struct WorkflowRecord {
     pub(crate) last_remote_sync_epoch_s: Option<i64>,
     pub(crate) last_sent_message_id: Option<String>,
     pub(crate) last_cleanup_action: Option<CleanupAction>,
+    #[serde(skip, default)]
+    pub(crate) workflow_version: i64,
     pub(crate) created_at_epoch_s: i64,
     pub(crate) updated_at_epoch_s: i64,
 }

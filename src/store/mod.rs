@@ -347,7 +347,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 4);
+        assert_eq!(report.schema_version, 5);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -477,11 +477,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(1, 4).unwrap_err();
+        let error = super::pending_migrations(5, 6).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 4 is newer than embedded migrations (1)")
+                .contains("database schema version 6 is newer than embedded migrations (5)")
         );
     }
 
