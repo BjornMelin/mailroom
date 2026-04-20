@@ -534,7 +534,7 @@ async fn apply_candidate_action(
     let cleanup_action = match candidate.action.kind {
         AutomationActionKind::Archive => Some(store::workflows::CleanupAction::Archive),
         AutomationActionKind::Trash => Some(store::workflows::CleanupAction::Trash),
-        AutomationActionKind::Label => None,
+        AutomationActionKind::Label => Some(store::workflows::CleanupAction::Label),
     };
     if let Some(cleanup_action) = cleanup_action
         && crate::workflows::cleanup_tracked_thread_for_automation(
@@ -543,8 +543,8 @@ async fn apply_candidate_action(
             account_id,
             &candidate.thread_id,
             cleanup_action,
-            Vec::new(),
-            Vec::new(),
+            candidate.action.add_label_names.clone(),
+            candidate.action.remove_label_names.clone(),
         )
         .await?
     {
@@ -1111,6 +1111,135 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn apply_run_reuses_workflow_cleanup_for_tracked_label_actions() {
+        let mock_server = MockServer::start().await;
+        mount_profile(&mock_server).await;
+        Mock::given(method("DELETE"))
+            .and(path("/gmail/v1/users/me/drafts/draft-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/threads/thread-1/modify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "thread-1",
+                "historyId": "710"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, Some(&mock_server));
+        seed_credentials(&config_report);
+        seed_local_thread_snapshot(&config_report, "thread-1", "m-1", 100, "Tracked thread");
+        let account = seed_account(&config_report);
+        seed_mailbox_label(
+            &config_report,
+            &account.account_id,
+            "Label_review",
+            "Review",
+        );
+        seed_tracked_drafting_workflow(&config_report, &account.account_id, "thread-1");
+        let detail = store::automation::create_automation_run(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &CreateAutomationRunInput {
+                account_id: account.account_id.clone(),
+                rule_file_path: String::from(".mailroom/automation.toml"),
+                rule_file_hash: String::from("hash"),
+                selected_rule_ids: vec![String::from("label-thread")],
+                created_at_epoch_s: 100,
+                candidates: vec![NewAutomationRunCandidate {
+                    rule_id: String::from("label-thread"),
+                    thread_id: String::from("thread-1"),
+                    message_id: String::from("m-1"),
+                    internal_date_epoch_ms: 100,
+                    subject: String::from("Tracked thread"),
+                    from_header: String::from("Alice <alice@example.com>"),
+                    from_address: Some(String::from("alice@example.com")),
+                    snippet: String::from("Tracked thread"),
+                    label_names: vec![String::from("INBOX")],
+                    attachment_count: 0,
+                    has_list_unsubscribe: false,
+                    list_id_header: None,
+                    list_unsubscribe_header: None,
+                    list_unsubscribe_post_header: None,
+                    precedence_header: None,
+                    auto_submitted_header: None,
+                    action: AutomationActionSnapshot {
+                        kind: AutomationActionKind::Label,
+                        add_label_ids: vec![String::from("Label_review")],
+                        add_label_names: vec![String::from("Review")],
+                        remove_label_ids: vec![String::from("INBOX")],
+                        remove_label_names: vec![String::from("INBOX")],
+                    },
+                    reason: AutomationMatchReason {
+                        from_address: Some(String::from("alice@example.com")),
+                        subject_terms: vec![String::from("tracked")],
+                        label_names: vec![String::from("INBOX")],
+                        older_than_days: None,
+                        has_attachments: None,
+                        has_list_unsubscribe: None,
+                        list_id_terms: Vec::new(),
+                        precedence_values: Vec::new(),
+                    },
+                }],
+            },
+        )
+        .unwrap();
+
+        let report = apply_run(&config_report, detail.run.run_id, true)
+            .await
+            .unwrap();
+
+        assert_eq!(report.applied_candidate_count, 1);
+        assert_eq!(report.failed_candidate_count, 0);
+
+        let workflow_detail = get_workflow_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &account.account_id,
+            "thread-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            workflow_detail.workflow.current_stage,
+            store::workflows::WorkflowStage::Closed
+        );
+        assert_eq!(
+            workflow_detail.workflow.last_cleanup_action,
+            Some(CleanupAction::Label)
+        );
+        assert_eq!(workflow_detail.workflow.gmail_draft_id, None);
+        assert!(workflow_detail.current_draft.is_none());
+
+        let refreshed_run = store::automation::get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            detail.run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(refreshed_run.run.status, AutomationRunStatus::Applied);
+        assert_eq!(
+            refreshed_run.candidates[0].apply_status,
+            Some(AutomationApplyStatus::Succeeded)
+        );
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert!(requests.iter().any(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/gmail/v1/users/me/threads/thread-1/modify"
+                && request.body == br#"{"addLabelIds":["Label_review"],"removeLabelIds":["INBOX"]}"#
+        }));
+        assert!(requests.iter().any(|request| {
+            request.method.as_str() == "DELETE"
+                && request.url.path() == "/gmail/v1/users/me/drafts/draft-1"
+        }));
+    }
+
     fn planned_rule(
         id: &str,
         priority: i64,
@@ -1319,6 +1448,45 @@ mod tests {
                 label_names_text: String::from("INBOX"),
                 attachments: Vec::new(),
             }],
+            100,
+        )
+        .unwrap();
+    }
+
+    fn seed_mailbox_label(
+        config_report: &ConfigReport,
+        account_id: &str,
+        label_id: &str,
+        name: &str,
+    ) {
+        store::mailbox::replace_labels(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            account_id,
+            &[
+                GmailLabel {
+                    id: String::from("INBOX"),
+                    name: String::from("INBOX"),
+                    message_list_visibility: None,
+                    label_list_visibility: None,
+                    label_type: String::from("system"),
+                    messages_total: None,
+                    messages_unread: None,
+                    threads_total: None,
+                    threads_unread: None,
+                },
+                GmailLabel {
+                    id: String::from(label_id),
+                    name: String::from(name),
+                    message_list_visibility: None,
+                    label_list_visibility: None,
+                    label_type: String::from("user"),
+                    messages_total: None,
+                    messages_unread: None,
+                    threads_total: None,
+                    threads_unread: None,
+                },
+            ],
             100,
         )
         .unwrap();

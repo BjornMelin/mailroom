@@ -196,10 +196,13 @@ fn validate_rules(rule_set: &mut AutomationRuleSet) -> Result<(), AutomationServ
                 });
             }
 
-            let remove_labels = remove.iter().cloned().collect::<BTreeSet<_>>();
+            let remove_labels = remove
+                .iter()
+                .map(|label| label.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
             let overlapping_labels = add
                 .iter()
-                .filter(|label| remove_labels.contains(*label))
+                .filter(|label| remove_labels.contains(&label.to_ascii_lowercase()))
                 .cloned()
                 .collect::<Vec<_>>();
             if !overlapping_labels.is_empty() {
@@ -315,6 +318,37 @@ remove = ["INBOX"]
         assert_eq!(
             error.to_string(),
             "automation rule `label-overlap` label action cannot add and remove the same label: INBOX"
+        );
+
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn validate_rule_file_rejects_case_insensitive_label_overlap() {
+        let repo_root = unique_temp_dir("mailroom-automation-rules-case-overlap");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        fs::write(
+            active_rules_path(&config_report),
+            r#"
+[[rules]]
+id = "label-overlap"
+priority = 100
+[rules.match]
+subject_contains = ["digest"]
+[rules.action]
+kind = "label"
+add = ["Inbox", " Review "]
+remove = ["INBOX"]
+"#,
+        )
+        .unwrap();
+
+        let error = validate_rule_file(&config_report).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "automation rule `label-overlap` label action cannot add and remove the same label: Inbox"
         );
 
         fs::remove_dir_all(repo_root).unwrap();
