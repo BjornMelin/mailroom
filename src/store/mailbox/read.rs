@@ -512,6 +512,11 @@ pub(super) fn read_sync_state(
                  last_sync_epoch_s,
                  last_full_sync_success_epoch_s,
                  last_incremental_sync_success_epoch_s,
+                 pipeline_enabled,
+                 pipeline_list_queue_high_water,
+                 pipeline_write_queue_high_water,
+                 pipeline_write_batch_count,
+                 pipeline_writer_wait_ms,
                  message_count,
                  label_count,
                  indexed_message_count
@@ -524,6 +529,9 @@ pub(super) fn read_sync_state(
 
     match record {
         Ok(record) => Ok(record),
+        Err(error) if is_missing_sync_pipeline_column_error(&error) => {
+            read_sync_state_without_pipeline_columns(connection, account_id)
+        }
         Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -542,6 +550,11 @@ fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>,
                  last_sync_epoch_s,
                  last_full_sync_success_epoch_s,
                  last_incremental_sync_success_epoch_s,
+                 pipeline_enabled,
+                 pipeline_list_queue_high_water,
+                 pipeline_write_queue_high_water,
+                 pipeline_write_batch_count,
+                 pipeline_writer_wait_ms,
                  message_count,
                  label_count,
                  indexed_message_count
@@ -555,6 +568,9 @@ fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>,
 
     match record {
         Ok(record) => Ok(record),
+        Err(error) if is_missing_sync_pipeline_column_error(&error) => {
+            latest_sync_state_without_pipeline_columns(connection)
+        }
         Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -594,6 +610,92 @@ pub(super) fn read_full_sync_checkpoint(
         Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn read_sync_state_without_pipeline_columns(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<SyncStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 cursor_history_id,
+                 bootstrap_query,
+                 last_sync_mode,
+                 last_sync_status,
+                 last_error,
+                 last_sync_epoch_s,
+                 last_full_sync_success_epoch_s,
+                 last_incremental_sync_success_epoch_s,
+                 0 AS pipeline_enabled,
+                 0 AS pipeline_list_queue_high_water,
+                 0 AS pipeline_write_queue_high_water,
+                 0 AS pipeline_write_batch_count,
+                 0 AS pipeline_writer_wait_ms,
+                 message_count,
+                 label_count,
+                 indexed_message_count
+            FROM gmail_sync_state
+             WHERE account_id = ?1",
+            [account_id],
+            row_to_sync_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_sync_state_without_pipeline_columns(
+    connection: &Connection,
+) -> Result<Option<SyncStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 cursor_history_id,
+                 bootstrap_query,
+                 last_sync_mode,
+                 last_sync_status,
+                 last_error,
+                 last_sync_epoch_s,
+                 last_full_sync_success_epoch_s,
+                 last_incremental_sync_success_epoch_s,
+                 0 AS pipeline_enabled,
+                 0 AS pipeline_list_queue_high_water,
+                 0 AS pipeline_write_queue_high_water,
+                 0 AS pipeline_write_batch_count,
+                 0 AS pipeline_writer_wait_ms,
+                 message_count,
+                 label_count,
+                 indexed_message_count
+             FROM gmail_sync_state
+             ORDER BY last_sync_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_sync_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn is_missing_sync_pipeline_column_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqlInputError { msg, .. } if msg.contains("no such column: pipeline_")
+    ) || matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("no such column: pipeline_")
+    )
 }
 
 pub(super) fn read_sync_pacing_state(
@@ -700,9 +802,14 @@ fn row_to_sync_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecor
         last_sync_epoch_s: row.get(6)?,
         last_full_sync_success_epoch_s: row.get(7)?,
         last_incremental_sync_success_epoch_s: row.get(8)?,
-        message_count: row.get(9)?,
-        label_count: row.get(10)?,
-        indexed_message_count: row.get(11)?,
+        pipeline_enabled: row.get::<_, i64>(9)? != 0,
+        pipeline_list_queue_high_water: row.get(10)?,
+        pipeline_write_queue_high_water: row.get(11)?,
+        pipeline_write_batch_count: row.get(12)?,
+        pipeline_writer_wait_ms: row.get(13)?,
+        message_count: row.get(14)?,
+        label_count: row.get(15)?,
+        indexed_message_count: row.get(16)?,
     })
 }
 

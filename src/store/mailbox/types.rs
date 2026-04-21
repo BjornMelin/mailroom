@@ -61,6 +61,11 @@ pub(crate) struct SyncStateUpdate {
     pub(crate) last_sync_epoch_s: i64,
     pub(crate) last_full_sync_success_epoch_s: Option<i64>,
     pub(crate) last_incremental_sync_success_epoch_s: Option<i64>,
+    pub(crate) pipeline_enabled: bool,
+    pub(crate) pipeline_list_queue_high_water: i64,
+    pub(crate) pipeline_write_queue_high_water: i64,
+    pub(crate) pipeline_write_batch_count: i64,
+    pub(crate) pipeline_writer_wait_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -74,6 +79,11 @@ pub(crate) struct SyncStateRecord {
     pub(crate) last_sync_epoch_s: i64,
     pub(crate) last_full_sync_success_epoch_s: Option<i64>,
     pub(crate) last_incremental_sync_success_epoch_s: Option<i64>,
+    pub(crate) pipeline_enabled: bool,
+    pub(crate) pipeline_list_queue_high_water: i64,
+    pub(crate) pipeline_write_queue_high_water: i64,
+    pub(crate) pipeline_write_batch_count: i64,
+    pub(crate) pipeline_writer_wait_ms: i64,
     pub(crate) message_count: i64,
     pub(crate) label_count: i64,
     pub(crate) indexed_message_count: i64,

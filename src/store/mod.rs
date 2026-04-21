@@ -148,6 +148,26 @@ impl StoreDoctorReport {
                             Some(history_id) => println!("mailbox_cursor_history_id={history_id}"),
                             None => println!("mailbox_cursor_history_id=<none>"),
                         }
+                        println!(
+                            "mailbox_sync_pipeline_enabled={}",
+                            sync_state.pipeline_enabled
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_list_queue_high_water={}",
+                            sync_state.pipeline_list_queue_high_water
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_write_queue_high_water={}",
+                            sync_state.pipeline_write_queue_high_water
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_write_batch_count={}",
+                            sync_state.pipeline_write_batch_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_wait_ms={}",
+                            sync_state.pipeline_writer_wait_ms
+                        );
                     }
                     None => println!("mailbox_sync_status=<never-run>"),
                 }
@@ -436,7 +456,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 12);
+        assert_eq!(report.schema_version, 13);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -456,13 +476,17 @@ mod tests {
                        'gmail_full_sync_stage_message_labels',
                        'gmail_full_sync_stage_attachments',
                        'gmail_full_sync_checkpoint',
-                       'gmail_sync_pacing_state'
+                       'gmail_sync_pacing_state',
+                       'gmail_incremental_sync_stage_delete_ids',
+                       'gmail_incremental_sync_stage_messages',
+                       'gmail_incremental_sync_stage_message_labels',
+                       'gmail_incremental_sync_stage_attachments'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 12);
+        assert_eq!(substrate_tables, 16);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -572,11 +596,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(10, 11).unwrap_err();
+        let error = super::pending_migrations(12, 13).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 11 is newer than embedded migrations (10)")
+                .contains("database schema version 13 is newer than embedded migrations (12)")
         );
     }
 
@@ -746,6 +770,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/13-bounded-sync-pipeline/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/12-sync-pacing-state-hardening/down.sql"
             ))
             .unwrap();
@@ -790,7 +819,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 12);
+        assert_eq!(migration_report.schema_version, 13);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();

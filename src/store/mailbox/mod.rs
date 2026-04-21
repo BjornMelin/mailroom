@@ -20,17 +20,18 @@ pub(crate) use types::{
     SyncPacingPressureKind, SyncPacingStateRecord, SyncPacingStateUpdate, SyncStateRecord,
     SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
 };
-pub(crate) use write::{
-    IncrementalSyncCommit, commit_incremental_sync, finalize_full_sync_from_stage,
-    prepare_full_sync_checkpoint, record_attachment_export, reset_full_sync_progress,
-    set_attachment_vault_state, stage_full_sync_page_and_update_checkpoint,
-    update_full_sync_checkpoint_labels, upsert_sync_pacing_state, upsert_sync_state,
-};
 #[cfg(test)]
 pub(crate) use write::{
-    apply_incremental_changes, commit_full_sync, delete_messages, replace_labels,
-    replace_labels_and_report_reindex, replace_messages, reset_full_sync_stage,
-    stage_full_sync_labels, stage_full_sync_messages, upsert_messages,
+    IncrementalSyncCommit, apply_incremental_changes, commit_full_sync, commit_incremental_sync,
+    delete_messages, replace_labels, replace_labels_and_report_reindex, replace_messages,
+    reset_full_sync_stage, stage_full_sync_labels, stage_full_sync_messages, upsert_messages,
+};
+pub(crate) use write::{
+    finalize_full_sync_from_stage, finalize_incremental_from_stage, prepare_full_sync_checkpoint,
+    record_attachment_export, reset_full_sync_progress, reset_incremental_sync_stage,
+    set_attachment_vault_state, stage_full_sync_page_and_update_checkpoint,
+    stage_incremental_sync_batch, update_full_sync_checkpoint_labels, upsert_sync_pacing_state,
+    upsert_sync_state,
 };
 
 use std::collections::BTreeSet;

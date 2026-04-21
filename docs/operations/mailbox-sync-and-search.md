@@ -83,7 +83,8 @@ The sync flow is one-shot and local-first:
 2. refresh the label catalog
 3. decide between full bootstrap and incremental replay
 4. fetch Gmail message payloads with bounded concurrency and quota-aware pacing
-5. persist mailbox rows, attachment rows, label joins, FTS rows, and sync cursor state
+5. normalize metadata into bounded write batches
+6. persist mailbox rows, attachment rows, label joins, FTS rows, and sync cursor state through a single writer lane
 
 Default bootstrap behavior:
 
@@ -104,6 +105,8 @@ Incremental sync behavior:
 - removes locally cached messages when Gmail reports deletion or when a changed
   message now lives in spam or trash
 - falls back to a full bootstrap when Gmail reports a stale history cursor
+- keeps the history walk serial so later-page deletes still dominate before any
+  message fetch work is staged
 
 Persisted sync state behavior:
 
@@ -120,6 +123,19 @@ Full bootstrap checkpoint behavior:
 - if the requested bootstrap query changes, Mailroom discards the old checkpoint and restarts from page 1
 - if Gmail rejects a saved `pageToken`, Mailroom clears the staged checkpoint and restarts the full bootstrap safely
 - the live mailbox cache remains unchanged until the staged full sync finalizes successfully
+
+Bounded pipeline behavior:
+
+- full and incremental sync now run through a bounded pipeline: list work, fetch
+  message catalogs, normalize, then hand batches to one writer lane
+- the writer lane is the only stage that advances durable progress or touches
+  sync state
+- full-sync checkpoint progress only advances after a whole listed page is
+  durably staged in page order
+- any in-flight work that was fetched or normalized but not yet written is
+  intentionally replayed after restart
+- incremental sync now stages delete IDs and upsert batches before one final
+  atomic apply to the live mailbox tables
 
 Quota hardening behavior:
 
@@ -181,12 +197,22 @@ Relevant sync fields in JSON output include:
 - `cursor_history_id`
 - `full_sync_checkpoint`
 - `sync_pacing_state`
+- `pipeline_enabled`
+- `pipeline_list_queue_high_water`
+- `pipeline_write_queue_high_water`
+- `pipeline_write_batch_count`
+- `pipeline_writer_wait_ms`
 
 Relevant `sync run` output fields now also include:
 
 - `resumed_from_checkpoint`
 - `checkpoint_reused_pages`
 - `checkpoint_reused_messages_upserted`
+- `pipeline_enabled`
+- `pipeline_list_queue_high_water`
+- `pipeline_write_queue_high_water`
+- `pipeline_write_batch_count`
+- `pipeline_writer_wait_ms`
 - `adaptive_pacing_enabled`
 - `quota_units_cap_per_minute`
 - `message_fetch_concurrency_cap`

@@ -2842,6 +2842,11 @@ mod tests {
             labels_synced: 4,
             checkpoint_reused_pages: 0,
             checkpoint_reused_messages_upserted: 0,
+            pipeline_enabled: true,
+            pipeline_list_queue_high_water: 1,
+            pipeline_write_queue_high_water: 1,
+            pipeline_write_batch_count: 1,
+            pipeline_writer_wait_ms: 0,
             store_message_count: 3,
             store_label_count: 4,
             store_indexed_message_count: 3,
@@ -2905,6 +2910,11 @@ mod tests {
                 last_sync_epoch_s: 100,
                 last_full_sync_success_epoch_s: Some(100),
                 last_incremental_sync_success_epoch_s: Some(100),
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
             },
         )
         .unwrap();

@@ -241,7 +241,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(12));
+    assert_eq!(store_report.schema_version, Some(13));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -643,6 +643,10 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     assert_eq!(report.bootstrap_query, requested_bootstrap_query);
     assert_eq!(report.messages_upserted, 1);
     assert_eq!(report.cursor_history_id, "700");
+    assert!(report.pipeline_enabled);
+    assert!(report.pipeline_list_queue_high_water >= 1);
+    assert!(report.pipeline_write_queue_high_water >= 1);
+    assert_eq!(report.pipeline_write_batch_count, 1);
     assert!(report.adaptive_pacing_enabled);
     assert_eq!(report.quota_units_budget_per_minute, 12_000);
     assert_eq!(report.message_fetch_concurrency, 4);
@@ -669,6 +673,8 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     .unwrap()
     .unwrap();
     assert_eq!(stored_state.bootstrap_query, requested_bootstrap_query);
+    assert!(stored_state.pipeline_enabled);
+    assert_eq!(stored_state.pipeline_write_batch_count, 1);
 
     let pacing_state = store::mailbox::get_sync_pacing_state(
         &config_report.config.store.database_path,
@@ -1707,6 +1713,11 @@ fn seed_existing_mailbox_with_custom_labels(
             last_sync_epoch_s: 100,
             last_full_sync_success_epoch_s: Some(100),
             last_incremental_sync_success_epoch_s: None,
+            pipeline_enabled: false,
+            pipeline_list_queue_high_water: 0,
+            pipeline_write_queue_high_water: 0,
+            pipeline_write_batch_count: 0,
+            pipeline_writer_wait_ms: 0,
         },
     )
     .unwrap();
@@ -1846,6 +1857,11 @@ fn seed_full_sync_checkpoint(config_report: &ConfigReport, seed: FullSyncCheckpo
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/13-bounded-sync-pipeline/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/12-sync-pacing-state-hardening/down.sql"

@@ -2,6 +2,11 @@ use crate::config::ConfigReport;
 use crate::gmail::{GmailClient, GmailLabel, GmailMessageCatalog};
 use crate::mailbox::model::{FinalizeSyncInput, SyncRunOptions};
 use crate::mailbox::pacing::{AdaptiveSyncPacing, AdaptiveSyncPacingReport};
+use crate::mailbox::pipeline::{
+    ListedPage, PIPELINE_LIST_QUEUE_CAPACITY, PIPELINE_PAGE_PROCESSING_CONCURRENCY,
+    PIPELINE_WRITE_BATCH_MESSAGE_TARGET, PIPELINE_WRITE_QUEUE_CAPACITY, PipelineStats,
+    PipelineStatsReport,
+};
 use crate::mailbox::util::{
     bootstrap_query, is_invalid_resume_page_token_error, is_stale_history_error, labels_by_id,
     message_is_excluded, newest_history_id, recipient_headers,
@@ -16,7 +21,10 @@ use crate::time::current_epoch_seconds;
 use anyhow::{Context, Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use tokio::sync::Semaphore;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::{JoinSet, spawn_blocking};
 
 pub async fn sync_run(
@@ -182,6 +190,54 @@ struct FullSyncCheckpointState {
     resumed_from_checkpoint: bool,
 }
 
+struct FullSyncFinalizeRequest<'a> {
+    bootstrap_query: &'a str,
+    fallback_from_history: bool,
+    resumed_from_checkpoint: bool,
+    checkpoint: store::mailbox::FullSyncCheckpointRecord,
+    checkpoint_reused_pages: usize,
+    checkpoint_reused_messages_upserted: usize,
+    pipeline_report: PipelineStatsReport,
+}
+
+#[derive(Debug)]
+struct PreparedFullSyncPage {
+    page_seq: usize,
+    listed_count: usize,
+    next_page_token: Option<String>,
+    cursor_history_id: Option<String>,
+    upserts: Vec<store::mailbox::GmailMessageUpsertInput>,
+}
+
+#[derive(Debug)]
+struct PreparedIncrementalBatch {
+    batch_seq: usize,
+    listed_count: usize,
+    upserts: Vec<store::mailbox::GmailMessageUpsertInput>,
+    message_ids_to_delete: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RestartFullSyncFromScratch;
+
+impl std::fmt::Display for RestartFullSyncFromScratch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("resume page token invalid; restart full sync from scratch")
+    }
+}
+
+impl std::error::Error for RestartFullSyncFromScratch {}
+
+fn disabled_pipeline_report() -> PipelineStatsReport {
+    PipelineStatsReport {
+        pipeline_enabled: false,
+        list_queue_high_water: 0,
+        write_queue_high_water: 0,
+        write_batch_count: 0,
+        writer_wait_ms: 0,
+    }
+}
+
 async fn run_full_sync(
     context: &SyncExecutionContext<'_>,
     pacing: &mut AdaptiveSyncPacing,
@@ -198,113 +254,137 @@ async fn run_full_sync(
     if checkpoint.record.status == store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
         return finalize_full_sync_report(
             context,
-            bootstrap_query,
-            fallback_from_history,
-            checkpoint.resumed_from_checkpoint,
-            checkpoint.record,
-            checkpoint_reused_pages,
-            checkpoint_reused_messages_upserted,
+            FullSyncFinalizeRequest {
+                bootstrap_query,
+                fallback_from_history,
+                resumed_from_checkpoint: checkpoint.resumed_from_checkpoint,
+                checkpoint: checkpoint.record,
+                checkpoint_reused_pages,
+                checkpoint_reused_messages_upserted,
+                pipeline_report: disabled_pipeline_report(),
+            },
         )
         .await;
     }
+    let stats = PipelineStats::default();
+    let fetch_concurrency = Arc::new(AtomicUsize::new(pacing.current_message_fetch_concurrency()));
+    let (list_tx, list_rx) = mpsc::channel(PIPELINE_LIST_QUEUE_CAPACITY);
+    let (write_tx, mut write_rx) = mpsc::channel(PIPELINE_WRITE_QUEUE_CAPACITY);
 
-    let mut page_token = checkpoint.record.next_page_token.clone();
-    let mut pages_fetched = checkpoint_reused_pages;
-    let mut messages_listed =
-        usize::try_from(checkpoint.record.messages_listed).unwrap_or(usize::MAX);
-    let mut messages_upserted =
-        usize::try_from(checkpoint.record.messages_upserted).unwrap_or(usize::MAX);
-    let mut cursor_history_id = checkpoint.record.cursor_history_id.clone();
-
-    loop {
-        let page = match context
-            .gmail_client
-            .list_message_ids(
-                Some(bootstrap_query),
-                page_token.as_deref(),
-                FULL_SYNC_PAGE_SIZE,
-            )
-            .await
-        {
-            Ok(page) => page,
-            Err(error)
-                if checkpoint.resumed_from_checkpoint
-                    && page_token.is_some()
-                    && is_invalid_resume_page_token_error(&error) =>
-            {
-                context.store_handle.reset_full_sync_progress().await?;
-                return Box::pin(run_full_sync(
-                    context,
-                    pacing,
-                    bootstrap_query,
-                    fallback_from_history,
-                ))
-                .await;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        pages_fetched += 1;
-        messages_listed += page.messages.len();
-
-        let message_ids = page
-            .messages
-            .iter()
-            .map(|message| message.id.clone())
-            .collect();
-        let (catalogs, _) = fetch_message_catalogs(
-            context.gmail_client.clone(),
-            message_ids,
-            pacing.current_message_fetch_concurrency(),
+    let gmail_client = context.gmail_client.clone();
+    let bootstrap_query_owned = bootstrap_query.to_owned();
+    let resumed_from_checkpoint = checkpoint.resumed_from_checkpoint;
+    let initial_page_token = checkpoint.record.next_page_token.clone();
+    let lister_stats = stats.clone();
+    let lister_handle = tokio::spawn(async move {
+        run_full_sync_lister(
+            gmail_client,
+            bootstrap_query_owned,
+            initial_page_token,
+            resumed_from_checkpoint,
+            checkpoint_reused_pages,
+            list_tx,
+            lister_stats,
         )
-        .await?;
+        .await
+    });
 
-        for catalog in &catalogs {
-            cursor_history_id = newest_history_id(cursor_history_id, &catalog.metadata.history_id);
-        }
+    let processor_stats = stats.clone();
+    let processor_fetch_concurrency = fetch_concurrency.clone();
+    let processor_account_id = context.account.account_id.clone();
+    let processor_label_names_by_id = Arc::new(context.label_names_by_id.clone());
+    let processor_gmail_client = context.gmail_client.clone();
+    let processor_handle = tokio::spawn(async move {
+        run_full_sync_processor(
+            processor_gmail_client,
+            processor_account_id,
+            processor_label_names_by_id,
+            list_rx,
+            write_tx,
+            processor_stats,
+            processor_fetch_concurrency,
+        )
+        .await
+    });
 
-        let page_upserts = build_upsert_inputs(
-            &context.account.account_id,
-            catalogs,
-            context.label_names_by_id,
-        );
-        messages_upserted += page_upserts.len();
-        let updated_at_epoch_s = current_epoch_seconds()?;
-        checkpoint.record = context
-            .store_handle
-            .stage_full_sync_page_and_update_checkpoint(
-                &page_upserts,
-                store::mailbox::FullSyncCheckpointUpdate {
-                    bootstrap_query: bootstrap_query.to_owned(),
-                    status: match page.next_page_token {
-                        Some(_) => store::mailbox::FullSyncCheckpointStatus::Paging,
-                        None => store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize,
-                    },
-                    next_page_token: page.next_page_token.clone(),
-                    cursor_history_id: cursor_history_id.clone(),
-                    pages_fetched: i64::try_from(pages_fetched).unwrap_or(i64::MAX),
-                    messages_listed: i64::try_from(messages_listed).unwrap_or(i64::MAX),
-                    messages_upserted: i64::try_from(messages_upserted).unwrap_or(i64::MAX),
-                    labels_synced: i64::try_from(context.labels.len()).unwrap_or(i64::MAX),
-                    started_at_epoch_s: checkpoint.record.started_at_epoch_s,
-                    updated_at_epoch_s,
-                },
+    let mut next_page_seq = checkpoint_reused_pages;
+    let mut buffered_pages = BTreeMap::new();
+    let labels_synced = i64::try_from(context.labels.len()).unwrap_or(i64::MAX);
+    loop {
+        let wait_started = Instant::now();
+        let maybe_page = write_rx.recv().await;
+        stats.record_writer_wait(wait_started.elapsed());
+
+        let Some(page) = maybe_page else {
+            break;
+        };
+        stats.on_write_dequeued();
+        buffered_pages.insert(page.page_seq, page);
+
+        while let Some(page) = buffered_pages.remove(&next_page_seq) {
+            checkpoint.record = stage_prepared_full_sync_page(
+                context,
+                &checkpoint.record,
+                bootstrap_query,
+                labels_synced,
+                page,
             )
             .await?;
-        observe_latest_metrics(pacing, context.gmail_client)?;
-        page_token = checkpoint.record.next_page_token.clone();
-        if checkpoint.record.status == store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
-            break;
+            next_page_seq += 1;
+            stats.on_write_batch_committed();
+            observe_latest_metrics(pacing, context.gmail_client)?;
+            fetch_concurrency.store(
+                pacing.current_message_fetch_concurrency(),
+                Ordering::Release,
+            );
         }
+    }
+
+    let lister_result = lister_handle
+        .await
+        .context("full sync lister task failed")?;
+    let processor_result = processor_handle
+        .await
+        .context("full sync processor task failed")?;
+
+    if let Err(error) = lister_result {
+        if error.downcast_ref::<RestartFullSyncFromScratch>().is_some() {
+            context.store_handle.reset_full_sync_progress().await?;
+            return Box::pin(run_full_sync(
+                context,
+                pacing,
+                bootstrap_query,
+                fallback_from_history,
+            ))
+            .await;
+        }
+        return Err(error);
+    }
+    processor_result?;
+
+    if !buffered_pages.is_empty() {
+        return Err(anyhow!(
+            "full sync pipeline terminated with {} buffered pages still waiting to commit",
+            buffered_pages.len()
+        ));
+    }
+    if checkpoint.record.status != store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
+        return Err(anyhow!(
+            "full sync pipeline drained before reaching a finalize-ready checkpoint"
+        ));
     }
 
     finalize_full_sync_report(
         context,
-        bootstrap_query,
-        fallback_from_history,
-        checkpoint.resumed_from_checkpoint,
-        checkpoint.record,
-        checkpoint_reused_pages,
-        checkpoint_reused_messages_upserted,
+        FullSyncFinalizeRequest {
+            bootstrap_query,
+            fallback_from_history,
+            resumed_from_checkpoint: checkpoint.resumed_from_checkpoint,
+            checkpoint: checkpoint.record,
+            checkpoint_reused_pages,
+            checkpoint_reused_messages_upserted,
+            pipeline_report: stats.report(),
+        },
     )
     .await
 }
@@ -349,46 +429,118 @@ async fn run_incremental_sync(
     }
 
     let changed_message_ids: Vec<String> = changed_message_ids.into_iter().collect();
-    let (catalogs, missing_message_ids) = fetch_message_catalogs(
-        context.gmail_client.clone(),
-        changed_message_ids,
-        pacing.current_message_fetch_concurrency(),
-    )
-    .await?;
-    observe_latest_metrics(pacing, context.gmail_client)?;
-    let messages_listed = catalogs.len();
-    let (upserts, excluded_message_ids) = build_incremental_changes(
-        &context.account.account_id,
-        catalogs,
-        context.label_names_by_id,
-    );
-    let message_ids_to_delete = deleted_message_ids
-        .into_iter()
-        .chain(missing_message_ids)
-        .chain(excluded_message_ids)
-        .collect::<Vec<_>>();
-    let messages_upserted = upserts.len();
+    let deleted_message_ids: Vec<String> = deleted_message_ids.into_iter().collect();
+    let stats = PipelineStats::default();
+    context.store_handle.reset_incremental_sync_stage().await?;
+    if !deleted_message_ids.is_empty() {
+        context
+            .store_handle
+            .stage_incremental_sync_batch(&[], &deleted_message_ids)
+            .await?;
+    }
+
+    let fetch_concurrency = Arc::new(AtomicUsize::new(pacing.current_message_fetch_concurrency()));
+    let (list_tx, list_rx) = mpsc::channel(PIPELINE_LIST_QUEUE_CAPACITY);
+    let (write_tx, mut write_rx) = mpsc::channel(PIPELINE_WRITE_QUEUE_CAPACITY);
+
+    let lister_stats = stats.clone();
+    let lister_handle = tokio::spawn(async move {
+        run_incremental_batch_lister(changed_message_ids, list_tx, lister_stats).await
+    });
+
+    let processor_stats = stats.clone();
+    let processor_fetch_concurrency = fetch_concurrency.clone();
+    let processor_account_id = context.account.account_id.clone();
+    let processor_label_names_by_id = Arc::new(context.label_names_by_id.clone());
+    let processor_gmail_client = context.gmail_client.clone();
+    let processor_handle = tokio::spawn(async move {
+        run_incremental_sync_processor(
+            processor_gmail_client,
+            processor_account_id,
+            processor_label_names_by_id,
+            list_rx,
+            write_tx,
+            processor_stats,
+            processor_fetch_concurrency,
+        )
+        .await
+    });
+
+    let mut next_batch_seq = 0usize;
+    let mut buffered_batches = BTreeMap::new();
+    let mut messages_listed = 0usize;
+    let mut messages_upserted = 0usize;
+
+    loop {
+        let wait_started = Instant::now();
+        let maybe_batch = write_rx.recv().await;
+        stats.record_writer_wait(wait_started.elapsed());
+
+        let Some(batch) = maybe_batch else {
+            break;
+        };
+        stats.on_write_dequeued();
+        buffered_batches.insert(batch.batch_seq, batch);
+
+        while let Some(batch) = buffered_batches.remove(&next_batch_seq) {
+            messages_listed += batch.listed_count;
+            messages_upserted += batch.upserts.len();
+            context
+                .store_handle
+                .stage_incremental_sync_batch(&batch.upserts, &batch.message_ids_to_delete)
+                .await?;
+            next_batch_seq += 1;
+            stats.on_write_batch_committed();
+            observe_latest_metrics(pacing, context.gmail_client)?;
+            fetch_concurrency.store(
+                pacing.current_message_fetch_concurrency(),
+                Ordering::Release,
+            );
+        }
+    }
+
+    lister_handle
+        .await
+        .context("incremental sync lister task failed")??;
+    processor_handle
+        .await
+        .context("incremental sync processor task failed")??;
+
+    if !buffered_batches.is_empty() {
+        return Err(anyhow!(
+            "incremental sync pipeline terminated with {} buffered batches still waiting to commit",
+            buffered_batches.len()
+        ));
+    }
+
     let now_epoch_s = current_epoch_seconds()?;
-    let sync_update = store::mailbox::SyncStateUpdate {
-        account_id: context.account.account_id.clone(),
-        cursor_history_id: Some(latest_history_id.clone()),
-        bootstrap_query: bootstrap_query.to_owned(),
-        last_sync_mode: store::mailbox::SyncMode::Incremental,
-        last_sync_status: store::mailbox::SyncStatus::Ok,
-        last_error: None,
-        last_sync_epoch_s: now_epoch_s,
-        last_full_sync_success_epoch_s: None,
-        last_incremental_sync_success_epoch_s: Some(now_epoch_s),
-    };
+    let pipeline_report = stats.report();
+    let sync_update = success_sync_state_update_with_pipeline(
+        context.account,
+        bootstrap_query,
+        &FinalizeSyncInput {
+            mode: store::mailbox::SyncMode::Incremental,
+            fallback_from_history: false,
+            resumed_from_checkpoint: false,
+            cursor_history_id: Some(latest_history_id.clone()),
+            pages_fetched,
+            messages_listed,
+            messages_upserted,
+            messages_deleted: 0,
+            labels_synced: context.labels.len(),
+            checkpoint_reused_pages: 0,
+            checkpoint_reused_messages_upserted: 0,
+            pipeline_enabled: pipeline_report.pipeline_enabled,
+            pipeline_list_queue_high_water: pipeline_report.list_queue_high_water,
+            pipeline_write_queue_high_water: pipeline_report.write_queue_high_water,
+            pipeline_write_batch_count: pipeline_report.write_batch_count,
+            pipeline_writer_wait_ms: pipeline_report.writer_wait_ms,
+        },
+        now_epoch_s,
+    );
     let (sync_state, messages_deleted) = context
         .store_handle
-        .commit_incremental_sync(store::mailbox::IncrementalSyncCommit {
-            labels: context.labels,
-            messages_to_upsert: &upserts,
-            message_ids_to_delete: &message_ids_to_delete,
-            updated_at_epoch_s: now_epoch_s,
-            sync_state_update: &sync_update,
-        })
+        .finalize_incremental_from_stage(context.labels, now_epoch_s, sync_update)
         .await?;
     let finalize_input = FinalizeSyncInput {
         mode: store::mailbox::SyncMode::Incremental,
@@ -402,12 +554,26 @@ async fn run_incremental_sync(
         labels_synced: context.labels.len(),
         checkpoint_reused_pages: 0,
         checkpoint_reused_messages_upserted: 0,
+        pipeline_enabled: pipeline_report.pipeline_enabled,
+        pipeline_list_queue_high_water: pipeline_report.list_queue_high_water,
+        pipeline_write_queue_high_water: pipeline_report.write_queue_high_water,
+        pipeline_write_batch_count: pipeline_report.write_batch_count,
+        pipeline_writer_wait_ms: pipeline_report.writer_wait_ms,
     };
 
     finalize_sync(sync_state, bootstrap_query, finalize_input)
 }
 
 fn success_sync_state_update(
+    account: &AccountRecord,
+    bootstrap_query: &str,
+    input: &FinalizeSyncInput,
+    now_epoch_s: i64,
+) -> store::mailbox::SyncStateUpdate {
+    success_sync_state_update_with_pipeline(account, bootstrap_query, input, now_epoch_s)
+}
+
+fn success_sync_state_update_with_pipeline(
     account: &AccountRecord,
     bootstrap_query: &str,
     input: &FinalizeSyncInput,
@@ -426,6 +592,14 @@ fn success_sync_state_update(
         last_incremental_sync_success_epoch_s: (input.mode
             == store::mailbox::SyncMode::Incremental)
             .then_some(now_epoch_s),
+        pipeline_enabled: input.pipeline_enabled,
+        pipeline_list_queue_high_water: i64::try_from(input.pipeline_list_queue_high_water)
+            .unwrap_or(i64::MAX),
+        pipeline_write_queue_high_water: i64::try_from(input.pipeline_write_queue_high_water)
+            .unwrap_or(i64::MAX),
+        pipeline_write_batch_count: i64::try_from(input.pipeline_write_batch_count)
+            .unwrap_or(i64::MAX),
+        pipeline_writer_wait_ms: i64::try_from(input.pipeline_writer_wait_ms).unwrap_or(i64::MAX),
     }
 }
 
@@ -449,6 +623,11 @@ fn finalize_sync(
         labels_synced: input.labels_synced,
         checkpoint_reused_pages: input.checkpoint_reused_pages,
         checkpoint_reused_messages_upserted: input.checkpoint_reused_messages_upserted,
+        pipeline_enabled: input.pipeline_enabled,
+        pipeline_list_queue_high_water: input.pipeline_list_queue_high_water,
+        pipeline_write_queue_high_water: input.pipeline_write_queue_high_water,
+        pipeline_write_batch_count: input.pipeline_write_batch_count,
+        pipeline_writer_wait_ms: input.pipeline_writer_wait_ms,
         store_message_count: sync_state.message_count,
         store_label_count: sync_state.label_count,
         store_indexed_message_count: sync_state.indexed_message_count,
@@ -555,6 +734,11 @@ async fn persist_sync_state_failure(
             last_sync_epoch_s: now_epoch_s,
             last_full_sync_success_epoch_s: None,
             last_incremental_sync_success_epoch_s: None,
+            pipeline_enabled: false,
+            pipeline_list_queue_high_water: 0,
+            pipeline_write_queue_high_water: 0,
+            pipeline_write_batch_count: 0,
+            pipeline_writer_wait_ms: 0,
         })
         .await?;
     Ok(())
@@ -690,25 +874,26 @@ fn full_sync_checkpoint_is_consistent(
 
 async fn finalize_full_sync_report(
     context: &SyncExecutionContext<'_>,
-    bootstrap_query: &str,
-    fallback_from_history: bool,
-    resumed_from_checkpoint: bool,
-    checkpoint: store::mailbox::FullSyncCheckpointRecord,
-    checkpoint_reused_pages: usize,
-    checkpoint_reused_messages_upserted: usize,
+    request: FullSyncFinalizeRequest<'_>,
 ) -> Result<SyncRunReport> {
     let finalize_input = FinalizeSyncInput {
         mode: store::mailbox::SyncMode::Full,
-        fallback_from_history,
-        resumed_from_checkpoint,
-        cursor_history_id: checkpoint.cursor_history_id.clone(),
-        pages_fetched: usize::try_from(checkpoint.pages_fetched).unwrap_or(usize::MAX),
-        messages_listed: usize::try_from(checkpoint.messages_listed).unwrap_or(usize::MAX),
-        messages_upserted: usize::try_from(checkpoint.messages_upserted).unwrap_or(usize::MAX),
+        fallback_from_history: request.fallback_from_history,
+        resumed_from_checkpoint: request.resumed_from_checkpoint,
+        cursor_history_id: request.checkpoint.cursor_history_id.clone(),
+        pages_fetched: usize::try_from(request.checkpoint.pages_fetched).unwrap_or(usize::MAX),
+        messages_listed: usize::try_from(request.checkpoint.messages_listed).unwrap_or(usize::MAX),
+        messages_upserted: usize::try_from(request.checkpoint.messages_upserted)
+            .unwrap_or(usize::MAX),
         messages_deleted: 0,
-        labels_synced: usize::try_from(checkpoint.labels_synced).unwrap_or(usize::MAX),
-        checkpoint_reused_pages,
-        checkpoint_reused_messages_upserted,
+        labels_synced: usize::try_from(request.checkpoint.labels_synced).unwrap_or(usize::MAX),
+        checkpoint_reused_pages: request.checkpoint_reused_pages,
+        checkpoint_reused_messages_upserted: request.checkpoint_reused_messages_upserted,
+        pipeline_enabled: request.pipeline_report.pipeline_enabled,
+        pipeline_list_queue_high_water: request.pipeline_report.list_queue_high_water,
+        pipeline_write_queue_high_water: request.pipeline_report.write_queue_high_water,
+        pipeline_write_batch_count: request.pipeline_report.write_batch_count,
+        pipeline_writer_wait_ms: request.pipeline_report.writer_wait_ms,
     };
     let now_epoch_s = current_epoch_seconds()?;
     let sync_state = context
@@ -717,14 +902,260 @@ async fn finalize_full_sync_report(
             now_epoch_s,
             success_sync_state_update(
                 context.account,
-                bootstrap_query,
+                request.bootstrap_query,
                 &finalize_input,
                 now_epoch_s,
             ),
         )
         .await?;
 
-    finalize_sync(sync_state, bootstrap_query, finalize_input)
+    finalize_sync(sync_state, request.bootstrap_query, finalize_input)
+}
+
+async fn run_full_sync_lister(
+    gmail_client: GmailClient,
+    bootstrap_query: String,
+    mut page_token: Option<String>,
+    resumed_from_checkpoint: bool,
+    starting_page_seq: usize,
+    list_tx: mpsc::Sender<ListedPage>,
+    stats: PipelineStats,
+) -> Result<()> {
+    let mut page_seq = starting_page_seq;
+
+    loop {
+        let page = match gmail_client
+            .list_message_ids(
+                Some(bootstrap_query.as_str()),
+                page_token.as_deref(),
+                FULL_SYNC_PAGE_SIZE,
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(error)
+                if resumed_from_checkpoint
+                    && page_token.is_some()
+                    && is_invalid_resume_page_token_error(&error) =>
+            {
+                return Err(anyhow!(RestartFullSyncFromScratch));
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let listed_count = page.messages.len();
+        let listed_page = ListedPage {
+            page_seq,
+            message_ids: page
+                .messages
+                .into_iter()
+                .map(|message| message.id)
+                .collect(),
+            next_page_token: page.next_page_token.clone(),
+            listed_count,
+        };
+        stats.on_list_enqueued();
+        if list_tx.send(listed_page).await.is_err() {
+            return Ok(());
+        }
+
+        page_seq += 1;
+        page_token = page.next_page_token;
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_full_sync_processor(
+    gmail_client: GmailClient,
+    account_id: String,
+    label_names_by_id: Arc<BTreeMap<String, String>>,
+    mut list_rx: mpsc::Receiver<ListedPage>,
+    write_tx: mpsc::Sender<PreparedFullSyncPage>,
+    stats: PipelineStats,
+    fetch_concurrency: Arc<AtomicUsize>,
+) -> Result<()> {
+    let page_semaphore = Arc::new(Semaphore::new(PIPELINE_PAGE_PROCESSING_CONCURRENCY));
+    let mut join_set = JoinSet::new();
+
+    while let Some(page) = list_rx.recv().await {
+        stats.on_list_dequeued();
+        let page_permit = page_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .context("failed to acquire full sync page processing permit")?;
+        let write_tx = write_tx.clone();
+        let stats = stats.clone();
+        let gmail_client = gmail_client.clone();
+        let account_id = account_id.clone();
+        let label_names_by_id = label_names_by_id.clone();
+        let fetch_concurrency = fetch_concurrency.clone();
+        join_set.spawn(async move {
+            let _page_permit = page_permit;
+            let permit = write_tx
+                .reserve_owned()
+                .await
+                .context("full sync write queue closed while reserving batch slot")?;
+            let (catalogs, _) = fetch_message_catalogs(
+                gmail_client,
+                page.message_ids,
+                fetch_concurrency.load(Ordering::Acquire),
+            )
+            .await?;
+            let mut cursor_history_id = None;
+            for catalog in &catalogs {
+                cursor_history_id =
+                    newest_history_id(cursor_history_id, &catalog.metadata.history_id);
+            }
+            let upserts = build_upsert_inputs(&account_id, catalogs, label_names_by_id.as_ref());
+            stats.on_write_enqueued();
+            permit.send(PreparedFullSyncPage {
+                page_seq: page.page_seq,
+                listed_count: page.listed_count,
+                next_page_token: page.next_page_token,
+                cursor_history_id,
+                upserts,
+            });
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+
+    drop(write_tx);
+    while let Some(result) = join_set.join_next().await {
+        result??;
+    }
+
+    Ok(())
+}
+
+async fn stage_prepared_full_sync_page(
+    context: &SyncExecutionContext<'_>,
+    checkpoint: &store::mailbox::FullSyncCheckpointRecord,
+    bootstrap_query: &str,
+    labels_synced: i64,
+    page: PreparedFullSyncPage,
+) -> Result<store::mailbox::FullSyncCheckpointRecord> {
+    let updated_at_epoch_s = current_epoch_seconds()?;
+    let cursor_history_id = match page.cursor_history_id.as_deref() {
+        Some(history_id) => newest_history_id(checkpoint.cursor_history_id.clone(), history_id),
+        None => checkpoint.cursor_history_id.clone(),
+    };
+    context
+        .store_handle
+        .stage_full_sync_page_and_update_checkpoint(
+            &page.upserts,
+            store::mailbox::FullSyncCheckpointUpdate {
+                bootstrap_query: bootstrap_query.to_owned(),
+                status: if page.next_page_token.is_some() {
+                    store::mailbox::FullSyncCheckpointStatus::Paging
+                } else {
+                    store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize
+                },
+                next_page_token: page.next_page_token,
+                cursor_history_id,
+                pages_fetched: checkpoint.pages_fetched.saturating_add(1),
+                messages_listed: checkpoint
+                    .messages_listed
+                    .saturating_add(i64::try_from(page.listed_count).unwrap_or(i64::MAX)),
+                messages_upserted: checkpoint
+                    .messages_upserted
+                    .saturating_add(i64::try_from(page.upserts.len()).unwrap_or(i64::MAX)),
+                labels_synced,
+                started_at_epoch_s: checkpoint.started_at_epoch_s,
+                updated_at_epoch_s,
+            },
+        )
+        .await
+}
+
+async fn run_incremental_batch_lister(
+    changed_message_ids: Vec<String>,
+    list_tx: mpsc::Sender<ListedPage>,
+    stats: PipelineStats,
+) -> Result<()> {
+    for (page_seq, message_id_chunk) in changed_message_ids
+        .chunks(PIPELINE_WRITE_BATCH_MESSAGE_TARGET)
+        .enumerate()
+    {
+        let listed_page = ListedPage {
+            page_seq,
+            message_ids: message_id_chunk.to_vec(),
+            next_page_token: None,
+            listed_count: message_id_chunk.len(),
+        };
+        stats.on_list_enqueued();
+        if list_tx.send(listed_page).await.is_err() {
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_incremental_sync_processor(
+    gmail_client: GmailClient,
+    account_id: String,
+    label_names_by_id: Arc<BTreeMap<String, String>>,
+    mut list_rx: mpsc::Receiver<ListedPage>,
+    write_tx: mpsc::Sender<PreparedIncrementalBatch>,
+    stats: PipelineStats,
+    fetch_concurrency: Arc<AtomicUsize>,
+) -> Result<()> {
+    let page_semaphore = Arc::new(Semaphore::new(PIPELINE_PAGE_PROCESSING_CONCURRENCY));
+    let mut join_set = JoinSet::new();
+
+    while let Some(page) = list_rx.recv().await {
+        stats.on_list_dequeued();
+        let page_permit = page_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .context("failed to acquire incremental batch processing permit")?;
+        let write_tx = write_tx.clone();
+        let stats = stats.clone();
+        let gmail_client = gmail_client.clone();
+        let account_id = account_id.clone();
+        let label_names_by_id = label_names_by_id.clone();
+        let fetch_concurrency = fetch_concurrency.clone();
+        join_set.spawn(async move {
+            let _page_permit = page_permit;
+            let permit = write_tx
+                .reserve_owned()
+                .await
+                .context("incremental sync write queue closed while reserving batch slot")?;
+            let (catalogs, missing_message_ids) = fetch_message_catalogs(
+                gmail_client,
+                page.message_ids,
+                fetch_concurrency.load(Ordering::Acquire),
+            )
+            .await?;
+            let (upserts, excluded_message_ids) =
+                build_incremental_changes(&account_id, catalogs, label_names_by_id.as_ref());
+            let message_ids_to_delete = missing_message_ids
+                .into_iter()
+                .chain(excluded_message_ids)
+                .collect::<Vec<_>>();
+            stats.on_write_enqueued();
+            permit.send(PreparedIncrementalBatch {
+                batch_seq: page.page_seq,
+                listed_count: page.listed_count,
+                upserts,
+                message_ids_to_delete,
+            });
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+
+    drop(write_tx);
+    while let Some(result) = join_set.join_next().await {
+        result??;
+    }
+
+    Ok(())
 }
 
 fn preserve_sync_error(sync_error: anyhow::Error, persist_result: Result<()>) -> anyhow::Error {
@@ -1013,30 +1444,60 @@ impl MailboxStoreHandle {
         .await?
     }
 
-    async fn commit_incremental_sync(
+    async fn reset_incremental_sync_stage(&self) -> Result<()> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        spawn_blocking(move || {
+            store::mailbox::reset_incremental_sync_stage(
+                &database_path,
+                busy_timeout_ms,
+                &account_id,
+            )
+        })
+        .await?
+    }
+
+    async fn stage_incremental_sync_batch(
         &self,
-        commit: store::mailbox::IncrementalSyncCommit<'_>,
+        messages: &[store::mailbox::GmailMessageUpsertInput],
+        message_ids_to_delete: &[String],
+    ) -> Result<()> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        let messages = messages.to_vec();
+        let message_ids_to_delete = message_ids_to_delete.to_vec();
+        spawn_blocking(move || {
+            store::mailbox::stage_incremental_sync_batch(
+                &database_path,
+                busy_timeout_ms,
+                &account_id,
+                &messages,
+                &message_ids_to_delete,
+            )
+        })
+        .await?
+    }
+
+    async fn finalize_incremental_from_stage(
+        &self,
+        labels: &[GmailLabel],
+        updated_at_epoch_s: i64,
+        sync_state_update: store::mailbox::SyncStateUpdate,
     ) -> Result<(store::mailbox::SyncStateRecord, usize)> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
-        let labels = commit.labels.to_vec();
-        let messages_to_upsert = commit.messages_to_upsert.to_vec();
-        let message_ids_to_delete = commit.message_ids_to_delete.to_vec();
-        let updated_at_epoch_s = commit.updated_at_epoch_s;
-        let sync_state_update = commit.sync_state_update.clone();
+        let labels = labels.to_vec();
         spawn_blocking(move || {
-            store::mailbox::commit_incremental_sync(
+            store::mailbox::finalize_incremental_from_stage(
                 &database_path,
                 busy_timeout_ms,
                 &account_id,
-                &store::mailbox::IncrementalSyncCommit {
-                    labels: &labels,
-                    messages_to_upsert: &messages_to_upsert,
-                    message_ids_to_delete: &message_ids_to_delete,
-                    updated_at_epoch_s,
-                    sync_state_update: &sync_state_update,
-                },
+                &labels,
+                updated_at_epoch_s,
+                &sync_state_update,
             )
         })
         .await?

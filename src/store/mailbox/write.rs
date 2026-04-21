@@ -11,11 +11,13 @@ use crate::gmail::GmailLabel;
 use crate::store::connection;
 use anyhow::{Result, anyhow, ensure};
 use rusqlite::{Connection, ToSql, TransactionBehavior, params, params_from_iter};
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::Path;
 
 const DELETE_BATCH_SIZE: usize = 400;
 
+#[cfg(test)]
 pub(crate) struct IncrementalSyncCommit<'a> {
     pub(crate) labels: &'a [GmailLabel],
     pub(crate) messages_to_upsert: &'a [GmailMessageUpsertInput],
@@ -119,6 +121,49 @@ pub(crate) fn finalize_full_sync_from_stage(
     )
 }
 
+pub(crate) fn reset_incremental_sync_stage(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<()> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    reset_incremental_sync_stage_with_connection(&mut connection, account_id)
+}
+
+pub(crate) fn stage_incremental_sync_batch(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    messages: &[GmailMessageUpsertInput],
+    message_ids_to_delete: &[String],
+) -> Result<()> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    stage_incremental_sync_batch_with_connection(
+        &mut connection,
+        account_id,
+        messages,
+        message_ids_to_delete,
+    )
+}
+
+pub(crate) fn finalize_incremental_from_stage(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    labels: &[GmailLabel],
+    updated_at_epoch_s: i64,
+    sync_state_update: &SyncStateUpdate,
+) -> Result<(SyncStateRecord, usize)> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    finalize_incremental_from_stage_with_connection(
+        &mut connection,
+        account_id,
+        labels,
+        updated_at_epoch_s,
+        sync_state_update,
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn replace_labels(
     database_path: &Path,
@@ -174,6 +219,7 @@ pub(crate) fn commit_full_sync(
     Ok(record)
 }
 
+#[cfg(test)]
 pub(crate) fn commit_incremental_sync(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -385,6 +431,21 @@ fn reset_full_sync_progress_with_connection(
     Ok(())
 }
 
+fn reset_incremental_sync_stage_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+) -> Result<()> {
+    ensure!(
+        !account_id.is_empty(),
+        "mailbox incremental staging requires a non-empty account_id"
+    );
+
+    let transaction = connection.transaction()?;
+    reset_incremental_sync_stage_in_transaction(&transaction, account_id)?;
+    transaction.commit()?;
+    Ok(())
+}
+
 fn upsert_sync_pacing_state_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     update: &SyncPacingStateUpdate,
@@ -497,6 +558,29 @@ fn reset_full_sync_stage_in_transaction(
     )?;
     transaction.execute(
         "DELETE FROM gmail_full_sync_stage_labels WHERE account_id = ?1",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+fn reset_incremental_sync_stage_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM gmail_incremental_sync_stage_attachments WHERE account_id = ?1",
+        [account_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_incremental_sync_stage_message_labels WHERE account_id = ?1",
+        [account_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_incremental_sync_stage_messages WHERE account_id = ?1",
+        [account_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_incremental_sync_stage_delete_ids WHERE account_id = ?1",
         [account_id],
     )?;
     Ok(())
@@ -768,6 +852,209 @@ fn stage_full_sync_messages_in_transaction(
     Ok(())
 }
 
+fn stage_incremental_sync_batch_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+    messages: &[GmailMessageUpsertInput],
+    message_ids_to_delete: &[String],
+) -> Result<()> {
+    ensure!(
+        !account_id.is_empty(),
+        "mailbox incremental staging requires a non-empty account_id"
+    );
+
+    let transaction = connection.transaction()?;
+    stage_incremental_sync_messages_in_transaction(&transaction, account_id, messages)?;
+    stage_incremental_sync_delete_ids_in_transaction(
+        &transaction,
+        account_id,
+        message_ids_to_delete,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn stage_incremental_sync_delete_ids_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    message_ids_to_delete: &[String],
+) -> Result<()> {
+    let mut insert = transaction.prepare_cached(
+        "INSERT INTO gmail_incremental_sync_stage_delete_ids (
+             account_id,
+             message_id
+         )
+         VALUES (?1, ?2)
+         ON CONFLICT (account_id, message_id) DO NOTHING",
+    )?;
+
+    for message_id in unique_sorted_strings(message_ids_to_delete) {
+        insert.execute(params![account_id, message_id])?;
+    }
+
+    drop(insert);
+    Ok(())
+}
+
+fn stage_incremental_sync_messages_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    messages: &[GmailMessageUpsertInput],
+) -> Result<()> {
+    let mut upsert_message = transaction.prepare_cached(
+        "INSERT INTO gmail_incremental_sync_stage_messages (
+             account_id,
+             message_id,
+             thread_id,
+             history_id,
+             internal_date_epoch_ms,
+             snippet,
+             subject,
+             from_header,
+             from_address,
+             recipient_headers,
+             to_header,
+             cc_header,
+             bcc_header,
+             reply_to_header,
+             size_estimate,
+             list_id_header,
+             list_unsubscribe_header,
+             list_unsubscribe_post_header,
+             precedence_header,
+             auto_submitted_header,
+             label_names_text
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+         ON CONFLICT (account_id, message_id) DO UPDATE SET
+             thread_id = excluded.thread_id,
+             history_id = excluded.history_id,
+             internal_date_epoch_ms = excluded.internal_date_epoch_ms,
+             snippet = excluded.snippet,
+             subject = excluded.subject,
+             from_header = excluded.from_header,
+             from_address = excluded.from_address,
+             recipient_headers = excluded.recipient_headers,
+             to_header = excluded.to_header,
+             cc_header = excluded.cc_header,
+             bcc_header = excluded.bcc_header,
+             reply_to_header = excluded.reply_to_header,
+             size_estimate = excluded.size_estimate,
+             list_id_header = excluded.list_id_header,
+             list_unsubscribe_header = excluded.list_unsubscribe_header,
+             list_unsubscribe_post_header = excluded.list_unsubscribe_post_header,
+             precedence_header = excluded.precedence_header,
+             auto_submitted_header = excluded.auto_submitted_header,
+             label_names_text = excluded.label_names_text",
+    )?;
+    let mut delete_labels = transaction.prepare_cached(
+        "DELETE FROM gmail_incremental_sync_stage_message_labels
+         WHERE account_id = ?1
+           AND message_id = ?2",
+    )?;
+    let mut delete_attachments = transaction.prepare_cached(
+        "DELETE FROM gmail_incremental_sync_stage_attachments
+         WHERE account_id = ?1
+           AND message_id = ?2",
+    )?;
+    let mut insert_label = transaction.prepare_cached(
+        "INSERT INTO gmail_incremental_sync_stage_message_labels (
+             account_id,
+             message_id,
+             label_id
+         )
+         VALUES (?1, ?2, ?3)",
+    )?;
+    let mut insert_attachment = transaction.prepare_cached(
+        "INSERT INTO gmail_incremental_sync_stage_attachments (
+             account_id,
+             message_id,
+             attachment_key,
+             part_id,
+             gmail_attachment_id,
+             filename,
+             mime_type,
+             size_bytes,
+             content_disposition,
+             content_id,
+             is_inline
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT (account_id, attachment_key) DO UPDATE SET
+             message_id = excluded.message_id,
+             part_id = excluded.part_id,
+             gmail_attachment_id = excluded.gmail_attachment_id,
+             filename = excluded.filename,
+             mime_type = excluded.mime_type,
+             size_bytes = excluded.size_bytes,
+             content_disposition = excluded.content_disposition,
+             content_id = excluded.content_id,
+             is_inline = excluded.is_inline",
+    )?;
+
+    for message in messages {
+        ensure!(
+            message.account_id == account_id,
+            "mailbox message account_id `{}` does not match batch account `{}`",
+            message.account_id,
+            account_id
+        );
+
+        upsert_message.execute(params![
+            account_id,
+            &message.message_id,
+            &message.thread_id,
+            &message.history_id,
+            message.internal_date_epoch_ms,
+            &message.snippet,
+            &message.subject,
+            &message.from_header,
+            &message.from_address,
+            &message.recipient_headers,
+            &message.to_header,
+            &message.cc_header,
+            &message.bcc_header,
+            &message.reply_to_header,
+            message.size_estimate,
+            &message.automation_headers.list_id_header,
+            &message.automation_headers.list_unsubscribe_header,
+            &message.automation_headers.list_unsubscribe_post_header,
+            &message.automation_headers.precedence_header,
+            &message.automation_headers.auto_submitted_header,
+            &message.label_names_text,
+        ])?;
+        delete_labels.execute(params![account_id, &message.message_id])?;
+        delete_attachments.execute(params![account_id, &message.message_id])?;
+
+        for label_id in unique_sorted_strings(&message.label_ids) {
+            insert_label.execute(params![account_id, &message.message_id, label_id])?;
+        }
+
+        for attachment in &message.attachments {
+            insert_attachment.execute(params![
+                account_id,
+                &message.message_id,
+                &attachment.attachment_key,
+                &attachment.part_id,
+                &attachment.gmail_attachment_id,
+                &attachment.filename,
+                &attachment.mime_type,
+                attachment.size_bytes,
+                &attachment.content_disposition,
+                &attachment.content_id,
+                if attachment.is_inline { 1_i64 } else { 0_i64 },
+            ])?;
+        }
+    }
+
+    drop(insert_attachment);
+    drop(insert_label);
+    drop(delete_attachments);
+    drop(delete_labels);
+    drop(upsert_message);
+    Ok(())
+}
+
 fn finalize_full_sync_from_stage_with_connection(
     connection: &mut Connection,
     account_id: &str,
@@ -802,6 +1089,52 @@ fn finalize_full_sync_from_stage_with_connection(
     reset_full_sync_stage_in_transaction(&transaction, account_id)?;
     transaction.commit()?;
     Ok(record)
+}
+
+fn finalize_incremental_from_stage_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+    labels: &[GmailLabel],
+    updated_at_epoch_s: i64,
+    sync_state_update: &SyncStateUpdate,
+) -> Result<(SyncStateRecord, usize)> {
+    ensure!(
+        sync_state_update.account_id == account_id,
+        "sync state account_id `{}` does not match incremental finalize account `{}`",
+        sync_state_update.account_id,
+        account_id
+    );
+    ensure!(
+        !account_id.is_empty(),
+        "mailbox incremental finalize requires a non-empty account_id"
+    );
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let should_reindex_search =
+        replace_labels_in_transaction(&transaction, account_id, labels, updated_at_epoch_s)?;
+    create_preserved_incremental_attachment_vault_stage(&transaction, account_id)?;
+    delete_existing_incremental_stage_messages_in_transaction(&transaction, account_id)?;
+    let deleted =
+        delete_incremental_stage_delete_ids_from_live_in_transaction(&transaction, account_id)?;
+    insert_live_messages_from_incremental_stage_in_transaction(
+        &transaction,
+        account_id,
+        updated_at_epoch_s,
+    )?;
+    insert_live_message_labels_from_incremental_stage_in_transaction(&transaction, account_id)?;
+    insert_live_attachments_from_incremental_stage_in_transaction(
+        &transaction,
+        account_id,
+        updated_at_epoch_s,
+    )?;
+    insert_live_search_from_incremental_stage_in_transaction(&transaction, account_id)?;
+    if should_reindex_search {
+        reindex_message_search_for_account(&transaction, account_id)?;
+    }
+    let record = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
+    reset_incremental_sync_stage_in_transaction(&transaction, account_id)?;
+    transaction.commit()?;
+    Ok((record, deleted))
 }
 
 fn ensure_checkpoint_matches_account(
@@ -1000,11 +1333,16 @@ fn upsert_sync_state_in_transaction(
              last_sync_epoch_s,
              last_full_sync_success_epoch_s,
              last_incremental_sync_success_epoch_s,
+             pipeline_enabled,
+             pipeline_list_queue_high_water,
+             pipeline_write_queue_high_water,
+             pipeline_write_batch_count,
+             pipeline_writer_wait_ms,
              message_count,
              label_count,
              indexed_message_count
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT (account_id) DO UPDATE SET
              cursor_history_id = excluded.cursor_history_id,
              bootstrap_query = excluded.bootstrap_query,
@@ -1020,6 +1358,11 @@ fn upsert_sync_state_in_transaction(
                  excluded.last_incremental_sync_success_epoch_s,
                  gmail_sync_state.last_incremental_sync_success_epoch_s
              ),
+             pipeline_enabled = excluded.pipeline_enabled,
+             pipeline_list_queue_high_water = excluded.pipeline_list_queue_high_water,
+             pipeline_write_queue_high_water = excluded.pipeline_write_queue_high_water,
+             pipeline_write_batch_count = excluded.pipeline_write_batch_count,
+             pipeline_writer_wait_ms = excluded.pipeline_writer_wait_ms,
              message_count = excluded.message_count,
              label_count = excluded.label_count,
              indexed_message_count = excluded.indexed_message_count",
@@ -1033,6 +1376,15 @@ fn upsert_sync_state_in_transaction(
             update.last_sync_epoch_s,
             update.last_full_sync_success_epoch_s,
             update.last_incremental_sync_success_epoch_s,
+            if update.pipeline_enabled {
+                1_i64
+            } else {
+                0_i64
+            },
+            update.pipeline_list_queue_high_water,
+            update.pipeline_write_queue_high_water,
+            update.pipeline_write_batch_count,
+            update.pipeline_writer_wait_ms,
             message_count,
             label_count,
             indexed_message_count,
@@ -1102,6 +1454,54 @@ fn create_preserved_attachment_vault_stage(
            AND vault_relative_path IS NOT NULL
            AND vault_size_bytes IS NOT NULL
            AND vault_fetched_at_epoch_s IS NOT NULL",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+fn create_preserved_incremental_attachment_vault_stage(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "DROP TABLE IF EXISTS temp.gmail_incremental_sync_preserved_attachment_vaults",
+        [],
+    )?;
+    transaction.execute(
+        "CREATE TEMP TABLE gmail_incremental_sync_preserved_attachment_vaults (
+             attachment_key TEXT PRIMARY KEY,
+             content_hash TEXT NOT NULL,
+             relative_path TEXT NOT NULL,
+             size_bytes INTEGER NOT NULL,
+             fetched_at_epoch_s INTEGER NOT NULL
+         ) STRICT",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO gmail_incremental_sync_preserved_attachment_vaults (
+             attachment_key,
+             content_hash,
+             relative_path,
+             size_bytes,
+             fetched_at_epoch_s
+         )
+         SELECT
+             gma.attachment_key,
+             gma.vault_content_hash,
+             gma.vault_relative_path,
+             gma.vault_size_bytes,
+             gma.vault_fetched_at_epoch_s
+         FROM gmail_message_attachments gma
+         INNER JOIN gmail_messages gm
+           ON gm.message_rowid = gma.message_rowid
+         INNER JOIN gmail_incremental_sync_stage_messages stage
+           ON stage.account_id = gm.account_id
+          AND stage.message_id = gm.message_id
+         WHERE gma.account_id = ?1
+           AND gma.vault_content_hash IS NOT NULL
+           AND gma.vault_relative_path IS NOT NULL
+           AND gma.vault_size_bytes IS NOT NULL
+           AND gma.vault_fetched_at_epoch_s IS NOT NULL",
         [account_id],
     )?;
     Ok(())
@@ -1309,6 +1709,200 @@ fn insert_live_search_from_stage_in_transaction(
     Ok(())
 }
 
+fn delete_existing_incremental_stage_messages_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<()> {
+    let mut query = transaction.prepare_cached(
+        "SELECT message_id
+         FROM gmail_incremental_sync_stage_messages
+         WHERE account_id = ?1
+         ORDER BY message_id ASC",
+    )?;
+    let message_ids = query
+        .query_map([account_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    delete_messages_in_transaction(transaction, account_id, &message_ids)?;
+    Ok(())
+}
+
+fn delete_incremental_stage_delete_ids_from_live_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<usize> {
+    let mut query = transaction.prepare_cached(
+        "SELECT message_id
+         FROM gmail_incremental_sync_stage_delete_ids
+         WHERE account_id = ?1
+         ORDER BY message_id ASC",
+    )?;
+    let message_ids = query
+        .query_map([account_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    delete_messages_in_transaction(transaction, account_id, &message_ids)
+}
+
+fn insert_live_messages_from_incremental_stage_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    updated_at_epoch_s: i64,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO gmail_messages (
+             account_id,
+             message_id,
+             thread_id,
+             history_id,
+             internal_date_epoch_ms,
+             snippet,
+             subject,
+             from_header,
+             from_address,
+             recipient_headers,
+             to_header,
+             cc_header,
+             bcc_header,
+             reply_to_header,
+             size_estimate,
+             list_id_header,
+             list_unsubscribe_header,
+             list_unsubscribe_post_header,
+             precedence_header,
+             auto_submitted_header,
+             updated_at_epoch_s
+         )
+         SELECT
+             account_id,
+             message_id,
+             thread_id,
+             history_id,
+             internal_date_epoch_ms,
+             snippet,
+             subject,
+             from_header,
+             from_address,
+             recipient_headers,
+             to_header,
+             cc_header,
+             bcc_header,
+             reply_to_header,
+             size_estimate,
+             list_id_header,
+             list_unsubscribe_header,
+             list_unsubscribe_post_header,
+             precedence_header,
+             auto_submitted_header,
+             ?2
+         FROM gmail_incremental_sync_stage_messages
+         WHERE account_id = ?1",
+        params![account_id, updated_at_epoch_s],
+    )?;
+    Ok(())
+}
+
+fn insert_live_message_labels_from_incremental_stage_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO gmail_message_labels (message_rowid, label_id)
+         SELECT
+             gm.message_rowid,
+             stage.label_id
+         FROM gmail_incremental_sync_stage_message_labels stage
+         INNER JOIN gmail_messages gm
+           ON gm.account_id = stage.account_id
+          AND gm.message_id = stage.message_id
+         WHERE stage.account_id = ?1",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+fn insert_live_attachments_from_incremental_stage_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    updated_at_epoch_s: i64,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO gmail_message_attachments (
+             account_id,
+             message_rowid,
+             attachment_key,
+             part_id,
+             gmail_attachment_id,
+             filename,
+             mime_type,
+             size_bytes,
+             content_disposition,
+             content_id,
+             is_inline,
+             vault_content_hash,
+             vault_relative_path,
+             vault_size_bytes,
+             vault_fetched_at_epoch_s,
+             updated_at_epoch_s
+         )
+         SELECT
+             stage.account_id,
+             gm.message_rowid,
+             stage.attachment_key,
+             stage.part_id,
+             stage.gmail_attachment_id,
+             stage.filename,
+             stage.mime_type,
+             stage.size_bytes,
+             stage.content_disposition,
+             stage.content_id,
+             stage.is_inline,
+             preserved.content_hash,
+             preserved.relative_path,
+             preserved.size_bytes,
+             preserved.fetched_at_epoch_s,
+             ?2
+         FROM gmail_incremental_sync_stage_attachments stage
+         INNER JOIN gmail_messages gm
+           ON gm.account_id = stage.account_id
+          AND gm.message_id = stage.message_id
+         LEFT JOIN gmail_incremental_sync_preserved_attachment_vaults preserved
+           ON preserved.attachment_key = stage.attachment_key
+         WHERE stage.account_id = ?1",
+        params![account_id, updated_at_epoch_s],
+    )?;
+    Ok(())
+}
+
+fn insert_live_search_from_incremental_stage_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT OR REPLACE INTO gmail_message_search (
+             rowid,
+             subject,
+             from_header,
+             recipient_headers,
+             snippet,
+             label_names
+         )
+         SELECT
+             gm.message_rowid,
+             stage.subject,
+             stage.from_header,
+             stage.recipient_headers,
+             stage.snippet,
+             stage.label_names_text
+         FROM gmail_incremental_sync_stage_messages stage
+         INNER JOIN gmail_messages gm
+           ON gm.account_id = stage.account_id
+          AND gm.message_id = stage.message_id
+         WHERE stage.account_id = ?1",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PreservedAttachmentVaultState {
     content_hash: String,
@@ -1317,6 +1911,7 @@ struct PreservedAttachmentVaultState {
     fetched_at_epoch_s: i64,
 }
 
+#[cfg(test)]
 fn load_attachment_vault_state_for_message(
     transaction: &rusqlite::Transaction<'_>,
     message_rowid: i64,
@@ -1351,6 +1946,7 @@ fn load_attachment_vault_state_for_message(
     Ok(rows.into_iter().collect())
 }
 
+#[cfg(test)]
 fn write_messages(
     transaction: &rusqlite::Transaction<'_>,
     account_id: &str,

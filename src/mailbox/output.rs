@@ -29,6 +29,20 @@ impl SyncRunReport {
                 "checkpoint_reused_messages_upserted={}",
                 self.checkpoint_reused_messages_upserted
             ),
+            format!("pipeline_enabled={}", self.pipeline_enabled),
+            format!(
+                "pipeline_list_queue_high_water={}",
+                self.pipeline_list_queue_high_water
+            ),
+            format!(
+                "pipeline_write_queue_high_water={}",
+                self.pipeline_write_queue_high_water
+            ),
+            format!(
+                "pipeline_write_batch_count={}",
+                self.pipeline_write_batch_count
+            ),
+            format!("pipeline_writer_wait_ms={}", self.pipeline_writer_wait_ms),
             format!("store_message_count={}", self.store_message_count),
             format!("store_label_count={}", self.store_label_count),
             format!(

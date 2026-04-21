@@ -116,6 +116,7 @@ report:
 - last successful incremental-sync epoch
 - active full-bootstrap checkpoint state when a staged full sync is in progress
 - persisted adaptive sync pacing state for the active account when present
+- last recorded pipeline metrics for the active account when sync state exists
 
 Full-bootstrap resume state is stored in SQLite, alongside the staged mailbox
 rows, not in a sidecar file under `.mailroom/`. The checkpoint row records the
@@ -167,5 +168,14 @@ The current mailbox-oriented schema adds:
 - `gmail_sync_state`
 - `gmail_message_search`
 - `gmail_full_sync_stage_*`
+- `gmail_incremental_sync_stage_*`
 - `gmail_full_sync_checkpoint`
 - `gmail_sync_pacing_state`
+
+The persisted sync state row also stores the last observed pipeline metrics:
+
+- `pipeline_enabled`
+- `pipeline_list_queue_high_water`
+- `pipeline_write_queue_high_water`
+- `pipeline_write_batch_count`
+- `pipeline_writer_wait_ms`

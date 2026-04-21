@@ -975,6 +975,11 @@ mod tests {
                 last_sync_epoch_s: 101,
                 last_full_sync_success_epoch_s: Some(90),
                 last_incremental_sync_success_epoch_s: Some(90),
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
             },
         )
         .unwrap();
@@ -1040,6 +1045,11 @@ mod tests {
                 last_sync_epoch_s: 101,
                 last_full_sync_success_epoch_s: Some(101),
                 last_incremental_sync_success_epoch_s: None,
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
             },
         )
         .unwrap();
@@ -1100,6 +1110,11 @@ mod tests {
                 last_sync_epoch_s: 101,
                 last_full_sync_success_epoch_s: Some(101),
                 last_incremental_sync_success_epoch_s: None,
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
             },
         )
         .unwrap();
@@ -1157,6 +1172,11 @@ mod tests {
                 last_sync_epoch_s: 101,
                 last_full_sync_success_epoch_s: Some(101),
                 last_incremental_sync_success_epoch_s: None,
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
             },
         )
         .unwrap();
@@ -1216,6 +1236,11 @@ mod tests {
                 last_sync_epoch_s: 101,
                 last_full_sync_success_epoch_s: Some(101),
                 last_incremental_sync_success_epoch_s: None,
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
             },
         )
         .unwrap();
