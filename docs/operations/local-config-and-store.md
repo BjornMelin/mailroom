@@ -171,6 +171,8 @@ The current mailbox-oriented schema adds:
 - `gmail_incremental_sync_stage_*`
 - `gmail_full_sync_checkpoint`
 - `gmail_sync_pacing_state`
+- `gmail_full_sync_stage_pages`
+- `gmail_full_sync_stage_page_messages`
 
 The persisted sync state row also stores the last observed pipeline metrics:
 
@@ -179,3 +181,13 @@ The persisted sync state row also stores the last observed pipeline metrics:
 - `pipeline_write_queue_high_water`
 - `pipeline_write_batch_count`
 - `pipeline_writer_wait_ms`
+- `pipeline_fetch_batch_count`
+- `pipeline_fetch_batch_avg_ms`
+- `pipeline_fetch_batch_max_ms`
+- `pipeline_writer_tx_count`
+- `pipeline_writer_tx_avg_ms`
+- `pipeline_writer_tx_max_ms`
+- `pipeline_reorder_buffer_high_water`
+- `pipeline_staged_message_count`
+- `pipeline_staged_delete_count`
+- `pipeline_staged_attachment_count`

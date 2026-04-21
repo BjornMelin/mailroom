@@ -45,6 +45,13 @@ Force a fresh bootstrap over a specific recent window:
 cargo run -- sync run --full --recent-days 30 --json
 ```
 
+Run the same sync surface in benchmarking mode when you want explicit
+throughput and pipeline telemetry for tuning:
+
+```bash
+cargo run -- sync benchmark --full --recent-days 365 --json
+```
+
 For real-mailbox hardening before the first production ruleset, use one deeper
 audit sync once:
 
@@ -130,6 +137,9 @@ Bounded pipeline behavior:
   message catalogs, normalize, then hand batches to one writer lane
 - the writer lane is the only stage that advances durable progress or touches
   sync state
+- full sync stages page manifests and page-message membership in SQLite so a
+  large listed page can be written in bounded sub-batches while checkpoint
+  ownership still stays page-ordered
 - full-sync checkpoint progress only advances after a whole listed page is
   durably staged in page order
 - any in-flight work that was fetched or normalized but not yet written is
@@ -202,6 +212,16 @@ Relevant sync fields in JSON output include:
 - `pipeline_write_queue_high_water`
 - `pipeline_write_batch_count`
 - `pipeline_writer_wait_ms`
+- `pipeline_fetch_batch_count`
+- `pipeline_fetch_batch_avg_ms`
+- `pipeline_fetch_batch_max_ms`
+- `pipeline_writer_tx_count`
+- `pipeline_writer_tx_avg_ms`
+- `pipeline_writer_tx_max_ms`
+- `pipeline_reorder_buffer_high_water`
+- `pipeline_staged_message_count`
+- `pipeline_staged_delete_count`
+- `pipeline_staged_attachment_count`
 
 Relevant `sync run` output fields now also include:
 
@@ -213,6 +233,16 @@ Relevant `sync run` output fields now also include:
 - `pipeline_write_queue_high_water`
 - `pipeline_write_batch_count`
 - `pipeline_writer_wait_ms`
+- `pipeline_fetch_batch_count`
+- `pipeline_fetch_batch_avg_ms`
+- `pipeline_fetch_batch_max_ms`
+- `pipeline_writer_tx_count`
+- `pipeline_writer_tx_avg_ms`
+- `pipeline_writer_tx_max_ms`
+- `pipeline_reorder_buffer_high_water`
+- `pipeline_staged_message_count`
+- `pipeline_staged_delete_count`
+- `pipeline_staged_attachment_count`
 - `adaptive_pacing_enabled`
 - `quota_units_cap_per_minute`
 - `message_fetch_concurrency_cap`
@@ -225,6 +255,9 @@ Relevant `sync run` output fields now also include:
 - `concurrency_pressure_retry_count`
 - `backend_retry_count`
 - `retry_after_wait_ms`
+- `duration_ms`
+- `pages_per_second`
+- `messages_per_second`
 
 ## Safety boundaries
 
