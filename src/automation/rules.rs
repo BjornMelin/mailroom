@@ -21,7 +21,7 @@ pub(crate) async fn validate_rule_file(
     let config_report = config_report.clone();
     spawn_blocking(move || validate_rule_file_blocking(&config_report))
         .await
-        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
 }
 
 pub(crate) fn validate_rule_file_blocking(
@@ -58,7 +58,7 @@ pub(crate) async fn resolve_rule_selection(
     let selected_rule_ids = selected_rule_ids.to_owned();
     spawn_blocking(move || resolve_rule_selection_blocking(&config_report, &selected_rule_ids))
         .await
-        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
 }
 
 pub(crate) fn resolve_rule_selection_blocking(

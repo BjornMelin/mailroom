@@ -161,24 +161,6 @@ pub(crate) fn record_candidate_apply_result(
         ],
     )?;
     if rows_updated == 0 {
-        let candidate_exists = transaction
-            .query_row(
-                "SELECT 1
-                 FROM automation_run_candidates
-                 WHERE run_id = ?1
-                   AND candidate_id = ?2",
-                params![input.run_id, input.candidate_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if candidate_exists {
-            return Err(AutomationStoreWriteError::RowCountMismatch {
-                operation: "record_candidate_apply_result",
-                expected: 1,
-                actual: 0,
-            });
-        }
         return Err(AutomationStoreWriteError::MissingCandidate {
             run_id: input.run_id,
             candidate_id: input.candidate_id,
@@ -244,12 +226,13 @@ pub(crate) fn claim_automation_run_for_apply(
          SET status = ?2,
              applied_at_epoch_s = ?3
          WHERE run_id = ?1
-           AND status = ?4",
+           AND status IN (?4, ?5)",
         params![
             run_id,
             AutomationRunStatus::Applying.as_str(),
             applied_at_epoch_s,
-            AutomationRunStatus::Previewed.as_str()
+            AutomationRunStatus::Previewed.as_str(),
+            AutomationRunStatus::ApplyFailed.as_str()
         ],
     )?;
     if rows_updated == 0 {

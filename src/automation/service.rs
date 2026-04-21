@@ -70,8 +70,8 @@ pub enum AutomationServiceError {
     },
     #[error("{message}")]
     RuleValidation { message: String },
-    #[error("failed to join blocking automation task: {source}")]
-    BlockingTask {
+    #[error("failed to join automation task: {source}")]
+    TaskPanic {
         #[source]
         source: tokio::task::JoinError,
     },
@@ -219,7 +219,7 @@ pub async fn apply_run(
                 .await?;
             }
         }
-        AutomationRunStatus::Applied | AutomationRunStatus::ApplyFailed => {
+        AutomationRunStatus::Applied => {
             return Err(AutomationServiceError::RuleValidation {
                 message: format!(
                     "automation run {run_id} has already been finalized with status {}",
@@ -227,6 +227,21 @@ pub async fn apply_run(
                 ),
             }
             .into());
+        }
+        AutomationRunStatus::ApplyFailed => {
+            let started_at_epoch_s = detail
+                .run
+                .applied_at_epoch_s
+                .unwrap_or(current_epoch_seconds()?);
+            claim_run_for_apply_task(config_report, run_id, started_at_epoch_s).await?;
+            append_run_start_event_task(
+                config_report,
+                &detail.run.account_id,
+                run_id,
+                pending_candidates.len(),
+                started_at_epoch_s,
+            )
+            .await?;
         }
     };
 
@@ -345,7 +360,7 @@ async fn acquire_apply_run_lock_task(
     let lock_path = automation_apply_lock_path(config_report);
     spawn_blocking(move || acquire_apply_run_lock_blocking(lock_path, run_id))
         .await
-        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
 }
 
 fn acquire_apply_run_lock_blocking(
@@ -397,7 +412,7 @@ async fn claim_run_for_apply_task(
         )
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
     Ok(())
 }
@@ -427,7 +442,7 @@ async fn append_run_start_event_task(
         )
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
     Ok(())
 }
@@ -532,7 +547,7 @@ fn match_rule(
         candidate.list_id_header.as_deref(),
         &rule.matcher.list_id_contains,
     )?;
-    let precedence_matches = match_optional_contains_case_insensitive(
+    let precedence_matches = match_optional_contains(
         candidate.precedence_header.as_deref(),
         &rule.matcher.precedence,
     )?;
@@ -576,13 +591,6 @@ fn match_optional_contains(
         .cloned()
         .collect::<Vec<_>>();
     (!matches.is_empty()).then_some(matches)
-}
-
-fn match_optional_contains_case_insensitive(
-    candidate: Option<&str>,
-    required_terms: &[String],
-) -> Option<Vec<String>> {
-    match_optional_contains(candidate, required_terms)
 }
 
 fn match_any_exact(candidate_values: &[String], required_values: &[String]) -> Option<Vec<String>> {
@@ -667,7 +675,7 @@ async fn apply_candidates(
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(outcome) => outcomes.push(outcome),
-            Err(source) => return Err(AutomationServiceError::BlockingTask { source }.into()),
+            Err(source) => return Err(AutomationServiceError::TaskPanic { source }.into()),
         }
     }
     outcomes.sort_by_key(|outcome| outcome.candidate_id);
@@ -847,7 +855,7 @@ async fn resolve_label_ids_task(
         )
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::MailboxRead { source })?;
 
     Ok(resolved
@@ -871,7 +879,7 @@ async fn list_latest_thread_candidates_task(
         )
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationRead { source })
     .map_err(Into::into)
 }
@@ -887,7 +895,7 @@ async fn create_automation_run_task(
         store::automation::create_automation_run(&database_path, busy_timeout_ms, &input)
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationWrite { source })
     .map_err(Into::into)
 }
@@ -902,7 +910,7 @@ async fn load_run_detail_task(
         store::automation::get_automation_run_detail(&database_path, busy_timeout_ms, run_id)
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationRead { source })?;
     detail.ok_or_else(|| AutomationServiceError::RunNotFound { run_id }.into())
 }
@@ -918,7 +926,7 @@ async fn record_candidate_apply_result_task(
         store::automation::record_candidate_apply_result(&database_path, busy_timeout_ms, &input)
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
     Ok(())
 }
@@ -934,7 +942,7 @@ async fn finalize_run_task(
         store::automation::finalize_automation_run(&database_path, busy_timeout_ms, &input)
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
     Ok(())
 }
@@ -950,7 +958,7 @@ async fn append_run_event_task(
         store::automation::append_automation_run_event(&database_path, busy_timeout_ms, &input)
     })
     .await
-    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
     .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
     Ok(())
 }
@@ -959,7 +967,7 @@ async fn init_store_task(config_report: &ConfigReport) -> Result<()> {
     let config_report = config_report.clone();
     spawn_blocking(move || store::init(&config_report))
         .await
-        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
         .map_err(|source| AutomationServiceError::StoreInit { source })?;
     Ok(())
 }
@@ -967,7 +975,7 @@ async fn init_store_task(config_report: &ConfigReport) -> Result<()> {
 async fn ensure_runtime_dirs_task(workspace_paths: crate::workspace::WorkspacePaths) -> Result<()> {
     spawn_blocking(move || workspace_paths.ensure_runtime_dirs())
         .await
-        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
         .map(|_| ())?;
     Ok(())
 }
@@ -977,7 +985,7 @@ async fn resolve_automation_account_id_task(config_report: &ConfigReport) -> Res
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     spawn_blocking(move || resolve_automation_account_id(&database_path, busy_timeout_ms))
         .await
-        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
 }
 
 fn resolve_automation_account_id(
@@ -1207,6 +1215,95 @@ mod tests {
         assert_eq!(refreshed_run.run.status, AutomationRunStatus::Applied);
         assert_eq!(
             refreshed_run.candidates[0].apply_status,
+            Some(AutomationApplyStatus::Succeeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_run_allows_rerunning_failed_runs() {
+        let mock_server = MockServer::start().await;
+        mount_profile_for_email(&mock_server, "operator@example.com").await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/threads/thread-1/modify"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("temporary failure"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, Some(&mock_server));
+        store::init(&config_report).unwrap();
+        seed_credentials(&config_report);
+        let account = seed_account(&config_report);
+        let detail = store::automation::create_automation_run(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &CreateAutomationRunInput {
+                account_id: account.account_id.clone(),
+                rule_file_path: String::from(".mailroom/automation.toml"),
+                rule_file_hash: String::from("hash"),
+                selected_rule_ids: vec![String::from("archive-digest")],
+                created_at_epoch_s: 100,
+                candidates: vec![sample_candidate("archive-digest", "thread-1")],
+            },
+        )
+        .unwrap();
+
+        let first_report = apply_run(&config_report, detail.run.run_id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            first_report.detail.run.status,
+            AutomationRunStatus::ApplyFailed
+        );
+        assert_eq!(first_report.applied_candidate_count, 0);
+        assert_eq!(first_report.failed_candidate_count, 1);
+
+        let after_first_run = store::automation::get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            detail.run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(after_first_run.run.status, AutomationRunStatus::ApplyFailed);
+        assert_eq!(
+            after_first_run.candidates[0].apply_status,
+            Some(AutomationApplyStatus::Failed)
+        );
+
+        mock_server.reset().await;
+        mount_profile_for_email(&mock_server, "operator@example.com").await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/threads/thread-1/modify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "thread-1",
+                "historyId": "711"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let second_report = apply_run(&config_report, detail.run.run_id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            second_report.detail.run.status,
+            AutomationRunStatus::Applied
+        );
+        assert_eq!(second_report.applied_candidate_count, 1);
+        assert_eq!(second_report.failed_candidate_count, 0);
+
+        let after_second_run = store::automation::get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            detail.run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(after_second_run.run.status, AutomationRunStatus::Applied);
+        assert_eq!(
+            after_second_run.candidates[0].apply_status,
             Some(AutomationApplyStatus::Succeeded)
         );
     }

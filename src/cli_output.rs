@@ -186,8 +186,8 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             AutomationServiceError::ApplyLock { .. } => {
                 (ErrorCode::StorageFailure, "automation.apply_lock")
             }
-            AutomationServiceError::BlockingTask { .. } => {
-                (ErrorCode::InternalFailure, "automation.blocking_join")
+            AutomationServiceError::TaskPanic { .. } => {
+                (ErrorCode::InternalFailure, "automation.task_panic")
             }
             AutomationServiceError::StoreInit { .. }
             | AutomationServiceError::MailboxRead { .. }
