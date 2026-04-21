@@ -168,6 +168,46 @@ impl StoreDoctorReport {
                             "mailbox_sync_pipeline_writer_wait_ms={}",
                             sync_state.pipeline_writer_wait_ms
                         );
+                        println!(
+                            "mailbox_sync_pipeline_fetch_batch_count={}",
+                            sync_state.pipeline_fetch_batch_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_fetch_batch_avg_ms={}",
+                            sync_state.pipeline_fetch_batch_avg_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_fetch_batch_max_ms={}",
+                            sync_state.pipeline_fetch_batch_max_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_tx_count={}",
+                            sync_state.pipeline_writer_tx_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_tx_avg_ms={}",
+                            sync_state.pipeline_writer_tx_avg_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_tx_max_ms={}",
+                            sync_state.pipeline_writer_tx_max_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_reorder_buffer_high_water={}",
+                            sync_state.pipeline_reorder_buffer_high_water
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_staged_message_count={}",
+                            sync_state.pipeline_staged_message_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_staged_delete_count={}",
+                            sync_state.pipeline_staged_delete_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_staged_attachment_count={}",
+                            sync_state.pipeline_staged_attachment_count
+                        );
                     }
                     None => println!("mailbox_sync_status=<never-run>"),
                 }
@@ -456,7 +496,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 13);
+        assert_eq!(report.schema_version, 14);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -480,13 +520,15 @@ mod tests {
                        'gmail_incremental_sync_stage_delete_ids',
                        'gmail_incremental_sync_stage_messages',
                        'gmail_incremental_sync_stage_message_labels',
-                       'gmail_incremental_sync_stage_attachments'
+                       'gmail_incremental_sync_stage_attachments',
+                       'gmail_full_sync_stage_pages',
+                       'gmail_full_sync_stage_page_messages'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 16);
+        assert_eq!(substrate_tables, 18);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -770,6 +812,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/14-sync-pipeline-telemetry-and-page-manifests/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/13-bounded-sync-pipeline/down.sql"
             ))
             .unwrap();
@@ -819,7 +866,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 13);
+        assert_eq!(migration_report.schema_version, 14);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();

@@ -4,8 +4,9 @@ use super::read::{
 };
 use super::{
     AttachmentExportEventInput, AttachmentVaultStateUpdate, FullSyncCheckpointRecord,
-    FullSyncCheckpointUpdate, GmailMessageUpsertInput, MailboxWriteError, SyncPacingStateRecord,
-    SyncPacingStateUpdate, SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
+    FullSyncCheckpointUpdate, FullSyncStagePageInput, GmailMessageUpsertInput, MailboxWriteError,
+    SyncPacingStateRecord, SyncPacingStateUpdate, SyncStateRecord, SyncStateUpdate,
+    unique_sorted_strings,
 };
 use crate::gmail::GmailLabel;
 use crate::store::connection;
@@ -16,6 +17,116 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 const DELETE_BATCH_SIZE: usize = 400;
+const FULL_SYNC_STAGE_PAGE_STATUS_PARTIAL: &str = "partial";
+const FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE: &str = "complete";
+
+pub(crate) struct MailboxWriterConnection {
+    connection: Connection,
+    account_id: String,
+}
+
+impl MailboxWriterConnection {
+    pub(crate) fn open(
+        database_path: &Path,
+        busy_timeout_ms: u64,
+        account_id: &str,
+    ) -> Result<Self> {
+        Ok(Self {
+            connection: connection::open_or_create(database_path, busy_timeout_ms)?,
+            account_id: account_id.to_owned(),
+        })
+    }
+
+    pub(crate) fn reset_full_sync_progress(&mut self) -> Result<()> {
+        reset_full_sync_progress_with_connection(&mut self.connection, &self.account_id)
+    }
+
+    pub(crate) fn prepare_full_sync_checkpoint(
+        &mut self,
+        labels: &[GmailLabel],
+        update: &FullSyncCheckpointUpdate,
+    ) -> Result<FullSyncCheckpointRecord> {
+        prepare_full_sync_checkpoint_with_connection(
+            &mut self.connection,
+            &self.account_id,
+            labels,
+            update,
+        )
+    }
+
+    pub(crate) fn update_full_sync_checkpoint_labels(
+        &mut self,
+        labels: &[GmailLabel],
+        update: &FullSyncCheckpointUpdate,
+    ) -> Result<FullSyncCheckpointRecord> {
+        update_full_sync_checkpoint_labels_with_connection(
+            &mut self.connection,
+            &self.account_id,
+            labels,
+            update,
+        )
+    }
+
+    pub(crate) fn stage_full_sync_page_chunk_and_maybe_update_checkpoint(
+        &mut self,
+        input: &FullSyncStagePageInput,
+        messages: &[GmailMessageUpsertInput],
+        checkpoint_update: Option<&FullSyncCheckpointUpdate>,
+    ) -> Result<FullSyncCheckpointRecord> {
+        stage_full_sync_page_chunk_and_maybe_update_checkpoint_with_connection(
+            &mut self.connection,
+            &self.account_id,
+            input,
+            messages,
+            checkpoint_update,
+        )
+    }
+
+    pub(crate) fn finalize_full_sync_from_stage(
+        &mut self,
+        updated_at_epoch_s: i64,
+        sync_state_update: &SyncStateUpdate,
+    ) -> Result<SyncStateRecord> {
+        finalize_full_sync_from_stage_with_connection(
+            &mut self.connection,
+            &self.account_id,
+            updated_at_epoch_s,
+            sync_state_update,
+        )
+    }
+
+    pub(crate) fn reset_incremental_sync_stage(&mut self) -> Result<()> {
+        reset_incremental_sync_stage_with_connection(&mut self.connection, &self.account_id)
+    }
+
+    pub(crate) fn stage_incremental_sync_batch(
+        &mut self,
+        messages: &[GmailMessageUpsertInput],
+        message_ids_to_delete: &[String],
+    ) -> Result<()> {
+        stage_incremental_sync_batch_with_connection(
+            &mut self.connection,
+            &self.account_id,
+            messages,
+            message_ids_to_delete,
+        )
+    }
+
+    pub(crate) fn finalize_incremental_from_stage(
+        &mut self,
+        labels: &[GmailLabel],
+        updated_at_epoch_s: i64,
+        sync_state_update: &SyncStateUpdate,
+    ) -> Result<(SyncStateRecord, usize)> {
+        finalize_incremental_from_stage_with_connection(
+            &mut self.connection,
+            &self.account_id,
+            labels,
+            updated_at_epoch_s,
+            sync_state_update,
+        )
+    }
+}
 
 #[cfg(test)]
 pub(crate) struct IncrementalSyncCommit<'a> {
@@ -26,15 +137,7 @@ pub(crate) struct IncrementalSyncCommit<'a> {
     pub(crate) sync_state_update: &'a SyncStateUpdate,
 }
 
-pub(crate) fn reset_full_sync_progress(
-    database_path: &Path,
-    busy_timeout_ms: u64,
-    account_id: &str,
-) -> Result<()> {
-    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
-    reset_full_sync_progress_with_connection(&mut connection, account_id)
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_full_sync_checkpoint(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -46,6 +149,7 @@ pub(crate) fn prepare_full_sync_checkpoint(
     prepare_full_sync_checkpoint_with_connection(&mut connection, account_id, labels, update)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn update_full_sync_checkpoint_labels(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -89,6 +193,7 @@ pub(crate) fn stage_full_sync_messages(
     stage_full_sync_messages_with_connection(&mut connection, account_id, messages)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn stage_full_sync_page_and_update_checkpoint(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -105,6 +210,7 @@ pub(crate) fn stage_full_sync_page_and_update_checkpoint(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn finalize_full_sync_from_stage(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -121,6 +227,7 @@ pub(crate) fn finalize_full_sync_from_stage(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn reset_incremental_sync_stage(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -130,6 +237,7 @@ pub(crate) fn reset_incremental_sync_stage(
     reset_incremental_sync_stage_with_connection(&mut connection, account_id)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn stage_incremental_sync_batch(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -146,6 +254,7 @@ pub(crate) fn stage_incremental_sync_batch(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn finalize_incremental_from_stage(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -518,6 +627,11 @@ fn update_full_sync_checkpoint_labels_with_connection(
     ensure_checkpoint_matches_account(account_id, update)?;
 
     let transaction = connection.transaction()?;
+    cleanup_incomplete_full_sync_stage_pages_in_transaction(
+        &transaction,
+        account_id,
+        update.pages_fetched,
+    )?;
     stage_full_sync_labels_in_transaction(&transaction, account_id, labels)?;
     let record = upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?;
     transaction.commit()?;
@@ -545,6 +659,14 @@ fn reset_full_sync_stage_in_transaction(
     account_id: &str,
 ) -> Result<()> {
     transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_page_messages WHERE account_id = ?1",
+        [account_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_pages WHERE account_id = ?1",
+        [account_id],
+    )?;
+    transaction.execute(
         "DELETE FROM gmail_full_sync_stage_attachments WHERE account_id = ?1",
         [account_id],
     )?;
@@ -559,6 +681,99 @@ fn reset_full_sync_stage_in_transaction(
     transaction.execute(
         "DELETE FROM gmail_full_sync_stage_labels WHERE account_id = ?1",
         [account_id],
+    )?;
+    Ok(())
+}
+
+fn cleanup_incomplete_full_sync_stage_pages_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    completed_page_count: i64,
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_attachments
+         WHERE account_id = ?1
+           AND message_id IN (
+               SELECT message_id
+               FROM gmail_full_sync_stage_page_messages
+               WHERE account_id = ?1
+                 AND page_seq IN (
+                     SELECT page_seq
+                     FROM gmail_full_sync_stage_pages
+                     WHERE account_id = ?1
+                       AND (status != ?2 OR page_seq >= ?3)
+                 )
+           )",
+        params![
+            account_id,
+            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
+            completed_page_count
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_message_labels
+         WHERE account_id = ?1
+           AND message_id IN (
+               SELECT message_id
+               FROM gmail_full_sync_stage_page_messages
+               WHERE account_id = ?1
+                 AND page_seq IN (
+                     SELECT page_seq
+                     FROM gmail_full_sync_stage_pages
+                     WHERE account_id = ?1
+                       AND (status != ?2 OR page_seq >= ?3)
+                 )
+           )",
+        params![
+            account_id,
+            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
+            completed_page_count
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_messages
+         WHERE account_id = ?1
+           AND message_id IN (
+               SELECT message_id
+               FROM gmail_full_sync_stage_page_messages
+               WHERE account_id = ?1
+                 AND page_seq IN (
+                     SELECT page_seq
+                     FROM gmail_full_sync_stage_pages
+                     WHERE account_id = ?1
+                       AND (status != ?2 OR page_seq >= ?3)
+                 )
+           )",
+        params![
+            account_id,
+            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
+            completed_page_count
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_page_messages
+         WHERE account_id = ?1
+           AND page_seq IN (
+               SELECT page_seq
+               FROM gmail_full_sync_stage_pages
+               WHERE account_id = ?1
+                 AND (status != ?2 OR page_seq >= ?3)
+           )",
+        params![
+            account_id,
+            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
+            completed_page_count
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_stage_pages
+         WHERE account_id = ?1
+           AND (status != ?2 OR page_seq >= ?3)",
+        params![
+            account_id,
+            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
+            completed_page_count
+        ],
     )?;
     Ok(())
 }
@@ -673,7 +888,7 @@ fn stage_full_sync_messages_with_connection(
     );
 
     let transaction = connection.transaction()?;
-    stage_full_sync_messages_in_transaction(&transaction, account_id, messages)?;
+    stage_full_sync_messages_in_transaction(&transaction, account_id, None, messages)?;
     transaction.commit()?;
     Ok(())
 }
@@ -684,11 +899,55 @@ fn stage_full_sync_page_and_update_checkpoint_with_connection(
     messages: &[GmailMessageUpsertInput],
     update: &FullSyncCheckpointUpdate,
 ) -> Result<FullSyncCheckpointRecord> {
-    ensure_checkpoint_matches_account(account_id, update)?;
+    let page_seq = update.pages_fetched.saturating_sub(1);
+    stage_full_sync_page_chunk_and_maybe_update_checkpoint_with_connection(
+        connection,
+        account_id,
+        &FullSyncStagePageInput {
+            page_seq,
+            listed_count: i64::try_from(messages.len()).unwrap_or(i64::MAX),
+            next_page_token: update.next_page_token.clone(),
+            updated_at_epoch_s: update.updated_at_epoch_s,
+            page_complete: true,
+        },
+        messages,
+        Some(update),
+    )
+}
+
+fn stage_full_sync_page_chunk_and_maybe_update_checkpoint_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+    input: &FullSyncStagePageInput,
+    messages: &[GmailMessageUpsertInput],
+    checkpoint_update: Option<&FullSyncCheckpointUpdate>,
+) -> Result<FullSyncCheckpointRecord> {
+    if input.page_complete {
+        let update = checkpoint_update.ok_or_else(|| {
+            anyhow!("full sync page completion requires a checkpoint update payload")
+        })?;
+        ensure_checkpoint_matches_account(account_id, update)?;
+    }
 
     let transaction = connection.transaction()?;
-    stage_full_sync_messages_in_transaction(&transaction, account_id, messages)?;
-    let record = upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?;
+    stage_full_sync_messages_in_transaction(
+        &transaction,
+        account_id,
+        Some(input.page_seq),
+        messages,
+    )?;
+    upsert_full_sync_stage_page_in_transaction(
+        &transaction,
+        account_id,
+        input,
+        i64::try_from(messages.len()).unwrap_or(i64::MAX),
+    )?;
+    let record = if let Some(update) = checkpoint_update {
+        upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?
+    } else {
+        read_full_sync_checkpoint(&transaction, account_id)?
+            .ok_or_else(|| anyhow!("full sync checkpoint disappeared while staging page chunk"))?
+    };
     transaction.commit()?;
     Ok(record)
 }
@@ -696,6 +955,7 @@ fn stage_full_sync_page_and_update_checkpoint_with_connection(
 fn stage_full_sync_messages_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     account_id: &str,
+    page_seq: Option<i64>,
     messages: &[GmailMessageUpsertInput],
 ) -> Result<()> {
     let mut upsert_message = transaction.prepare_cached(
@@ -788,6 +1048,20 @@ fn stage_full_sync_messages_in_transaction(
              content_id = excluded.content_id,
              is_inline = excluded.is_inline",
     )?;
+    let mut insert_page_message = page_seq
+        .is_some()
+        .then(|| {
+            transaction.prepare_cached(
+                "INSERT INTO gmail_full_sync_stage_page_messages (
+                     account_id,
+                     page_seq,
+                     message_id
+                 )
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT (account_id, page_seq, message_id) DO NOTHING",
+            )
+        })
+        .transpose()?;
 
     for message in messages {
         ensure!(
@@ -842,13 +1116,60 @@ fn stage_full_sync_messages_in_transaction(
                 if attachment.is_inline { 1_i64 } else { 0_i64 },
             ])?;
         }
+
+        if let (Some(page_seq), Some(insert_page_message)) =
+            (page_seq, insert_page_message.as_mut())
+        {
+            insert_page_message.execute(params![account_id, page_seq, &message.message_id])?;
+        }
     }
 
+    drop(insert_page_message);
     drop(insert_attachment);
     drop(insert_label);
     drop(delete_attachments);
     drop(delete_labels);
     drop(upsert_message);
+    Ok(())
+}
+
+fn upsert_full_sync_stage_page_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    input: &FullSyncStagePageInput,
+    staged_message_count: i64,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO gmail_full_sync_stage_pages (
+             account_id,
+             page_seq,
+             listed_count,
+             staged_message_count,
+             next_page_token,
+             status,
+             updated_at_epoch_s
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (account_id, page_seq) DO UPDATE SET
+             listed_count = excluded.listed_count,
+             staged_message_count = gmail_full_sync_stage_pages.staged_message_count + excluded.staged_message_count,
+             next_page_token = excluded.next_page_token,
+             status = excluded.status,
+             updated_at_epoch_s = excluded.updated_at_epoch_s",
+        params![
+            account_id,
+            input.page_seq,
+            input.listed_count,
+            staged_message_count,
+            &input.next_page_token,
+            if input.page_complete {
+                FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE
+            } else {
+                FULL_SYNC_STAGE_PAGE_STATUS_PARTIAL
+            },
+            input.updated_at_epoch_s,
+        ],
+    )?;
     Ok(())
 }
 
@@ -1338,11 +1659,21 @@ fn upsert_sync_state_in_transaction(
              pipeline_write_queue_high_water,
              pipeline_write_batch_count,
              pipeline_writer_wait_ms,
+             pipeline_fetch_batch_count,
+             pipeline_fetch_batch_avg_ms,
+             pipeline_fetch_batch_max_ms,
+             pipeline_writer_tx_count,
+             pipeline_writer_tx_avg_ms,
+             pipeline_writer_tx_max_ms,
+             pipeline_reorder_buffer_high_water,
+             pipeline_staged_message_count,
+             pipeline_staged_delete_count,
+             pipeline_staged_attachment_count,
              message_count,
              label_count,
              indexed_message_count
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
          ON CONFLICT (account_id) DO UPDATE SET
              cursor_history_id = excluded.cursor_history_id,
              bootstrap_query = excluded.bootstrap_query,
@@ -1363,6 +1694,16 @@ fn upsert_sync_state_in_transaction(
              pipeline_write_queue_high_water = excluded.pipeline_write_queue_high_water,
              pipeline_write_batch_count = excluded.pipeline_write_batch_count,
              pipeline_writer_wait_ms = excluded.pipeline_writer_wait_ms,
+             pipeline_fetch_batch_count = excluded.pipeline_fetch_batch_count,
+             pipeline_fetch_batch_avg_ms = excluded.pipeline_fetch_batch_avg_ms,
+             pipeline_fetch_batch_max_ms = excluded.pipeline_fetch_batch_max_ms,
+             pipeline_writer_tx_count = excluded.pipeline_writer_tx_count,
+             pipeline_writer_tx_avg_ms = excluded.pipeline_writer_tx_avg_ms,
+             pipeline_writer_tx_max_ms = excluded.pipeline_writer_tx_max_ms,
+             pipeline_reorder_buffer_high_water = excluded.pipeline_reorder_buffer_high_water,
+             pipeline_staged_message_count = excluded.pipeline_staged_message_count,
+             pipeline_staged_delete_count = excluded.pipeline_staged_delete_count,
+             pipeline_staged_attachment_count = excluded.pipeline_staged_attachment_count,
              message_count = excluded.message_count,
              label_count = excluded.label_count,
              indexed_message_count = excluded.indexed_message_count",
@@ -1385,6 +1726,16 @@ fn upsert_sync_state_in_transaction(
             update.pipeline_write_queue_high_water,
             update.pipeline_write_batch_count,
             update.pipeline_writer_wait_ms,
+            update.pipeline_fetch_batch_count,
+            update.pipeline_fetch_batch_avg_ms,
+            update.pipeline_fetch_batch_max_ms,
+            update.pipeline_writer_tx_count,
+            update.pipeline_writer_tx_avg_ms,
+            update.pipeline_writer_tx_max_ms,
+            update.pipeline_reorder_buffer_high_water,
+            update.pipeline_staged_message_count,
+            update.pipeline_staged_delete_count,
+            update.pipeline_staged_attachment_count,
             message_count,
             label_count,
             indexed_message_count,

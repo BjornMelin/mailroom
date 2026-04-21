@@ -227,6 +227,10 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
                 json: *json,
                 operation: "sync.run",
             },
+            SyncCommand::Benchmark { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "sync.benchmark",
+            },
         },
         Commands::Workflow { command } => match command {
             WorkflowCommand::List { json, .. } => CommandMetadata {
@@ -524,6 +528,13 @@ async fn handle_sync_command(
 
     match command {
         SyncCommand::Run {
+            full,
+            recent_days,
+            quota_units_per_minute,
+            message_fetch_concurrency,
+            json,
+        }
+        | SyncCommand::Benchmark {
             full,
             recent_days,
             quota_units_per_minute,

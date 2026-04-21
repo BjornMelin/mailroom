@@ -241,7 +241,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(13));
+    assert_eq!(store_report.schema_version, Some(14));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -957,6 +957,10 @@ async fn full_sync_failure_after_staging_a_page_preserves_existing_mailbox_cache
             .and_then(|state| state.cursor_history_id.as_deref()),
         Some("250")
     );
+    let failed_state = mailbox.sync_state.as_ref().unwrap();
+    assert!(failed_state.pipeline_enabled);
+    assert!(failed_state.pipeline_list_queue_high_water >= 1);
+    assert_eq!(failed_state.pipeline_write_batch_count, 1);
 
     let cached_results = store::mailbox::search_messages(
         &config_report.config.store.database_path,
@@ -1463,6 +1467,11 @@ async fn incremental_sync_keeps_existing_bootstrap_query() {
     assert_eq!(report.mode, store::mailbox::SyncMode::Incremental);
     assert_eq!(report.bootstrap_query, "newer_than:7d");
     assert_eq!(report.cursor_history_id, "350");
+    assert!(!report.pipeline_enabled);
+    assert_eq!(report.pipeline_list_queue_high_water, 0);
+    assert_eq!(report.pipeline_write_queue_high_water, 0);
+    assert_eq!(report.pipeline_write_batch_count, 0);
+    assert_eq!(report.pipeline_writer_wait_ms, 0);
 
     let stored_state = store::mailbox::get_sync_state(
         &config_report.config.store.database_path,
@@ -1480,6 +1489,8 @@ async fn incremental_sync_keeps_existing_bootstrap_query() {
         stored_state.last_sync_status,
         store::mailbox::SyncStatus::Ok
     );
+    assert!(!stored_state.pipeline_enabled);
+    assert_eq!(stored_state.pipeline_write_batch_count, 0);
 }
 
 #[tokio::test]
@@ -1718,6 +1729,16 @@ fn seed_existing_mailbox_with_custom_labels(
             pipeline_write_queue_high_water: 0,
             pipeline_write_batch_count: 0,
             pipeline_writer_wait_ms: 0,
+            pipeline_fetch_batch_count: 0,
+            pipeline_fetch_batch_avg_ms: 0,
+            pipeline_fetch_batch_max_ms: 0,
+            pipeline_writer_tx_count: 0,
+            pipeline_writer_tx_avg_ms: 0,
+            pipeline_writer_tx_max_ms: 0,
+            pipeline_reorder_buffer_high_water: 0,
+            pipeline_staged_message_count: 0,
+            pipeline_staged_delete_count: 0,
+            pipeline_staged_attachment_count: 0,
         },
     )
     .unwrap();
@@ -1857,6 +1878,11 @@ fn seed_full_sync_checkpoint(config_report: &ConfigReport, seed: FullSyncCheckpo
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/14-sync-pipeline-telemetry-and-page-manifests/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/13-bounded-sync-pipeline/down.sql"

@@ -331,6 +331,24 @@ pub enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Run a sync and report throughput and pipeline telemetry for tuning
+    Benchmark {
+        /// Force a full recent-window resync instead of using the stored history cursor
+        #[arg(long)]
+        full: bool,
+        /// Recent-window size in days for full bootstrap syncs
+        #[arg(long, default_value_t = crate::mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS)]
+        recent_days: u32,
+        /// Per-run adaptive ceiling for Gmail read quota units per minute
+        #[arg(long, default_value_t = crate::mailbox::DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE)]
+        quota_units_per_minute: u32,
+        /// Per-run adaptive ceiling for concurrent Gmail message fetches
+        #[arg(long, default_value_t = crate::mailbox::DEFAULT_MESSAGE_FETCH_CONCURRENCY)]
+        message_fetch_concurrency: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

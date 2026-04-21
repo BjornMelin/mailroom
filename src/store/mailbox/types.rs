@@ -66,6 +66,16 @@ pub(crate) struct SyncStateUpdate {
     pub(crate) pipeline_write_queue_high_water: i64,
     pub(crate) pipeline_write_batch_count: i64,
     pub(crate) pipeline_writer_wait_ms: i64,
+    pub(crate) pipeline_fetch_batch_count: i64,
+    pub(crate) pipeline_fetch_batch_avg_ms: i64,
+    pub(crate) pipeline_fetch_batch_max_ms: i64,
+    pub(crate) pipeline_writer_tx_count: i64,
+    pub(crate) pipeline_writer_tx_avg_ms: i64,
+    pub(crate) pipeline_writer_tx_max_ms: i64,
+    pub(crate) pipeline_reorder_buffer_high_water: i64,
+    pub(crate) pipeline_staged_message_count: i64,
+    pub(crate) pipeline_staged_delete_count: i64,
+    pub(crate) pipeline_staged_attachment_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -84,6 +94,16 @@ pub(crate) struct SyncStateRecord {
     pub(crate) pipeline_write_queue_high_water: i64,
     pub(crate) pipeline_write_batch_count: i64,
     pub(crate) pipeline_writer_wait_ms: i64,
+    pub(crate) pipeline_fetch_batch_count: i64,
+    pub(crate) pipeline_fetch_batch_avg_ms: i64,
+    pub(crate) pipeline_fetch_batch_max_ms: i64,
+    pub(crate) pipeline_writer_tx_count: i64,
+    pub(crate) pipeline_writer_tx_avg_ms: i64,
+    pub(crate) pipeline_writer_tx_max_ms: i64,
+    pub(crate) pipeline_reorder_buffer_high_water: i64,
+    pub(crate) pipeline_staged_message_count: i64,
+    pub(crate) pipeline_staged_delete_count: i64,
+    pub(crate) pipeline_staged_attachment_count: i64,
     pub(crate) message_count: i64,
     pub(crate) label_count: i64,
     pub(crate) indexed_message_count: i64,
@@ -120,6 +140,15 @@ pub(crate) struct FullSyncCheckpointUpdate {
     pub(crate) labels_synced: i64,
     pub(crate) started_at_epoch_s: i64,
     pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FullSyncStagePageInput {
+    pub(crate) page_seq: i64,
+    pub(crate) listed_count: i64,
+    pub(crate) next_page_token: Option<String>,
+    pub(crate) updated_at_epoch_s: i64,
+    pub(crate) page_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

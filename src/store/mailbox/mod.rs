@@ -14,24 +14,24 @@ pub(crate) use search::search_messages;
 pub(crate) use types::{
     AttachmentDetailRecord, AttachmentExportEventInput, AttachmentListItem, AttachmentListQuery,
     AttachmentVaultStateUpdate, FullSyncCheckpointRecord, FullSyncCheckpointStatus,
-    FullSyncCheckpointUpdate, GmailAttachmentUpsertInput, GmailAutomationHeaders,
-    GmailMessageUpsertInput, LabelUsageRecord, MailboxCoverageReport, MailboxDoctorReport,
-    MailboxReadError, MailboxWriteError, SearchQuery, SearchResult, SyncMode,
+    FullSyncCheckpointUpdate, FullSyncStagePageInput, GmailAttachmentUpsertInput,
+    GmailAutomationHeaders, GmailMessageUpsertInput, LabelUsageRecord, MailboxCoverageReport,
+    MailboxDoctorReport, MailboxReadError, MailboxWriteError, SearchQuery, SearchResult, SyncMode,
     SyncPacingPressureKind, SyncPacingStateRecord, SyncPacingStateUpdate, SyncStateRecord,
     SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
 };
 #[cfg(test)]
 pub(crate) use write::{
     IncrementalSyncCommit, apply_incremental_changes, commit_full_sync, commit_incremental_sync,
-    delete_messages, replace_labels, replace_labels_and_report_reindex, replace_messages,
-    reset_full_sync_stage, stage_full_sync_labels, stage_full_sync_messages, upsert_messages,
+    delete_messages, finalize_full_sync_from_stage, finalize_incremental_from_stage,
+    prepare_full_sync_checkpoint, replace_labels, replace_labels_and_report_reindex,
+    replace_messages, reset_full_sync_stage, reset_incremental_sync_stage, stage_full_sync_labels,
+    stage_full_sync_messages, stage_full_sync_page_and_update_checkpoint,
+    stage_incremental_sync_batch, update_full_sync_checkpoint_labels, upsert_messages,
 };
 pub(crate) use write::{
-    finalize_full_sync_from_stage, finalize_incremental_from_stage, prepare_full_sync_checkpoint,
-    record_attachment_export, reset_full_sync_progress, reset_incremental_sync_stage,
-    set_attachment_vault_state, stage_full_sync_page_and_update_checkpoint,
-    stage_incremental_sync_batch, update_full_sync_checkpoint_labels, upsert_sync_pacing_state,
-    upsert_sync_state,
+    MailboxWriterConnection, record_attachment_export, set_attachment_vault_state,
+    upsert_sync_pacing_state, upsert_sync_state,
 };
 
 use std::collections::BTreeSet;

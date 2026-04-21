@@ -43,6 +43,43 @@ impl SyncRunReport {
                 self.pipeline_write_batch_count
             ),
             format!("pipeline_writer_wait_ms={}", self.pipeline_writer_wait_ms),
+            format!(
+                "pipeline_fetch_batch_count={}",
+                self.pipeline_fetch_batch_count
+            ),
+            format!(
+                "pipeline_fetch_batch_avg_ms={}",
+                self.pipeline_fetch_batch_avg_ms
+            ),
+            format!(
+                "pipeline_fetch_batch_max_ms={}",
+                self.pipeline_fetch_batch_max_ms
+            ),
+            format!("pipeline_writer_tx_count={}", self.pipeline_writer_tx_count),
+            format!(
+                "pipeline_writer_tx_avg_ms={}",
+                self.pipeline_writer_tx_avg_ms
+            ),
+            format!(
+                "pipeline_writer_tx_max_ms={}",
+                self.pipeline_writer_tx_max_ms
+            ),
+            format!(
+                "pipeline_reorder_buffer_high_water={}",
+                self.pipeline_reorder_buffer_high_water
+            ),
+            format!(
+                "pipeline_staged_message_count={}",
+                self.pipeline_staged_message_count
+            ),
+            format!(
+                "pipeline_staged_delete_count={}",
+                self.pipeline_staged_delete_count
+            ),
+            format!(
+                "pipeline_staged_attachment_count={}",
+                self.pipeline_staged_attachment_count
+            ),
             format!("store_message_count={}", self.store_message_count),
             format!("store_label_count={}", self.store_label_count),
             format!(
@@ -101,6 +138,9 @@ impl SyncRunReport {
             format!("throttle_wait_count={}", self.throttle_wait_count),
             format!("throttle_wait_ms={}", self.throttle_wait_ms),
             format!("retry_after_wait_ms={}", self.retry_after_wait_ms),
+            format!("duration_ms={}", self.duration_ms),
+            format!("pages_per_second={:.3}", self.pages_per_second),
+            format!("messages_per_second={:.3}", self.messages_per_second),
         ]
         .join("\n")
             + "\n"
