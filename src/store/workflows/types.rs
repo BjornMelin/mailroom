@@ -1,3 +1,4 @@
+use crate::store::connection::DatabaseOpenError;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::path::Path;
@@ -375,14 +376,14 @@ pub(crate) enum WorkflowStoreReadError {
     OpenDatabase {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: DatabaseOpenError,
     },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
 }
 
 impl WorkflowStoreReadError {
-    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+    pub(crate) fn open_database(path: &Path, source: DatabaseOpenError) -> Self {
         Self::OpenDatabase {
             path: path.display().to_string(),
             source,
@@ -398,7 +399,7 @@ pub(crate) enum WorkflowStoreWriteError {
     OpenDatabase {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: DatabaseOpenError,
     },
     #[error("no workflow found for thread {thread_id}")]
     MissingWorkflow { thread_id: String },
@@ -417,7 +418,7 @@ pub(crate) enum WorkflowStoreWriteError {
 }
 
 impl WorkflowStoreWriteError {
-    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+    pub(crate) fn open_database(path: &Path, source: DatabaseOpenError) -> Self {
         Self::OpenDatabase {
             path: path.display().to_string(),
             source,

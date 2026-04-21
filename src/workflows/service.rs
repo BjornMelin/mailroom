@@ -913,6 +913,48 @@ pub async fn cleanup_trash(
     .await
 }
 
+pub(crate) async fn cleanup_tracked_thread_for_automation(
+    config_report: &ConfigReport,
+    gmail_client: &crate::gmail::GmailClient,
+    account_id: &str,
+    thread_id: &str,
+    action: store::workflows::CleanupAction,
+    add_label_names: Vec<String>,
+    remove_label_names: Vec<String>,
+) -> WorkflowResult<bool> {
+    let Some(detail) =
+        load_workflow_detail_if_present(config_report, account_id, thread_id).await?
+    else {
+        return Ok(false);
+    };
+
+    let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
+        Some(
+            resolve_cleanup_label_ids(
+                config_report,
+                account_id,
+                &add_label_names,
+                &remove_label_names,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    execute_cleanup_after_auth(
+        config_report,
+        gmail_client,
+        detail,
+        action,
+        add_label_names,
+        remove_label_names,
+        resolved_label_ids,
+    )
+    .await?;
+    Ok(true)
+}
+
 async fn cleanup_impl(
     config_report: &ConfigReport,
     thread_id: String,
@@ -942,60 +984,65 @@ async fn cleanup_impl(
     }
 
     let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
-        let database_path = config_report.config.store.database_path.clone();
-        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-        let account_id = account_id.clone();
-        let add_names = add_label_names.clone();
-        let remove_names = remove_label_names.clone();
-        let (add_resolved, remove_resolved) = join_blocking(
-            spawn_blocking(move || {
-                Ok::<_, store::mailbox::MailboxReadError>((
-                    store::mailbox::resolve_label_ids_by_names(
-                        &database_path,
-                        busy_timeout_ms,
-                        &account_id,
-                        &add_names,
-                    )?,
-                    store::mailbox::resolve_label_ids_by_names(
-                        &database_path,
-                        busy_timeout_ms,
-                        &account_id,
-                        &remove_names,
-                    )?,
-                ))
-            }),
-            "cleanup.label.resolve_labels",
+        Some(
+            resolve_cleanup_label_ids(
+                config_report,
+                &account_id,
+                &add_label_names,
+                &remove_label_names,
+            )
+            .await?,
         )
-        .await?;
-        if add_resolved.len() != add_label_names.len() {
-            return Err(WorkflowServiceError::AddLabelsNotFoundLocally);
-        }
-        if remove_resolved.len() != remove_label_names.len() {
-            return Err(WorkflowServiceError::RemoveLabelsNotFoundLocally);
-        }
-        Some((
-            add_resolved
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-            remove_resolved
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>(),
-        ))
     } else {
         None
     };
 
+    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    gmail_client.get_profile_with_access_scope().await?;
+    let workflow = execute_cleanup_after_auth(
+        config_report,
+        &gmail_client,
+        detail,
+        action,
+        add_label_names,
+        remove_label_names,
+        resolved_label_ids,
+    )
+    .await?;
+    let sync_report = best_effort_sync_report(
+        mailbox::sync_run(config_report, false, mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS).await,
+        "cleanup applied but mailbox sync failed; run `mailroom sync run` to refresh local state",
+    );
+    Ok(WorkflowActionReport {
+        action: WorkflowAction::CleanupApplied,
+        workflow,
+        current_draft: None,
+        cleanup_preview: Some(cleanup_preview),
+        sync_report,
+    })
+}
+
+async fn execute_cleanup_after_auth(
+    config_report: &ConfigReport,
+    gmail_client: &crate::gmail::GmailClient,
+    detail: store::workflows::WorkflowDetail,
+    action: store::workflows::CleanupAction,
+    add_label_names: Vec<String>,
+    remove_label_names: Vec<String>,
+    resolved_label_ids: Option<(Vec<String>, Vec<String>)>,
+) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    let account_id = detail.workflow.account_id.clone();
+    let thread_id = detail.workflow.thread_id.clone();
+
     let payload_json = serde_json::to_string(&serde_json::json!({
         "add_label_names": add_label_names,
         "remove_label_names": remove_label_names,
-        "execute": execute,
+        "execute": true,
     }))?;
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
-    gmail_client.get_profile_with_access_scope().await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let cleanup_account_id = account_id.clone();
+    let cleanup_thread_id = thread_id.clone();
     let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
     let mut workflow = join_blocking(
         spawn_blocking(move || {
@@ -1003,8 +1050,8 @@ async fn cleanup_impl(
                 &database_path,
                 busy_timeout_ms,
                 &store::workflows::ApplyCleanupInput {
-                    account_id: detail.workflow.account_id,
-                    thread_id: detail.workflow.thread_id,
+                    account_id: cleanup_account_id,
+                    thread_id: cleanup_thread_id,
                     cleanup_action: action,
                     payload_json,
                     updated_at_epoch_s,
@@ -1014,6 +1061,7 @@ async fn cleanup_impl(
         "cleanup.apply",
     )
     .await?;
+
     match action {
         store::workflows::CleanupAction::Archive => {
             gmail_client
@@ -1031,10 +1079,11 @@ async fn cleanup_impl(
                 .await?;
         }
     }
+
     let needs_draft_retirement =
         workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some();
     if needs_draft_retirement {
-        delete_remote_draft_if_present(&gmail_client, workflow.gmail_draft_id.as_deref()).await?;
+        delete_remote_draft_if_present(gmail_client, workflow.gmail_draft_id.as_deref()).await?;
         workflow = retire_local_draft_state(
             config_report,
             &workflow.account_id,
@@ -1043,17 +1092,58 @@ async fn cleanup_impl(
         )
         .await?;
     }
-    let sync_report = best_effort_sync_report(
-        mailbox::sync_run(config_report, false, mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS).await,
-        "cleanup applied but mailbox sync failed; run `mailroom sync run` to refresh local state",
-    );
-    Ok(WorkflowActionReport {
-        action: WorkflowAction::CleanupApplied,
-        workflow,
-        current_draft: None,
-        cleanup_preview: Some(cleanup_preview),
-        sync_report,
-    })
+
+    Ok(workflow)
+}
+
+async fn resolve_cleanup_label_ids(
+    config_report: &ConfigReport,
+    account_id: &str,
+    add_label_names: &[String],
+    remove_label_names: &[String],
+) -> WorkflowResult<(Vec<String>, Vec<String>)> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let account_id = account_id.to_owned();
+    let add_names = add_label_names.to_owned();
+    let remove_names = remove_label_names.to_owned();
+    let (add_resolved, remove_resolved) = join_blocking(
+        spawn_blocking(move || {
+            Ok::<_, store::mailbox::MailboxReadError>((
+                store::mailbox::resolve_label_ids_by_names(
+                    &database_path,
+                    busy_timeout_ms,
+                    &account_id,
+                    &add_names,
+                )?,
+                store::mailbox::resolve_label_ids_by_names(
+                    &database_path,
+                    busy_timeout_ms,
+                    &account_id,
+                    &remove_names,
+                )?,
+            ))
+        }),
+        "cleanup.label.resolve_labels",
+    )
+    .await?;
+    if add_resolved.len() != add_label_names.len() {
+        return Err(WorkflowServiceError::AddLabelsNotFoundLocally);
+    }
+    if remove_resolved.len() != remove_label_names.len() {
+        return Err(WorkflowServiceError::RemoveLabelsNotFoundLocally);
+    }
+
+    Ok((
+        add_resolved
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        remove_resolved
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 async fn update_draft_revision<F>(
@@ -1173,6 +1263,18 @@ async fn workflow_detail(
     account_id: &str,
     thread_id: &str,
 ) -> WorkflowResult<store::workflows::WorkflowDetail> {
+    load_workflow_detail_if_present(config_report, account_id, thread_id)
+        .await?
+        .ok_or_else(|| WorkflowServiceError::WorkflowNotFound {
+            thread_id: thread_id.to_owned(),
+        })
+}
+
+async fn load_workflow_detail_if_present(
+    config_report: &ConfigReport,
+    account_id: &str,
+    thread_id: &str,
+) -> WorkflowResult<Option<store::workflows::WorkflowDetail>> {
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let account_id = account_id.to_owned();
@@ -1189,10 +1291,7 @@ async fn workflow_detail(
         }),
         "workflow.detail",
     )
-    .await?
-    .ok_or_else(|| WorkflowServiceError::WorkflowNotFound {
-        thread_id: thread_id.clone(),
-    })
+    .await
 }
 
 async fn latest_thread_snapshot(
@@ -3926,6 +4025,7 @@ mod tests {
                 bcc_header: String::new(),
                 reply_to_header: String::new(),
                 size_estimate: 123,
+                automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
                 label_ids: vec![String::from("INBOX")],
                 label_names_text: String::from("INBOX"),
                 attachments: Vec::new(),

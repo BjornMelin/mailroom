@@ -7,10 +7,10 @@
 - Primary stack: Rust + `clap`
 - Planned operator surfaces: CLI first, TUI second
 - Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
-- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, and attachment catalog/export foundation
+- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, attachment catalog/export foundation, and review-first automation rules
 - Versioned content: code, docs, examples, plans
 - Ignored runtime content: `.mailroom/` state, caches, exports, secrets, and attachment vaults
-- V1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export
+- V1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export + review-first automation
 
 ## Repository layout
 
@@ -37,6 +37,7 @@ These paths are intentionally ignored from git.
 Repo-local overrides also live under `.mailroom/`:
 
 - `.mailroom/config.toml`
+- `.mailroom/automation.toml`
 - `.mailroom/auth/gmail-oauth-client.json`
 - `.mailroom/auth/gmail-credentials.json`
 - `.mailroom/state/mailroom.sqlite3`
@@ -67,6 +68,11 @@ cargo run -- attachment show m-1:1.2 --json
 cargo run -- attachment fetch m-1:1.2 --json
 cargo run -- attachment export m-1:1.2 --json
 cargo run -- attachment export m-1:1.2 --to ./exports/statement.pdf --json
+cargo run -- automation rules validate --json
+cargo run -- automation run --json
+cargo run -- automation run --rule archive-newsletters --limit 25 --json
+cargo run -- automation show 42 --json
+cargo run -- automation apply 42 --execute --json
 cargo run -- workflow list --json
 cargo run -- workflow show thread-123 --json
 cargo run -- triage set thread-123 --bucket urgent --note "reply today" --json
@@ -121,6 +127,10 @@ Thread workflow, remote draft, and cleanup behavior live in
 [`docs/operations/thread-workflow-and-cleanup.md`](docs/operations/thread-workflow-and-cleanup.md),
 with the durable design captured in
 [`docs/decisions/0004-unified-thread-workflow.md`](docs/decisions/0004-unified-thread-workflow.md).
+Review-first automation rules and persisted bulk-action snapshots live in
+[`docs/operations/automation-rules-and-bulk-actions.md`](docs/operations/automation-rules-and-bulk-actions.md),
+with the durable design captured in
+[`docs/decisions/0006-review-first-automation-rules.md`](docs/decisions/0006-review-first-automation-rules.md).
 
 Config precedence is:
 
@@ -161,17 +171,19 @@ Advanced manual overrides still work:
 - [`docs/decisions/0003-message-canonical-sync.md`](docs/decisions/0003-message-canonical-sync.md): mailbox sync and search design
 - [`docs/decisions/0004-unified-thread-workflow.md`](docs/decisions/0004-unified-thread-workflow.md): thread workflow, drafts, and cleanup ownership
 - [`docs/decisions/0005-attachment-canonical-model.md`](docs/decisions/0005-attachment-canonical-model.md): attachment catalog, vault, and export ownership
+- [`docs/decisions/0006-review-first-automation-rules.md`](docs/decisions/0006-review-first-automation-rules.md): review-first automation rules and persisted bulk-action snapshots
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
 - [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
 - [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md): sync commands, search filters, and cursor behavior
 - [`docs/operations/attachment-catalog-and-export.md`](docs/operations/attachment-catalog-and-export.md): attachment listing, vault fetch, and export commands
 - [`docs/operations/thread-workflow-and-cleanup.md`](docs/operations/thread-workflow-and-cleanup.md): triage, draft/send, snooze, and reviewed cleanup commands
+- [`docs/operations/automation-rules-and-bulk-actions.md`](docs/operations/automation-rules-and-bulk-actions.md): rule validation, persisted run snapshots, and review-first bulk apply
 - [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
 - [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 
 ## Near-term build plan
 
-1. Harden attachment review ergonomics, including better export naming and richer operator inspection.
-2. Improve draft composition ergonomics, including better reply helpers and richer review output.
-3. Add unsubscribe assistance and bulk-cleanup heuristics only after explicit review contracts exist.
+1. Improve automation ergonomics, including better candidate inspection and reusable rule presets.
+2. Harden attachment and thread review ergonomics, including better export naming and richer operator inspection.
+3. Expand unsubscribe assistance only after the review-first automation contract proves out.
 4. Build a TUI over the existing command core and SQLite workflow model.

@@ -1,3 +1,4 @@
+use crate::store::connection::DatabaseOpenError;
 use serde::Serialize;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
@@ -17,6 +18,15 @@ pub(crate) struct GmailAttachmentUpsertInput {
     pub(crate) is_inline: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct GmailAutomationHeaders {
+    pub(crate) list_id_header: Option<String>,
+    pub(crate) list_unsubscribe_header: Option<String>,
+    pub(crate) list_unsubscribe_post_header: Option<String>,
+    pub(crate) precedence_header: Option<String>,
+    pub(crate) auto_submitted_header: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct GmailMessageUpsertInput {
     pub(crate) account_id: String,
@@ -34,6 +44,7 @@ pub(crate) struct GmailMessageUpsertInput {
     pub(crate) bcc_header: String,
     pub(crate) reply_to_header: String,
     pub(crate) size_estimate: i64,
+    pub(crate) automation_headers: GmailAutomationHeaders,
     pub(crate) label_ids: Vec<String>,
     pub(crate) label_names_text: String,
     pub(crate) attachments: Vec<GmailAttachmentUpsertInput>,
@@ -277,14 +288,14 @@ pub(crate) enum MailboxReadError {
     OpenDatabase {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: DatabaseOpenError,
     },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
 }
 
 impl MailboxReadError {
-    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+    pub(crate) fn open_database(path: &Path, source: DatabaseOpenError) -> Self {
         Self::OpenDatabase {
             path: path.display().to_string(),
             source,
@@ -305,7 +316,7 @@ pub(crate) enum MailboxWriteError {
     OpenDatabase {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: DatabaseOpenError,
     },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
@@ -320,7 +331,7 @@ pub(crate) enum MailboxWriteError {
 }
 
 impl MailboxWriteError {
-    pub(crate) fn open_database(path: &Path, source: anyhow::Error) -> Self {
+    pub(crate) fn open_database(path: &Path, source: DatabaseOpenError) -> Self {
         Self::OpenDatabase {
             path: path.display().to_string(),
             source,

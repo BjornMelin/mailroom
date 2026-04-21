@@ -1,5 +1,6 @@
 mod attachments;
 mod auth;
+mod automation;
 mod cli;
 mod cli_output;
 mod config;
@@ -14,10 +15,10 @@ mod workspace;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    AccountCommand, AttachmentCommand, AuthCommand, CleanupCommand, Cli, Commands, ConfigCommand,
-    DraftAttachmentCommand, DraftCommand, GmailCommand, GmailLabelsCommand, SearchArgs,
-    StoreCommand, SyncCommand, TriageBucketArg, TriageCommand, WorkflowCommand,
-    WorkflowPromoteTargetArg, WorkflowStageArg, WorkspaceCommand,
+    AccountCommand, AttachmentCommand, AuthCommand, AutomationCommand, AutomationRulesCommand,
+    CleanupCommand, Cli, Commands, ConfigCommand, DraftAttachmentCommand, DraftCommand,
+    GmailCommand, GmailLabelsCommand, SearchArgs, StoreCommand, SyncCommand, TriageBucketArg,
+    TriageCommand, WorkflowCommand, WorkflowPromoteTargetArg, WorkflowStageArg, WorkspaceCommand,
 };
 use serde::Serialize;
 use std::io::Read;
@@ -83,6 +84,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Roadmap => print_roadmap(),
         Commands::Search(args) => handle_search_command(&paths, args).await?,
         Commands::Attachment { command } => handle_attachment_command(&paths, command).await?,
+        Commands::Automation { command } => handle_automation_command(&paths, command).await?,
         Commands::Sync { command } => handle_sync_command(&paths, command).await?,
         Commands::Workflow { command } => handle_workflow_command(&paths, command).await?,
         Commands::Triage { command } => handle_triage_command(&paths, command).await?,
@@ -185,6 +187,26 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
             AttachmentCommand::Export { json, .. } => CommandMetadata {
                 json: *json,
                 operation: "attachment.export",
+            },
+        },
+        Commands::Automation { command } => match command {
+            AutomationCommand::Rules {
+                command: AutomationRulesCommand::Validate { json },
+            } => CommandMetadata {
+                json: *json,
+                operation: "automation.rules.validate",
+            },
+            AutomationCommand::Run { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "automation.run",
+            },
+            AutomationCommand::Show { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "automation.show",
+            },
+            AutomationCommand::Apply { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "automation.apply",
             },
         },
         Commands::Sync { command } => match command {
@@ -425,6 +447,43 @@ async fn handle_attachment_command(
             to,
             json,
         } => attachments::export(&config_report, attachment_key, to)
+            .await?
+            .print(json)?,
+    }
+
+    Ok(())
+}
+
+async fn handle_automation_command(
+    paths: &workspace::WorkspacePaths,
+    command: AutomationCommand,
+) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        AutomationCommand::Rules {
+            command: AutomationRulesCommand::Validate { json },
+        } => automation::validate_rules(&config_report)
+            .await?
+            .print(json)?,
+        AutomationCommand::Run {
+            rule_ids,
+            limit,
+            json,
+        } => automation::run_preview(
+            &config_report,
+            automation::AutomationRunRequest { rule_ids, limit },
+        )
+        .await?
+        .print(json)?,
+        AutomationCommand::Show { run_id, json } => automation::show_run(&config_report, run_id)
+            .await?
+            .print(json)?,
+        AutomationCommand::Apply {
+            run_id,
+            execute,
+            json,
+        } => automation::apply_run(&config_report, run_id, execute)
             .await?
             .print(json)?,
     }

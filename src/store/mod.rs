@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod automation;
 mod connection;
 pub mod mailbox;
 mod migrations;
@@ -34,6 +35,7 @@ pub struct StoreDoctorReport {
     pub pragmas: Option<StorePragmas>,
     pub mailbox: Option<mailbox::MailboxDoctorReport>,
     pub workflows: Option<workflows::WorkflowDoctorReport>,
+    pub automation: Option<automation::AutomationDoctorReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,6 +162,22 @@ impl StoreDoctorReport {
                     workflows.draft_revision_count
                 );
             }
+            if let Some(automation) = &self.automation {
+                println!("automation_run_count={}", automation.run_count);
+                println!(
+                    "automation_previewed_run_count={}",
+                    automation.previewed_run_count
+                );
+                println!(
+                    "automation_applied_run_count={}",
+                    automation.applied_run_count
+                );
+                println!(
+                    "automation_apply_failed_run_count={}",
+                    automation.apply_failed_run_count
+                );
+                println!("automation_candidate_count={}", automation.candidate_count);
+            }
         }
 
         Ok(())
@@ -211,6 +229,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
             pragmas: None,
             mailbox: None,
             workflows: None,
+            automation: None,
         });
     }
 
@@ -224,6 +243,8 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
         mailbox::inspect_mailbox(&database_path, config_report.config.store.busy_timeout_ms)?;
     let workflows =
         workflows::inspect_workflows(&database_path, config_report.config.store.busy_timeout_ms)?;
+    let automation =
+        automation::inspect_automation(&database_path, config_report.config.store.busy_timeout_ms)?;
 
     Ok(StoreDoctorReport {
         config: config_report,
@@ -235,6 +256,7 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
         pragmas: Some(pragmas),
         mailbox,
         workflows,
+        automation,
     })
 }
 
@@ -357,7 +379,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 7);
+        assert_eq!(report.schema_version, 8);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -487,11 +509,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(7, 8).unwrap_err();
+        let error = super::pending_migrations(8, 9).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 8 is newer than embedded migrations (7)")
+                .contains("database schema version 9 is newer than embedded migrations (8)")
         );
     }
 
@@ -618,6 +640,7 @@ mod tests {
                     bcc_header: String::new(),
                     reply_to_header: String::new(),
                     size_estimate: 2048,
+                    automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
                     label_ids: vec![String::from("INBOX")],
                     label_names_text: String::from("INBOX"),
                     attachments: (0..ATTACHMENTS_PER_MESSAGE)
@@ -660,6 +683,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/08-automation-rules-and-bulk-actions/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/07-account-scoped-attachment-keys/down.sql"
             ))
             .unwrap();
@@ -679,7 +707,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 7);
+        assert_eq!(migration_report.schema_version, 8);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();
@@ -731,6 +759,7 @@ mod tests {
             bcc_header: String::new(),
             reply_to_header: String::new(),
             size_estimate: 123,
+            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
             attachments: vec![mailbox::GmailAttachmentUpsertInput {
@@ -761,6 +790,7 @@ mod tests {
             bcc_header: String::new(),
             reply_to_header: String::new(),
             size_estimate: 123,
+            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
             attachments: vec![mailbox::GmailAttachmentUpsertInput {

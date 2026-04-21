@@ -51,6 +51,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: AttachmentCommand,
     },
+    /// Preview and apply review-first automation rules
+    Automation {
+        #[command(subcommand)]
+        command: AutomationCommand,
+    },
     /// Synchronize mailbox metadata into the local index
     Sync {
         #[command(subcommand)]
@@ -229,6 +234,56 @@ pub enum AttachmentCommand {
         /// Destination file path or existing directory
         #[arg(long)]
         to: Option<PathBuf>,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AutomationCommand {
+    /// Validate the active local automation rules file
+    Rules {
+        #[command(subcommand)]
+        command: AutomationRulesCommand,
+    },
+    /// Evaluate rules against the local mailbox cache and persist a review snapshot
+    Run {
+        /// Restrict the run to one or more specific rule IDs
+        #[arg(long = "rule")]
+        rule_ids: Vec<String>,
+        /// Maximum number of thread candidates to persist
+        #[arg(long, default_value_t = crate::automation::DEFAULT_AUTOMATION_RUN_LIMIT)]
+        limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a persisted automation review snapshot
+    Show {
+        /// Numeric automation run ID
+        run_id: i64,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a persisted automation review snapshot
+    Apply {
+        /// Numeric automation run ID
+        run_id: i64,
+        /// Execute the reviewed mutations
+        #[arg(long)]
+        execute: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AutomationRulesCommand {
+    /// Validate and print the active local automation rules file
+    Validate {
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,

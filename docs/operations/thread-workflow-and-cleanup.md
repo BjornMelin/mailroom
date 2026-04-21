@@ -17,9 +17,11 @@ It builds on the existing auth/account and mailbox sync/search substrate. It
 does not yet own:
 
 - attachment catalog/export workflows
-- unsubscribe automation
-- bulk cleanup heuristics
+- persisted automation rule evaluation or bulk snapshots
 - rich HTML composition
+
+Bulk cleanup preview/apply through persisted rule snapshots now lives in
+[`automation-rules-and-bulk-actions.md`](automation-rules-and-bulk-actions.md).
 
 ## Prerequisites
 
