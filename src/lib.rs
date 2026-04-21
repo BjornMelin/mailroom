@@ -526,10 +526,20 @@ async fn handle_sync_command(
         SyncCommand::Run {
             full,
             recent_days,
+            quota_units_per_minute,
+            message_fetch_concurrency,
             json,
-        } => mailbox::sync_run(&config_report, full, recent_days)
-            .await?
-            .print(json)?,
+        } => mailbox::sync_run_with_options(
+            &config_report,
+            mailbox::SyncRunOptions {
+                force_full: full,
+                recent_days,
+                quota_units_per_minute,
+                message_fetch_concurrency,
+            },
+        )
+        .await?
+        .print(json)?,
     }
 
     Ok(())
@@ -836,8 +846,15 @@ pub(crate) fn configured_paths(
 pub(crate) async fn refresh_active_account_record(
     config_report: &config::ConfigReport,
 ) -> Result<store::accounts::AccountRecord> {
-    let configured_paths = configured_paths(config_report)?;
     let gmail_client = gmail_client_for_config(config_report)?;
+    refresh_active_account_record_with_client(config_report, &gmail_client).await
+}
+
+pub(crate) async fn refresh_active_account_record_with_client(
+    config_report: &config::ConfigReport,
+    gmail_client: &gmail::GmailClient,
+) -> Result<store::accounts::AccountRecord> {
+    let configured_paths = configured_paths(config_report)?;
     let (profile, access_scope) = gmail_client.get_profile_with_access_scope().await?;
     configured_paths.ensure_runtime_dirs()?;
     store::init(config_report)?;

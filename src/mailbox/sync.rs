@@ -1,11 +1,14 @@
 use crate::config::ConfigReport;
 use crate::gmail::{GmailClient, GmailLabel, GmailMessageCatalog};
-use crate::mailbox::model::FinalizeSyncInput;
+use crate::mailbox::model::{FinalizeSyncInput, SyncRunOptions};
 use crate::mailbox::util::{
     bootstrap_query, is_stale_history_error, labels_by_id, message_is_excluded, newest_history_id,
     recipient_headers,
 };
-use crate::mailbox::{FULL_SYNC_PAGE_SIZE, MESSAGE_FETCH_CONCURRENCY, SyncRunReport};
+use crate::mailbox::{
+    DEFAULT_MESSAGE_FETCH_CONCURRENCY, DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE, FULL_SYNC_PAGE_SIZE,
+    SyncRunReport,
+};
 use crate::store;
 use crate::store::accounts::AccountRecord;
 use crate::time::current_epoch_seconds;
@@ -20,16 +23,39 @@ pub async fn sync_run(
     force_full: bool,
     recent_days: u32,
 ) -> Result<SyncRunReport> {
-    if recent_days == 0 {
+    sync_run_with_options(
+        config_report,
+        SyncRunOptions {
+            force_full,
+            recent_days,
+            quota_units_per_minute: DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE,
+            message_fetch_concurrency: DEFAULT_MESSAGE_FETCH_CONCURRENCY,
+        },
+    )
+    .await
+}
+
+pub async fn sync_run_with_options(
+    config_report: &ConfigReport,
+    options: SyncRunOptions,
+) -> Result<SyncRunReport> {
+    if options.recent_days == 0 {
         return Err(anyhow!("recent_days must be greater than zero"));
     }
+    if options.message_fetch_concurrency == 0 {
+        return Err(anyhow!(
+            "message_fetch_concurrency must be greater than zero"
+        ));
+    }
 
-    let account = crate::refresh_active_account_record(config_report).await?;
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    let gmail_client = crate::gmail_client_for_config(config_report)?
+        .with_quota_budget(options.quota_units_per_minute)?;
+    let account =
+        crate::refresh_active_account_record_with_client(config_report, &gmail_client).await?;
     let store_handle = MailboxStoreHandle::new(config_report, &account.account_id);
-    let requested_bootstrap_query = bootstrap_query(recent_days);
+    let requested_bootstrap_query = bootstrap_query(options.recent_days);
     let existing_sync_state = load_sync_state(&store_handle).await?;
-    let initial_mode = sync_mode(force_full, existing_sync_state.as_ref());
+    let initial_mode = sync_mode(options.force_full, existing_sync_state.as_ref());
     let mut failure_mode = initial_mode;
     let mut failure_cursor_history_id = existing_sync_state
         .as_ref()
@@ -47,31 +73,26 @@ pub async fn sync_run(
     let result = async {
         let labels = gmail_client.list_labels().await?;
         let label_names_by_id = labels_by_id(&labels);
+        let sync_context = SyncExecutionContext {
+            store_handle: &store_handle,
+            gmail_client: &gmail_client,
+            account: &account,
+            labels: &labels,
+            label_names_by_id: &label_names_by_id,
+            message_fetch_concurrency: options.message_fetch_concurrency,
+        };
 
         match initial_mode {
             store::mailbox::SyncMode::Full => {
-                run_full_sync(
-                    &store_handle,
-                    &gmail_client,
-                    &account,
-                    &labels,
-                    initial_bootstrap_query,
-                    &label_names_by_id,
-                    false,
-                )
-                .await
+                run_full_sync(&sync_context, initial_bootstrap_query, false).await
             }
             store::mailbox::SyncMode::Incremental => {
                 let sync_state = existing_sync_state
                     .as_ref()
                     .ok_or_else(|| anyhow!("incremental sync requires an existing sync state"))?;
                 match run_incremental_sync(
-                    &store_handle,
-                    &gmail_client,
-                    &account,
-                    &labels,
+                    &sync_context,
                     persisted_bootstrap_query,
-                    &label_names_by_id,
                     sync_state.cursor_history_id.clone(),
                 )
                 .await
@@ -81,16 +102,7 @@ pub async fn sync_run(
                         failure_mode = store::mailbox::SyncMode::Full;
                         failure_cursor_history_id = None;
                         failure_bootstrap_query = persisted_bootstrap_query;
-                        run_full_sync(
-                            &store_handle,
-                            &gmail_client,
-                            &account,
-                            &labels,
-                            persisted_bootstrap_query,
-                            &label_names_by_id,
-                            true,
-                        )
-                        .await
+                        run_full_sync(&sync_context, persisted_bootstrap_query, true).await
                     }
                     Err(error) => Err(error),
                 }
@@ -100,7 +112,19 @@ pub async fn sync_run(
     .await;
 
     match result {
-        Ok(report) => Ok(report),
+        Ok(mut report) => {
+            let metrics = gmail_client.request_metrics_snapshot();
+            report.quota_units_budget_per_minute = options.quota_units_per_minute;
+            report.message_fetch_concurrency = options.message_fetch_concurrency;
+            if let Some(metrics) = metrics {
+                report.estimated_quota_units_reserved = metrics.reserved_units;
+                report.http_attempt_count = metrics.http_attempts;
+                report.retry_count = metrics.retry_count;
+                report.throttle_wait_count = metrics.throttle_wait_count;
+                report.throttle_wait_ms = metrics.throttle_wait_ms;
+            }
+            Ok(report)
+        }
         Err(sync_error) => {
             let persist_result = persist_sync_state_failure(
                 &store_handle,
@@ -131,24 +155,30 @@ fn sync_mode(
     }
 }
 
+struct SyncExecutionContext<'a> {
+    store_handle: &'a MailboxStoreHandle,
+    gmail_client: &'a GmailClient,
+    account: &'a AccountRecord,
+    labels: &'a [GmailLabel],
+    label_names_by_id: &'a BTreeMap<String, String>,
+    message_fetch_concurrency: usize,
+}
+
 async fn run_full_sync(
-    store_handle: &MailboxStoreHandle,
-    gmail_client: &GmailClient,
-    account: &AccountRecord,
-    labels: &[GmailLabel],
+    context: &SyncExecutionContext<'_>,
     bootstrap_query: &str,
-    label_names_by_id: &BTreeMap<String, String>,
     fallback_from_history: bool,
 ) -> Result<SyncRunReport> {
     let mut page_token = None;
     let mut pages_fetched = 0usize;
     let mut messages_listed = 0usize;
     let mut messages_upserted = 0usize;
-    let mut cursor_history_id = Some(account.history_id.clone());
+    let mut cursor_history_id = Some(context.account.history_id.clone());
     let mut upserts = Vec::new();
 
     loop {
-        let page = gmail_client
+        let page = context
+            .gmail_client
             .list_message_ids(
                 Some(bootstrap_query),
                 page_token.as_deref(),
@@ -163,13 +193,22 @@ async fn run_full_sync(
             .iter()
             .map(|message| message.id.clone())
             .collect();
-        let (catalogs, _) = fetch_message_catalogs(gmail_client.clone(), message_ids).await?;
+        let (catalogs, _) = fetch_message_catalogs(
+            context.gmail_client.clone(),
+            message_ids,
+            context.message_fetch_concurrency,
+        )
+        .await?;
 
         for catalog in &catalogs {
             cursor_history_id = newest_history_id(cursor_history_id, &catalog.metadata.history_id);
         }
 
-        let page_upserts = build_upsert_inputs(&account.account_id, catalogs, label_names_by_id);
+        let page_upserts = build_upsert_inputs(
+            &context.account.account_id,
+            catalogs,
+            context.label_names_by_id,
+        );
         messages_upserted += page_upserts.len();
         upserts.extend(page_upserts);
 
@@ -187,15 +226,21 @@ async fn run_full_sync(
         messages_listed,
         messages_upserted,
         messages_deleted: 0,
-        labels_synced: labels.len(),
+        labels_synced: context.labels.len(),
     };
     let now_epoch_s = current_epoch_seconds()?;
-    let sync_state = store_handle
+    let sync_state = context
+        .store_handle
         .commit_full_sync(
-            labels,
+            context.labels,
             upserts,
             now_epoch_s,
-            success_sync_state_update(account, bootstrap_query, &finalize_input, now_epoch_s),
+            success_sync_state_update(
+                context.account,
+                bootstrap_query,
+                &finalize_input,
+                now_epoch_s,
+            ),
         )
         .await?;
 
@@ -203,12 +248,8 @@ async fn run_full_sync(
 }
 
 async fn run_incremental_sync(
-    store_handle: &MailboxStoreHandle,
-    gmail_client: &GmailClient,
-    account: &AccountRecord,
-    labels: &[GmailLabel],
+    context: &SyncExecutionContext<'_>,
     bootstrap_query: &str,
-    label_names_by_id: &BTreeMap<String, String>,
     cursor_history_id: Option<String>,
 ) -> Result<SyncRunReport> {
     let cursor_history_id =
@@ -219,7 +260,8 @@ async fn run_incremental_sync(
     let mut deleted_message_ids = BTreeSet::new();
 
     let latest_history_id = loop {
-        let page = gmail_client
+        let page = context
+            .gmail_client
             .list_history(&cursor_history_id, page_token.as_deref())
             .await?;
         pages_fetched += 1;
@@ -243,11 +285,18 @@ async fn run_incremental_sync(
     }
 
     let changed_message_ids: Vec<String> = changed_message_ids.into_iter().collect();
-    let (catalogs, missing_message_ids) =
-        fetch_message_catalogs(gmail_client.clone(), changed_message_ids).await?;
+    let (catalogs, missing_message_ids) = fetch_message_catalogs(
+        context.gmail_client.clone(),
+        changed_message_ids,
+        context.message_fetch_concurrency,
+    )
+    .await?;
     let messages_listed = catalogs.len();
-    let (upserts, excluded_message_ids) =
-        build_incremental_changes(&account.account_id, catalogs, label_names_by_id);
+    let (upserts, excluded_message_ids) = build_incremental_changes(
+        &context.account.account_id,
+        catalogs,
+        context.label_names_by_id,
+    );
     let message_ids_to_delete = deleted_message_ids
         .into_iter()
         .chain(missing_message_ids)
@@ -256,7 +305,7 @@ async fn run_incremental_sync(
     let messages_upserted = upserts.len();
     let now_epoch_s = current_epoch_seconds()?;
     let sync_update = store::mailbox::SyncStateUpdate {
-        account_id: account.account_id.clone(),
+        account_id: context.account.account_id.clone(),
         cursor_history_id: Some(latest_history_id.clone()),
         bootstrap_query: bootstrap_query.to_owned(),
         last_sync_mode: store::mailbox::SyncMode::Incremental,
@@ -266,9 +315,10 @@ async fn run_incremental_sync(
         last_full_sync_success_epoch_s: None,
         last_incremental_sync_success_epoch_s: Some(now_epoch_s),
     };
-    let (sync_state, messages_deleted) = store_handle
+    let (sync_state, messages_deleted) = context
+        .store_handle
         .commit_incremental_sync(store::mailbox::IncrementalSyncCommit {
-            labels,
+            labels: context.labels,
             messages_to_upsert: &upserts,
             message_ids_to_delete: &message_ids_to_delete,
             updated_at_epoch_s: now_epoch_s,
@@ -283,7 +333,7 @@ async fn run_incremental_sync(
         messages_listed,
         messages_upserted,
         messages_deleted,
-        labels_synced: labels.len(),
+        labels_synced: context.labels.len(),
     };
 
     finalize_sync(sync_state, bootstrap_query, finalize_input)
@@ -331,6 +381,13 @@ fn finalize_sync(
         store_message_count: sync_state.message_count,
         store_label_count: sync_state.label_count,
         store_indexed_message_count: sync_state.indexed_message_count,
+        quota_units_budget_per_minute: 0,
+        message_fetch_concurrency: 0,
+        estimated_quota_units_reserved: 0,
+        http_attempt_count: 0,
+        retry_count: 0,
+        throttle_wait_count: 0,
+        throttle_wait_ms: 0,
     })
 }
 
@@ -373,12 +430,13 @@ fn preserve_sync_error(sync_error: anyhow::Error, persist_result: Result<()>) ->
 async fn fetch_message_catalogs(
     gmail_client: GmailClient,
     message_ids: Vec<String>,
+    message_fetch_concurrency: usize,
 ) -> Result<(Vec<GmailMessageCatalog>, Vec<String>)> {
     if message_ids.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
 
-    let semaphore = std::sync::Arc::new(Semaphore::new(MESSAGE_FETCH_CONCURRENCY));
+    let semaphore = std::sync::Arc::new(Semaphore::new(message_fetch_concurrency));
     let mut join_set = JoinSet::new();
 
     for (index, message_id) in message_ids.into_iter().enumerate() {

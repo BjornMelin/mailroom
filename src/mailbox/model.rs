@@ -11,6 +11,14 @@ pub struct SearchRequest {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SyncRunOptions {
+    pub force_full: bool,
+    pub recent_days: u32,
+    pub quota_units_per_minute: u32,
+    pub message_fetch_concurrency: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncRunReport {
     pub mode: store::mailbox::SyncMode,
@@ -25,6 +33,13 @@ pub struct SyncRunReport {
     pub store_message_count: i64,
     pub store_label_count: i64,
     pub store_indexed_message_count: i64,
+    pub quota_units_budget_per_minute: u32,
+    pub message_fetch_concurrency: usize,
+    pub estimated_quota_units_reserved: u64,
+    pub http_attempt_count: u64,
+    pub retry_count: u64,
+    pub throttle_wait_count: u64,
+    pub throttle_wait_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

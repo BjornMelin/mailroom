@@ -321,6 +321,12 @@ pub enum SyncCommand {
         /// Recent-window size in days for full bootstrap syncs
         #[arg(long, default_value_t = crate::mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS)]
         recent_days: u32,
+        /// Soft Gmail quota budget in units per minute for Mailroom read calls
+        #[arg(long, default_value_t = crate::mailbox::DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE)]
+        quota_units_per_minute: u32,
+        /// Maximum concurrent Gmail message fetches during sync
+        #[arg(long, default_value_t = crate::mailbox::DEFAULT_MESSAGE_FETCH_CONCURRENCY)]
+        message_fetch_concurrency: usize,
         /// Emit JSON instead of plain text
         #[arg(long)]
         json: bool,

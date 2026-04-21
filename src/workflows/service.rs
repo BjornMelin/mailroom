@@ -2842,6 +2842,13 @@ mod tests {
             store_message_count: 3,
             store_label_count: 4,
             store_indexed_message_count: 3,
+            quota_units_budget_per_minute: 12_000,
+            message_fetch_concurrency: 4,
+            estimated_quota_units_reserved: 20,
+            http_attempt_count: 4,
+            retry_count: 0,
+            throttle_wait_count: 0,
+            throttle_wait_ms: 0,
         };
 
         let sync_report = best_effort_sync_report(Ok(report), "sync failed").unwrap();

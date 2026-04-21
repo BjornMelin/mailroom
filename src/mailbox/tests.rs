@@ -1,6 +1,6 @@
 use super::{
-    DEFAULT_BOOTSTRAP_RECENT_DAYS, DEFAULT_SEARCH_LIMIT, SearchRequest, newest_history_id,
-    parse_start_of_day_epoch_ms, search, sync_run,
+    DEFAULT_BOOTSTRAP_RECENT_DAYS, DEFAULT_SEARCH_LIMIT, SearchRequest, SyncRunOptions,
+    newest_history_id, parse_start_of_day_epoch_ms, search, sync_run, sync_run_with_options,
 };
 use crate::auth;
 use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
@@ -100,6 +100,54 @@ async fn search_rejects_zero_limit_before_account_resolution() {
     .unwrap_err();
 
     assert_eq!(error.to_string(), "search limit must be greater than zero");
+}
+
+#[tokio::test]
+async fn sync_run_with_options_rejects_zero_message_fetch_concurrency() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+    let config_report = resolve(&paths).unwrap();
+
+    let error = sync_run_with_options(
+        &config_report,
+        SyncRunOptions {
+            force_full: false,
+            recent_days: 30,
+            quota_units_per_minute: 12_000,
+            message_fetch_concurrency: 0,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "message_fetch_concurrency must be greater than zero"
+    );
+}
+
+#[tokio::test]
+async fn sync_run_with_options_rejects_quota_below_single_message_read_cost() {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+    let config_report = resolve(&paths).unwrap();
+
+    let error = sync_run_with_options(
+        &config_report,
+        SyncRunOptions {
+            force_full: false,
+            recent_days: 30,
+            quota_units_per_minute: 4,
+            message_fetch_concurrency: 4,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "gmail quota budget must be at least 5 units per minute; got 4"
+    );
 }
 
 #[tokio::test]
@@ -559,6 +607,7 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     Mock::given(method("GET"))
         .and(path("/gmail/v1/users/me/messages"))
         .and(query_param("q", requested_bootstrap_query.as_str()))
+        .and(query_param("maxResults", "500"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "messages": [{"id": "m-forced", "threadId": "t-forced"}],
             "resultSizeEstimate": 1
@@ -594,6 +643,11 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     assert_eq!(report.bootstrap_query, requested_bootstrap_query);
     assert_eq!(report.messages_upserted, 1);
     assert_eq!(report.cursor_history_id, "700");
+    assert_eq!(report.quota_units_budget_per_minute, 12_000);
+    assert_eq!(report.message_fetch_concurrency, 4);
+    assert_eq!(report.estimated_quota_units_reserved, 12);
+    assert_eq!(report.http_attempt_count, 4);
+    assert_eq!(report.retry_count, 0);
 
     let stored_state = store::mailbox::get_sync_state(
         &config_report.config.store.database_path,

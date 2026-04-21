@@ -29,6 +29,22 @@ impl SyncRunReport {
                 "store_indexed_message_count={}",
                 self.store_indexed_message_count
             ),
+            format!(
+                "quota_units_budget_per_minute={}",
+                self.quota_units_budget_per_minute
+            ),
+            format!(
+                "message_fetch_concurrency={}",
+                self.message_fetch_concurrency
+            ),
+            format!(
+                "estimated_quota_units_reserved={}",
+                self.estimated_quota_units_reserved
+            ),
+            format!("http_attempt_count={}", self.http_attempt_count),
+            format!("retry_count={}", self.retry_count),
+            format!("throttle_wait_count={}", self.throttle_wait_count),
+            format!("throttle_wait_ms={}", self.throttle_wait_ms),
         ]
         .join("\n")
             + "\n"

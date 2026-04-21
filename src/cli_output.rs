@@ -310,6 +310,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
 
     if let Some(gmail_error) = find_cause::<GmailClientError>(error) {
         return match gmail_error {
+            GmailClientError::InvalidQuotaBudget { .. } => {
+                (ErrorCode::ValidationFailed, "gmail.quota_budget")
+            }
             GmailClientError::MissingCredentials | GmailClientError::MissingRefreshToken => {
                 (ErrorCode::AuthRequired, "gmail.credentials")
             }

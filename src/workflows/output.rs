@@ -455,6 +455,13 @@ mod tests {
                 store_message_count: 4,
                 store_label_count: 5,
                 store_indexed_message_count: 6,
+                quota_units_budget_per_minute: 12_000,
+                message_fetch_concurrency: 4,
+                estimated_quota_units_reserved: 15,
+                http_attempt_count: 3,
+                retry_count: 0,
+                throttle_wait_count: 0,
+                throttle_wait_ms: 0,
             }),
         }
     }
