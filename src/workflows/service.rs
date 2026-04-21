@@ -2832,6 +2832,11 @@ mod tests {
         let report = SyncRunReport {
             run_id: 0,
             mode: SyncMode::Incremental,
+            comparability_kind:
+                crate::store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier,
+            comparability_key: String::from("tiny"),
+            comparability_label: String::from("incremental workload=tiny"),
+            startup_seed_run_id: None,
             fallback_from_history: false,
             resumed_from_checkpoint: false,
             bootstrap_query: String::from("newer_than:90d"),

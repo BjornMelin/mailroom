@@ -67,6 +67,13 @@ impl RetryDelta {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdaptiveSyncPacingSeed {
+    pub(crate) run_id: i64,
+    pub(crate) quota_units_per_minute: u32,
+    pub(crate) message_fetch_concurrency: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdaptiveSyncPacing {
     adaptive_pacing_enabled: bool,
@@ -80,6 +87,7 @@ pub(crate) struct AdaptiveSyncPacing {
     persisted_learned_quota_units_per_minute: u32,
     persisted_learned_message_fetch_concurrency: usize,
     persisted_clean_run_streak: i64,
+    startup_seed_run_id: Option<i64>,
     saw_quota_pressure: bool,
     saw_concurrency_pressure: bool,
     saw_backend_retry: bool,
@@ -126,6 +134,7 @@ impl AdaptiveSyncPacing {
             persisted_learned_quota_units_per_minute,
             persisted_learned_message_fetch_concurrency,
             persisted_clean_run_streak: normalized.clean_run_streak,
+            startup_seed_run_id: None,
             saw_quota_pressure: false,
             saw_concurrency_pressure: false,
             saw_backend_retry: false,
@@ -139,6 +148,50 @@ impl AdaptiveSyncPacing {
 
     pub(crate) const fn current_message_fetch_concurrency(&self) -> usize {
         self.effective_message_fetch_concurrency
+    }
+
+    pub(crate) const fn startup_seed_run_id(&self) -> Option<i64> {
+        self.startup_seed_run_id
+    }
+
+    pub(crate) fn apply_startup_seed(
+        &mut self,
+        seed: AdaptiveSyncPacingSeed,
+        gmail_client: Option<&GmailClient>,
+    ) -> Result<bool> {
+        if self.adaptive_downshift_count > 0
+            || self.saw_quota_pressure
+            || self.saw_concurrency_pressure
+            || self.saw_backend_retry
+        {
+            return Ok(false);
+        }
+
+        let quota_units_per_minute = seed
+            .quota_units_per_minute
+            .min(self.quota_units_cap_per_minute)
+            .max(MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE);
+        let message_fetch_concurrency = seed
+            .message_fetch_concurrency
+            .min(self.message_fetch_concurrency_cap)
+            .max(1);
+
+        if quota_units_per_minute == self.starting_quota_units_per_minute
+            && message_fetch_concurrency == self.starting_message_fetch_concurrency
+        {
+            return Ok(false);
+        }
+
+        self.starting_quota_units_per_minute = quota_units_per_minute;
+        self.starting_message_fetch_concurrency = message_fetch_concurrency;
+        self.effective_quota_units_per_minute = quota_units_per_minute;
+        self.effective_message_fetch_concurrency = message_fetch_concurrency;
+        self.startup_seed_run_id = Some(seed.run_id);
+        if let Some(gmail_client) = gmail_client {
+            gmail_client.update_quota_budget(quota_units_per_minute)?;
+        }
+
+        Ok(true)
     }
 
     pub(crate) fn observe_metrics_snapshot(

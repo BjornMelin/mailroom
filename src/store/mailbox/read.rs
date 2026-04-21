@@ -2,8 +2,9 @@ use super::{
     AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, FullSyncCheckpointRecord,
     FullSyncCheckpointStatus, LabelUsageRecord, MailboxCoverageReport, MailboxDoctorReport,
     MailboxReadError, SyncMode, SyncPacingPressureKind, SyncPacingStateRecord,
-    SyncRunHistoryRecord, SyncRunRegressionKind, SyncRunSummaryRecord, SyncStateRecord, SyncStatus,
-    ThreadMessageSnapshot, is_missing_mailbox_table_error,
+    SyncRunComparabilityKind, SyncRunHistoryRecord, SyncRunRegressionKind, SyncRunSummaryRecord,
+    SyncStateRecord, SyncStatus, ThreadMessageSnapshot, is_missing_mailbox_table_error,
+    sync_run_comparability_label,
 };
 use crate::store::connection;
 use rusqlite::types::Type;
@@ -53,6 +54,7 @@ pub(crate) fn get_sync_pacing_state(
     read_sync_pacing_state(&connection, account_id)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn get_sync_run_summary(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -68,6 +70,29 @@ pub(crate) fn get_sync_run_summary(
     read_sync_run_summary(&connection, account_id, sync_mode)
 }
 
+pub(crate) fn get_sync_run_summary_for_comparability(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    sync_mode: SyncMode,
+    comparability_key: &str,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    Ok(
+        super::run_history_summary::read_sync_run_summary_for_comparability(
+            &connection,
+            account_id,
+            sync_mode,
+            comparability_key,
+        )?,
+    )
+}
+
 pub(crate) fn list_sync_run_history(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -81,6 +106,34 @@ pub(crate) fn list_sync_run_history(
     let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
         .map_err(|source| MailboxReadError::open_database(database_path, source))?;
     read_sync_run_history(&connection, account_id, limit)
+}
+
+pub(crate) fn get_sync_run_history_record(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    run_id: i64,
+) -> Result<Option<SyncRunHistoryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_sync_run_history_record(&connection, run_id)
+}
+
+pub(crate) fn get_latest_sync_run_summary_for_account(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    latest_sync_run_summary_for_account(&connection, account_id)
 }
 
 pub(crate) fn inspect_mailbox(
@@ -886,6 +939,8 @@ pub(super) fn read_sync_run_summary(
             "SELECT
                  account_id,
                  sync_mode,
+                 comparability_kind,
+                 comparability_key,
                  latest_run_id,
                  latest_status,
                  latest_finished_at_epoch_s,
@@ -905,7 +960,9 @@ pub(super) fn read_sync_run_summary(
                  updated_at_epoch_s
              FROM gmail_sync_run_summary
              WHERE account_id = ?1
-               AND sync_mode = ?2",
+               AND sync_mode = ?2
+             ORDER BY latest_finished_at_epoch_s DESC, latest_run_id DESC
+             LIMIT 1",
             params![account_id, sync_mode.as_str()],
             row_to_sync_run_summary,
         )
@@ -926,6 +983,8 @@ fn latest_sync_run_summary(
             "SELECT
                  account_id,
                  sync_mode,
+                 comparability_kind,
+                 comparability_key,
                  latest_run_id,
                  latest_status,
                  latest_finished_at_epoch_s,
@@ -967,6 +1026,8 @@ fn latest_sync_run_summary_for_account(
             "SELECT
                  account_id,
                  sync_mode,
+                 comparability_kind,
+                 comparability_key,
                  latest_run_id,
                  latest_status,
                  latest_finished_at_epoch_s,
@@ -986,7 +1047,7 @@ fn latest_sync_run_summary_for_account(
                  updated_at_epoch_s
              FROM gmail_sync_run_summary
              WHERE account_id = ?1
-             ORDER BY updated_at_epoch_s DESC
+             ORDER BY latest_finished_at_epoch_s DESC, latest_run_id DESC
              LIMIT 1",
             [account_id],
             row_to_sync_run_summary,
@@ -1011,6 +1072,9 @@ fn read_sync_run_history(
              account_id,
              sync_mode,
              status,
+             comparability_kind,
+             comparability_key,
+             startup_seed_run_id,
              started_at_epoch_s,
              finished_at_epoch_s,
              bootstrap_query,
@@ -1161,72 +1225,169 @@ fn row_to_sync_pacing_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncPac
     })
 }
 
-fn row_to_sync_run_history(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncRunHistoryRecord> {
+pub(super) fn row_to_sync_run_history(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SyncRunHistoryRecord> {
+    let comparability_kind = SyncRunComparabilityKind::from_str(&row.get::<_, String>(4)?)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+        })?;
+    let comparability_key = row.get::<_, String>(5)?;
     Ok(SyncRunHistoryRecord {
         run_id: row.get(0)?,
         account_id: row.get(1)?,
         sync_mode: decode_sync_mode(row.get(2)?, 2)?,
         status: decode_sync_status(row.get(3)?, 3)?,
-        started_at_epoch_s: row.get(4)?,
-        finished_at_epoch_s: row.get(5)?,
-        bootstrap_query: row.get(6)?,
-        cursor_history_id: row.get(7)?,
-        fallback_from_history: row.get::<_, i64>(8)? != 0,
-        resumed_from_checkpoint: row.get::<_, i64>(9)? != 0,
-        pages_fetched: row.get(10)?,
-        messages_listed: row.get(11)?,
-        messages_upserted: row.get(12)?,
-        messages_deleted: row.get(13)?,
-        labels_synced: row.get(14)?,
-        checkpoint_reused_pages: row.get(15)?,
-        checkpoint_reused_messages_upserted: row.get(16)?,
-        pipeline_enabled: row.get::<_, i64>(17)? != 0,
-        pipeline_list_queue_high_water: row.get(18)?,
-        pipeline_write_queue_high_water: row.get(19)?,
-        pipeline_write_batch_count: row.get(20)?,
-        pipeline_writer_wait_ms: row.get(21)?,
-        pipeline_fetch_batch_count: row.get(22)?,
-        pipeline_fetch_batch_avg_ms: row.get(23)?,
-        pipeline_fetch_batch_max_ms: row.get(24)?,
-        pipeline_writer_tx_count: row.get(25)?,
-        pipeline_writer_tx_avg_ms: row.get(26)?,
-        pipeline_writer_tx_max_ms: row.get(27)?,
-        pipeline_reorder_buffer_high_water: row.get(28)?,
-        pipeline_staged_message_count: row.get(29)?,
-        pipeline_staged_delete_count: row.get(30)?,
-        pipeline_staged_attachment_count: row.get(31)?,
-        adaptive_pacing_enabled: row.get::<_, i64>(32)? != 0,
-        quota_units_budget_per_minute: row.get(33)?,
-        message_fetch_concurrency: row.get(34)?,
-        quota_units_cap_per_minute: row.get(35)?,
-        message_fetch_concurrency_cap: row.get(36)?,
-        starting_quota_units_per_minute: row.get(37)?,
-        starting_message_fetch_concurrency: row.get(38)?,
-        effective_quota_units_per_minute: row.get(39)?,
-        effective_message_fetch_concurrency: row.get(40)?,
-        adaptive_downshift_count: row.get(41)?,
-        estimated_quota_units_reserved: row.get(42)?,
-        http_attempt_count: row.get(43)?,
-        retry_count: row.get(44)?,
-        quota_pressure_retry_count: row.get(45)?,
-        concurrency_pressure_retry_count: row.get(46)?,
-        backend_retry_count: row.get(47)?,
-        throttle_wait_count: row.get(48)?,
-        throttle_wait_ms: row.get(49)?,
-        retry_after_wait_ms: row.get(50)?,
-        duration_ms: row.get(51)?,
-        pages_per_second: row.get(52)?,
-        messages_per_second: row.get(53)?,
-        error_message: row.get(54)?,
+        comparability_kind,
+        comparability_label: sync_run_comparability_label(comparability_kind, &comparability_key),
+        comparability_key,
+        startup_seed_run_id: row.get(6)?,
+        started_at_epoch_s: row.get(7)?,
+        finished_at_epoch_s: row.get(8)?,
+        bootstrap_query: row.get(9)?,
+        cursor_history_id: row.get(10)?,
+        fallback_from_history: row.get::<_, i64>(11)? != 0,
+        resumed_from_checkpoint: row.get::<_, i64>(12)? != 0,
+        pages_fetched: row.get(13)?,
+        messages_listed: row.get(14)?,
+        messages_upserted: row.get(15)?,
+        messages_deleted: row.get(16)?,
+        labels_synced: row.get(17)?,
+        checkpoint_reused_pages: row.get(18)?,
+        checkpoint_reused_messages_upserted: row.get(19)?,
+        pipeline_enabled: row.get::<_, i64>(20)? != 0,
+        pipeline_list_queue_high_water: row.get(21)?,
+        pipeline_write_queue_high_water: row.get(22)?,
+        pipeline_write_batch_count: row.get(23)?,
+        pipeline_writer_wait_ms: row.get(24)?,
+        pipeline_fetch_batch_count: row.get(25)?,
+        pipeline_fetch_batch_avg_ms: row.get(26)?,
+        pipeline_fetch_batch_max_ms: row.get(27)?,
+        pipeline_writer_tx_count: row.get(28)?,
+        pipeline_writer_tx_avg_ms: row.get(29)?,
+        pipeline_writer_tx_max_ms: row.get(30)?,
+        pipeline_reorder_buffer_high_water: row.get(31)?,
+        pipeline_staged_message_count: row.get(32)?,
+        pipeline_staged_delete_count: row.get(33)?,
+        pipeline_staged_attachment_count: row.get(34)?,
+        adaptive_pacing_enabled: row.get::<_, i64>(35)? != 0,
+        quota_units_budget_per_minute: row.get(36)?,
+        message_fetch_concurrency: row.get(37)?,
+        quota_units_cap_per_minute: row.get(38)?,
+        message_fetch_concurrency_cap: row.get(39)?,
+        starting_quota_units_per_minute: row.get(40)?,
+        starting_message_fetch_concurrency: row.get(41)?,
+        effective_quota_units_per_minute: row.get(42)?,
+        effective_message_fetch_concurrency: row.get(43)?,
+        adaptive_downshift_count: row.get(44)?,
+        estimated_quota_units_reserved: row.get(45)?,
+        http_attempt_count: row.get(46)?,
+        retry_count: row.get(47)?,
+        quota_pressure_retry_count: row.get(48)?,
+        concurrency_pressure_retry_count: row.get(49)?,
+        backend_retry_count: row.get(50)?,
+        throttle_wait_count: row.get(51)?,
+        throttle_wait_ms: row.get(52)?,
+        retry_after_wait_ms: row.get(53)?,
+        duration_ms: row.get(54)?,
+        pages_per_second: row.get(55)?,
+        messages_per_second: row.get(56)?,
+        error_message: row.get(57)?,
     })
 }
 
-fn row_to_sync_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncRunSummaryRecord> {
+pub(super) fn read_sync_run_history_record(
+    connection: &Connection,
+    run_id: i64,
+) -> Result<Option<SyncRunHistoryRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 run_id,
+                 account_id,
+                 sync_mode,
+                 status,
+                 comparability_kind,
+                 comparability_key,
+                 startup_seed_run_id,
+                 started_at_epoch_s,
+                 finished_at_epoch_s,
+                 bootstrap_query,
+                 cursor_history_id,
+                 fallback_from_history,
+                 resumed_from_checkpoint,
+                 pages_fetched,
+                 messages_listed,
+                 messages_upserted,
+                 messages_deleted,
+                 labels_synced,
+                 checkpoint_reused_pages,
+                 checkpoint_reused_messages_upserted,
+                 pipeline_enabled,
+                 pipeline_list_queue_high_water,
+                 pipeline_write_queue_high_water,
+                 pipeline_write_batch_count,
+                 pipeline_writer_wait_ms,
+                 pipeline_fetch_batch_count,
+                 pipeline_fetch_batch_avg_ms,
+                 pipeline_fetch_batch_max_ms,
+                 pipeline_writer_tx_count,
+                 pipeline_writer_tx_avg_ms,
+                 pipeline_writer_tx_max_ms,
+                 pipeline_reorder_buffer_high_water,
+                 pipeline_staged_message_count,
+                 pipeline_staged_delete_count,
+                 pipeline_staged_attachment_count,
+                 adaptive_pacing_enabled,
+                 quota_units_budget_per_minute,
+                 message_fetch_concurrency,
+                 quota_units_cap_per_minute,
+                 message_fetch_concurrency_cap,
+                 starting_quota_units_per_minute,
+                 starting_message_fetch_concurrency,
+                 effective_quota_units_per_minute,
+                 effective_message_fetch_concurrency,
+                 adaptive_downshift_count,
+                 estimated_quota_units_reserved,
+                 http_attempt_count,
+                 retry_count,
+                 quota_pressure_retry_count,
+                 concurrency_pressure_retry_count,
+                 backend_retry_count,
+                 throttle_wait_count,
+                 throttle_wait_ms,
+                 retry_after_wait_ms,
+                 duration_ms,
+                 pages_per_second,
+                 messages_per_second,
+                 error_message
+             FROM gmail_sync_run_history
+             WHERE run_id = ?1",
+            [run_id],
+            row_to_sync_run_history,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn row_to_sync_run_summary(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SyncRunSummaryRecord> {
+    let comparability_kind = SyncRunComparabilityKind::from_str(&row.get::<_, String>(2)?)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
+    let comparability_key = row.get::<_, String>(3)?;
     let regression_kind = row
-        .get::<_, Option<String>>(15)?
+        .get::<_, Option<String>>(17)?
         .map(|value| {
             SyncRunRegressionKind::from_str(&value).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(15, Type::Text, Box::new(error))
+                rusqlite::Error::FromSqlConversionFailure(17, Type::Text, Box::new(error))
             })
         })
         .transpose()?;
@@ -1234,23 +1395,26 @@ fn row_to_sync_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncRunS
     Ok(SyncRunSummaryRecord {
         account_id: row.get(0)?,
         sync_mode: decode_sync_mode(row.get(1)?, 1)?,
-        latest_run_id: row.get(2)?,
-        latest_status: decode_sync_status(row.get(3)?, 3)?,
-        latest_finished_at_epoch_s: row.get(4)?,
-        best_clean_run_id: row.get(5)?,
-        best_clean_quota_units_per_minute: row.get(6)?,
-        best_clean_message_fetch_concurrency: row.get(7)?,
-        best_clean_messages_per_second: row.get(8)?,
-        best_clean_duration_ms: row.get(9)?,
-        recent_success_count: row.get(10)?,
-        recent_failure_count: row.get(11)?,
-        recent_failure_streak: row.get(12)?,
-        recent_clean_success_streak: row.get(13)?,
-        regression_detected: row.get::<_, i64>(14)? != 0,
+        comparability_kind,
+        comparability_key: comparability_key.clone(),
+        comparability_label: sync_run_comparability_label(comparability_kind, &comparability_key),
+        latest_run_id: row.get(4)?,
+        latest_status: decode_sync_status(row.get(5)?, 5)?,
+        latest_finished_at_epoch_s: row.get(6)?,
+        best_clean_run_id: row.get(7)?,
+        best_clean_quota_units_per_minute: row.get(8)?,
+        best_clean_message_fetch_concurrency: row.get(9)?,
+        best_clean_messages_per_second: row.get(10)?,
+        best_clean_duration_ms: row.get(11)?,
+        recent_success_count: row.get(12)?,
+        recent_failure_count: row.get(13)?,
+        recent_failure_streak: row.get(14)?,
+        recent_clean_success_streak: row.get(15)?,
+        regression_detected: row.get::<_, i64>(16)? != 0,
         regression_kind,
-        regression_run_id: row.get(16)?,
-        regression_message: row.get(17)?,
-        updated_at_epoch_s: row.get(18)?,
+        regression_run_id: row.get(18)?,
+        regression_message: row.get(19)?,
+        updated_at_epoch_s: row.get(20)?,
     })
 }
 

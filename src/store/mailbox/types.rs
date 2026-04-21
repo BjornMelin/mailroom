@@ -176,6 +176,9 @@ pub(crate) struct SyncRunOutcomeInput {
     pub(crate) account_id: String,
     pub(crate) sync_mode: SyncMode,
     pub(crate) status: SyncStatus,
+    pub(crate) comparability_kind: SyncRunComparabilityKind,
+    pub(crate) comparability_key: String,
+    pub(crate) startup_seed_run_id: Option<i64>,
     pub(crate) started_at_epoch_s: i64,
     pub(crate) finished_at_epoch_s: i64,
     pub(crate) bootstrap_query: String,
@@ -235,6 +238,10 @@ pub(crate) struct SyncRunHistoryRecord {
     pub(crate) account_id: String,
     pub(crate) sync_mode: SyncMode,
     pub(crate) status: SyncStatus,
+    pub(crate) comparability_kind: SyncRunComparabilityKind,
+    pub(crate) comparability_key: String,
+    pub(crate) comparability_label: String,
+    pub(crate) startup_seed_run_id: Option<i64>,
     pub(crate) started_at_epoch_s: i64,
     pub(crate) finished_at_epoch_s: i64,
     pub(crate) bootstrap_query: String,
@@ -292,6 +299,9 @@ pub(crate) struct SyncRunHistoryRecord {
 pub(crate) struct SyncRunSummaryRecord {
     pub(crate) account_id: String,
     pub(crate) sync_mode: SyncMode,
+    pub(crate) comparability_kind: SyncRunComparabilityKind,
+    pub(crate) comparability_key: String,
+    pub(crate) comparability_label: String,
     pub(crate) latest_run_id: i64,
     pub(crate) latest_status: SyncStatus,
     pub(crate) latest_finished_at_epoch_s: i64,
@@ -462,6 +472,13 @@ pub(crate) struct MailboxDoctorReport {
     pub(crate) attachment_export_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct SyncRunComparability {
+    pub(crate) kind: SyncRunComparabilityKind,
+    pub(crate) key: String,
+    pub(crate) label: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FullSyncCheckpointStatus {
@@ -492,6 +509,45 @@ impl FromStr for FullSyncCheckpointStatus {
             "paging" => Ok(Self::Paging),
             "ready_to_finalize" => Ok(Self::ReadyToFinalize),
             _ => Err(SyncStateStatusDecodeError::CheckpointStatus(
+                value.to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SyncRunComparabilityKind {
+    FullRecentDays,
+    FullQuery,
+    IncrementalWorkloadTier,
+}
+
+impl SyncRunComparabilityKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::FullRecentDays => "full_recent_days",
+            Self::FullQuery => "full_query",
+            Self::IncrementalWorkloadTier => "incremental_workload_tier",
+        }
+    }
+}
+
+impl Display for SyncRunComparabilityKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SyncRunComparabilityKind {
+    type Err = SyncStateStatusDecodeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "full_recent_days" => Ok(Self::FullRecentDays),
+            "full_query" => Ok(Self::FullQuery),
+            "incremental_workload_tier" => Ok(Self::IncrementalWorkloadTier),
+            _ => Err(SyncStateStatusDecodeError::RunComparabilityKind(
                 value.to_owned(),
             )),
         }
@@ -659,6 +715,8 @@ pub(crate) enum SyncStateStatusDecodeError {
     PacingPressureKind(String),
     #[error("invalid mailbox sync run regression kind `{0}`")]
     RunRegressionKind(String),
+    #[error("invalid mailbox sync run comparability kind `{0}`")]
+    RunComparabilityKind(String),
 }
 
 #[derive(Debug, Error)]

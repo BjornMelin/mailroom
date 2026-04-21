@@ -1,15 +1,24 @@
 mod read;
+mod run_history_policy;
+mod run_history_summary;
 mod search;
 #[cfg(test)]
 mod tests;
 mod types;
 mod write;
 
+#[cfg(test)]
+pub(crate) use read::get_sync_run_summary;
 pub(crate) use read::{
-    get_attachment_detail, get_full_sync_checkpoint, get_latest_thread_message,
-    get_mailbox_coverage, get_sync_pacing_state, get_sync_run_summary, get_sync_state,
+    get_attachment_detail, get_full_sync_checkpoint, get_latest_sync_run_summary_for_account,
+    get_latest_thread_message, get_mailbox_coverage, get_sync_pacing_state,
+    get_sync_run_history_record, get_sync_run_summary_for_comparability, get_sync_state,
     inspect_mailbox, inspect_mailbox_account, list_attachments, list_label_usage,
     list_sync_run_history, resolve_label_ids_by_names,
+};
+pub(crate) use run_history_policy::{
+    comparability_for_full_bootstrap_query, comparability_for_incremental_workload,
+    sync_run_comparability_label,
 };
 pub(crate) use search::search_messages;
 pub(crate) use types::{
@@ -18,9 +27,9 @@ pub(crate) use types::{
     FullSyncCheckpointUpdate, FullSyncStagePageInput, GmailAttachmentUpsertInput,
     GmailAutomationHeaders, GmailMessageUpsertInput, LabelUsageRecord, MailboxCoverageReport,
     MailboxDoctorReport, MailboxReadError, MailboxWriteError, SearchQuery, SearchResult, SyncMode,
-    SyncPacingPressureKind, SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunHistoryRecord,
-    SyncRunOutcomeInput, SyncRunRegressionKind, SyncRunSummaryRecord, SyncStateRecord,
-    SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
+    SyncPacingPressureKind, SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunComparability,
+    SyncRunComparabilityKind, SyncRunHistoryRecord, SyncRunOutcomeInput, SyncRunRegressionKind,
+    SyncRunSummaryRecord, SyncStateRecord, SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
 };
 #[cfg(test)]
 pub(crate) use write::{

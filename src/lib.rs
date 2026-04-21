@@ -19,8 +19,8 @@ use cli::{
     AccountCommand, AttachmentCommand, AuditCommand, AuthCommand, AutomationCommand,
     AutomationRulesCommand, CleanupCommand, Cli, Commands, ConfigCommand, DraftAttachmentCommand,
     DraftCommand, GmailCommand, GmailLabelsCommand, SearchArgs, StoreCommand, SyncCommand,
-    TriageBucketArg, TriageCommand, WorkflowCommand, WorkflowPromoteTargetArg, WorkflowStageArg,
-    WorkspaceCommand,
+    SyncPerfCommand, TriageBucketArg, TriageCommand, WorkflowCommand, WorkflowPromoteTargetArg,
+    WorkflowStageArg, WorkspaceCommand,
 };
 use serde::Serialize;
 use std::io::Read;
@@ -234,6 +234,16 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
             SyncCommand::History { json, .. } => CommandMetadata {
                 json: *json,
                 operation: "sync.history",
+            },
+            SyncCommand::Perf {
+                command: SyncPerfCommand::Explain { json, .. },
+            } => CommandMetadata {
+                json: *json,
+                operation: "sync.perf_explain",
+            },
+            SyncCommand::PerfExplain { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "sync.perf_explain",
             },
         },
         Commands::Workflow { command } => match command {
@@ -558,6 +568,14 @@ async fn handle_sync_command(
         SyncCommand::History { limit, json } => mailbox::sync_history(&config_report, limit)
             .await?
             .print(json)?,
+        SyncCommand::Perf {
+            command: SyncPerfCommand::Explain { limit, json },
+        }
+        | SyncCommand::PerfExplain { limit, json } => {
+            mailbox::sync_perf_explain(&config_report, limit)
+                .await?
+                .print(json)?
+        }
     }
 
     Ok(())

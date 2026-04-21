@@ -1,4 +1,4 @@
-use crate::mailbox::{SearchReport, SyncHistoryReport, SyncRunReport};
+use crate::mailbox::{SearchReport, SyncHistoryReport, SyncPerfExplainReport, SyncRunReport};
 use anyhow::Result;
 
 impl SyncRunReport {
@@ -16,6 +16,15 @@ impl SyncRunReport {
         [
             format!("run_id={}", self.run_id),
             format!("mode={}", self.mode),
+            format!("comparability_kind={}", self.comparability_kind),
+            format!("comparability_key={}", self.comparability_key),
+            format!("comparability_label={}", self.comparability_label),
+            format!(
+                "startup_seed_run_id={}",
+                self.startup_seed_run_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ),
             format!("fallback_from_history={}", self.fallback_from_history),
             format!("resumed_from_checkpoint={}", self.resumed_from_checkpoint),
             format!("bootstrap_query={}", self.bootstrap_query),
@@ -176,6 +185,18 @@ impl SyncHistoryReport {
         match &self.summary {
             Some(summary) => {
                 lines.push(format!("summary_sync_mode={}", summary.sync_mode));
+                lines.push(format!(
+                    "summary_comparability_kind={}",
+                    summary.comparability_kind
+                ));
+                lines.push(format!(
+                    "summary_comparability_key={}",
+                    summary.comparability_key
+                ));
+                lines.push(format!(
+                    "summary_comparability_label={}",
+                    summary.comparability_label
+                ));
                 lines.push(format!("summary_latest_run_id={}", summary.latest_run_id));
                 lines.push(format!("summary_latest_status={}", summary.latest_status));
                 lines.push(format!(
@@ -204,14 +225,15 @@ impl SyncHistoryReport {
         }
 
         lines.push(String::from(
-            "runs_format=tsv\trun_id\tfinished_at_epoch_s\tsync_mode\tstatus\tmessages_listed\tmessages_per_second\teffective_quota_units_per_minute\teffective_message_fetch_concurrency\tretry_count",
+            "runs_format=tsv\trun_id\tfinished_at_epoch_s\tsync_mode\tcomparability_key\tstatus\tmessages_listed\tmessages_per_second\teffective_quota_units_per_minute\teffective_message_fetch_concurrency\tretry_count",
         ));
         lines.extend(self.runs.iter().map(|run| {
             format!(
-                "{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{}\t{}",
                 run.run_id,
                 run.finished_at_epoch_s,
                 run.sync_mode,
+                sanitize_tsv_field(&run.comparability_key),
                 run.status,
                 run.messages_listed,
                 run.messages_per_second,
@@ -220,6 +242,145 @@ impl SyncHistoryReport {
                 run.retry_count,
             )
         }));
+        lines.join("\n") + "\n"
+    }
+}
+
+impl SyncPerfExplainReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        if json {
+            crate::cli_output::print_json_success(self)?;
+        } else {
+            print!("{}", self.render_plain());
+        }
+
+        Ok(())
+    }
+
+    fn render_plain(&self) -> String {
+        let mut lines = vec![
+            format!("account_id={}", self.account_id),
+            format!("limit={}", self.limit),
+            format!("run_count={}", self.runs.len()),
+        ];
+
+        if let Some(summary) = &self.summary {
+            lines.push(format!("summary_sync_mode={}", summary.sync_mode));
+            lines.push(format!(
+                "summary_comparability_kind={}",
+                summary.comparability_kind
+            ));
+            lines.push(format!(
+                "summary_comparability_key={}",
+                summary.comparability_key
+            ));
+            lines.push(format!(
+                "summary_comparability_label={}",
+                summary.comparability_label
+            ));
+            lines.push(format!("summary_latest_run_id={}", summary.latest_run_id));
+            lines.push(format!(
+                "summary_best_clean_run_id={}",
+                summary
+                    .best_clean_run_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+            lines.push(format!(
+                "summary_regression_kind={}",
+                summary
+                    .regression_kind
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+            lines.push(format!(
+                "summary_regression_message={}",
+                summary
+                    .regression_message
+                    .clone()
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+        } else {
+            lines.push(String::from("summary_latest_run_id=<none>"));
+        }
+
+        if let Some(latest_run) = &self.latest_run {
+            lines.push(format!("latest_run_id={}", latest_run.run_id));
+            lines.push(format!(
+                "latest_comparability_label={}",
+                latest_run.comparability_label
+            ));
+        } else {
+            lines.push(String::from("latest_run_id=<none>"));
+        }
+        if let Some(baseline_run) = &self.baseline_run {
+            lines.push(format!("baseline_run_id={}", baseline_run.run_id));
+            lines.push(format!(
+                "baseline_comparability_label={}",
+                baseline_run.comparability_label
+            ));
+        } else {
+            lines.push(String::from("baseline_run_id=<none>"));
+        }
+        lines.push(format!(
+            "comparable_to_baseline={}",
+            self.comparable_to_baseline
+        ));
+        if let Some(drift) = &self.drift {
+            lines.push(format!(
+                "drift_messages_per_second_delta={}",
+                drift
+                    .messages_per_second_delta
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+            lines.push(format!(
+                "drift_duration_ms_delta={}",
+                drift
+                    .duration_ms_delta
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+            lines.push(format!(
+                "drift_retry_count_delta={}",
+                drift
+                    .retry_count_delta
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+            lines.push(format!(
+                "drift_quota_units_delta={}",
+                drift
+                    .quota_units_delta
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+            lines.push(format!(
+                "drift_message_fetch_concurrency_delta={}",
+                drift
+                    .message_fetch_concurrency_delta
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ));
+        }
+
+        lines.push(String::from(
+            "runs_format=tsv\trun_id\tfinished_at_epoch_s\tsync_mode\tcomparability_key\tstatus\tmessages_listed\tmessages_per_second\tretry_count",
+        ));
+        lines.extend(self.runs.iter().map(|run| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}",
+                run.run_id,
+                run.finished_at_epoch_s,
+                run.sync_mode,
+                sanitize_tsv_field(&run.comparability_key),
+                run.status,
+                run.messages_listed,
+                run.messages_per_second,
+                run.retry_count,
+            )
+        }));
+
         lines.join("\n") + "\n"
     }
 }

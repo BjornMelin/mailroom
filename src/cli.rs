@@ -358,6 +358,34 @@ pub enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Explain sync performance and historical baselines
+    Perf {
+        #[command(subcommand)]
+        command: SyncPerfCommand,
+    },
+    /// Explain the latest sync against the best comparable historical baseline
+    #[command(hide = true, name = "perf-explain")]
+    PerfExplain {
+        /// Maximum number of runs to include in the recent comparison window
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncPerfCommand {
+    /// Explain the latest sync against the best comparable historical baseline
+    Explain {
+        /// Maximum number of runs to include in the recent comparison window
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

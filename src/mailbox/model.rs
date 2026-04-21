@@ -23,6 +23,10 @@ pub struct SyncRunOptions {
 pub struct SyncRunReport {
     pub run_id: i64,
     pub mode: store::mailbox::SyncMode,
+    pub comparability_kind: store::mailbox::SyncRunComparabilityKind,
+    pub comparability_key: String,
+    pub comparability_label: String,
+    pub startup_seed_run_id: Option<i64>,
     pub fallback_from_history: bool,
     pub resumed_from_checkpoint: bool,
     pub bootstrap_query: String,
@@ -87,6 +91,27 @@ pub struct SyncHistoryReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SyncPerfExplainDrift {
+    pub messages_per_second_delta: Option<f64>,
+    pub duration_ms_delta: Option<i64>,
+    pub retry_count_delta: Option<i64>,
+    pub quota_units_delta: Option<i64>,
+    pub message_fetch_concurrency_delta: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncPerfExplainReport {
+    pub account_id: String,
+    pub limit: usize,
+    pub latest_run: Option<store::mailbox::SyncRunHistoryRecord>,
+    pub summary: Option<store::mailbox::SyncRunSummaryRecord>,
+    pub baseline_run: Option<store::mailbox::SyncRunHistoryRecord>,
+    pub comparable_to_baseline: bool,
+    pub drift: Option<SyncPerfExplainDrift>,
+    pub runs: Vec<store::mailbox::SyncRunHistoryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchReport {
     pub terms: String,
     pub label: Option<String>,
@@ -100,6 +125,10 @@ pub struct SearchReport {
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizeSyncInput {
     pub(crate) mode: store::mailbox::SyncMode,
+    pub(crate) comparability_kind: store::mailbox::SyncRunComparabilityKind,
+    pub(crate) comparability_key: String,
+    pub(crate) comparability_label: String,
+    pub(crate) startup_seed_run_id: Option<i64>,
     pub(crate) fallback_from_history: bool,
     pub(crate) resumed_from_checkpoint: bool,
     pub(crate) cursor_history_id: Option<String>,

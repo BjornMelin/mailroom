@@ -272,6 +272,18 @@ impl StoreDoctorReport {
                     Some(summary) => {
                         println!("mailbox_sync_run_summary_mode={}", summary.sync_mode);
                         println!(
+                            "mailbox_sync_run_summary_comparability_kind={}",
+                            summary.comparability_kind
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_comparability_key={}",
+                            summary.comparability_key
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_comparability_label={}",
+                            summary.comparability_label
+                        );
+                        println!(
                             "mailbox_sync_run_summary_latest_run_id={}",
                             summary.latest_run_id
                         );
@@ -594,7 +606,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 15);
+        assert_eq!(report.schema_version, 16);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -971,7 +983,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 15);
+        assert_eq!(migration_report.schema_version, 16);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();
@@ -1096,6 +1108,224 @@ mod tests {
             .unwrap();
         assert_eq!(shared_key_count, 2);
 
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn migration_v16_round_trip_rebuilds_and_preserves_sync_run_summaries() {
+        let repo_root = unique_temp_dir("mailroom-store-migration-v16-sync-history");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+
+        let account = accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("500"),
+                messages_total: 0,
+                threads_total: 0,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 500,
+            },
+        )
+        .unwrap();
+
+        let sync_state = mailbox::upsert_sync_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &mailbox::SyncStateUpdate {
+                account_id: account.account_id.clone(),
+                cursor_history_id: Some(String::from("500")),
+                bootstrap_query: String::from("in:anywhere -in:spam -in:trash newer_than:30d"),
+                last_sync_mode: mailbox::SyncMode::Incremental,
+                last_sync_status: mailbox::SyncStatus::Ok,
+                last_error: None,
+                last_sync_epoch_s: 500,
+                last_full_sync_success_epoch_s: Some(490),
+                last_incremental_sync_success_epoch_s: Some(500),
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
+                pipeline_fetch_batch_count: 0,
+                pipeline_fetch_batch_avg_ms: 0,
+                pipeline_fetch_batch_max_ms: 0,
+                pipeline_writer_tx_count: 0,
+                pipeline_writer_tx_avg_ms: 0,
+                pipeline_writer_tx_max_ms: 0,
+                pipeline_reorder_buffer_high_water: 0,
+                pipeline_staged_message_count: 0,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
+            },
+        )
+        .unwrap();
+
+        let make_outcome = |started_at_epoch_s: i64,
+                            finished_at_epoch_s: i64,
+                            messages_listed: i64| {
+            let comparability = mailbox::comparability_for_incremental_workload(messages_listed, 0);
+            mailbox::SyncRunOutcomeInput {
+                account_id: account.account_id.clone(),
+                sync_mode: mailbox::SyncMode::Incremental,
+                status: mailbox::SyncStatus::Ok,
+                comparability_kind: comparability.kind,
+                comparability_key: comparability.key,
+                startup_seed_run_id: None,
+                started_at_epoch_s,
+                finished_at_epoch_s,
+                bootstrap_query: String::from("in:anywhere -in:spam -in:trash newer_than:30d"),
+                cursor_history_id: Some(String::from("500")),
+                fallback_from_history: false,
+                resumed_from_checkpoint: false,
+                pages_fetched: 1,
+                messages_listed,
+                messages_upserted: messages_listed,
+                messages_deleted: 0,
+                labels_synced: 10,
+                checkpoint_reused_pages: 0,
+                checkpoint_reused_messages_upserted: 0,
+                pipeline_enabled: true,
+                pipeline_list_queue_high_water: 1,
+                pipeline_write_queue_high_water: 1,
+                pipeline_write_batch_count: 1,
+                pipeline_writer_wait_ms: 10,
+                pipeline_fetch_batch_count: 1,
+                pipeline_fetch_batch_avg_ms: 10,
+                pipeline_fetch_batch_max_ms: 10,
+                pipeline_writer_tx_count: 1,
+                pipeline_writer_tx_avg_ms: 5,
+                pipeline_writer_tx_max_ms: 5,
+                pipeline_reorder_buffer_high_water: 1,
+                pipeline_staged_message_count: messages_listed,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
+                adaptive_pacing_enabled: true,
+                quota_units_budget_per_minute: 12_000,
+                message_fetch_concurrency: 4,
+                quota_units_cap_per_minute: 12_000,
+                message_fetch_concurrency_cap: 4,
+                starting_quota_units_per_minute: 12_000,
+                starting_message_fetch_concurrency: 4,
+                effective_quota_units_per_minute: 12_000,
+                effective_message_fetch_concurrency: 4,
+                adaptive_downshift_count: 0,
+                estimated_quota_units_reserved: messages_listed * 5,
+                http_attempt_count: messages_listed,
+                retry_count: 0,
+                quota_pressure_retry_count: 0,
+                concurrency_pressure_retry_count: 0,
+                backend_retry_count: 0,
+                throttle_wait_count: 0,
+                throttle_wait_ms: 0,
+                retry_after_wait_ms: 0,
+                duration_ms: messages_listed * 10,
+                pages_per_second: 1.0,
+                messages_per_second: messages_listed as f64,
+                error_message: None,
+            }
+        };
+
+        let (_, tiny_history, _) = mailbox::persist_successful_sync_outcome(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &sync_state,
+            &make_outcome(500, 510, 10),
+        )
+        .unwrap();
+        let (_, large_history, _) = mailbox::persist_successful_sync_outcome(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &sync_state,
+            &make_outcome(520, 530, 600),
+        )
+        .unwrap();
+
+        let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+        let pre_down_summary_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_down_summary_count, 2);
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/16-sync-history-comparability/down.sql"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 15_i64)
+            .unwrap();
+
+        let post_down_summary_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_down_summary_count, 1);
+        let post_down_latest_run_id: i64 = connection
+            .query_row(
+                "SELECT latest_run_id FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_down_latest_run_id, large_history.run_id);
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/16-sync-history-comparability/up.sql"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 16_i64)
+            .unwrap();
+
+        let post_up_summary_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_up_summary_count, 2);
+
+        let tiny_best_clean_run_id: i64 = connection
+            .query_row(
+                "SELECT best_clean_run_id
+                 FROM gmail_sync_run_summary
+                 WHERE account_id = ?1
+                   AND sync_mode = 'incremental'
+                   AND comparability_key = 'tiny'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tiny_best_clean_run_id, tiny_history.run_id);
+
+        let large_best_clean_run_id: i64 = connection
+            .query_row(
+                "SELECT best_clean_run_id
+                 FROM gmail_sync_run_summary
+                 WHERE account_id = ?1
+                   AND sync_mode = 'incremental'
+                   AND comparability_key = 'large'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(large_best_clean_run_id, large_history.run_id);
+
+        drop(connection);
         fs::remove_dir_all(repo_root).unwrap();
     }
 

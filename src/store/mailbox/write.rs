@@ -1,13 +1,16 @@
 use super::read::{
     count_indexed_messages, count_labels, count_messages, read_full_sync_checkpoint,
-    read_sync_pacing_state, read_sync_run_summary, read_sync_state,
+    read_sync_pacing_state, read_sync_state,
 };
+use super::run_history_policy::{
+    SYNC_RUN_HISTORY_RETENTION_PER_ACCOUNT, comparability_for_outcome,
+};
+use super::run_history_summary::recompute_sync_run_summary_in_transaction;
 use super::{
     AttachmentExportEventInput, AttachmentVaultStateUpdate, FullSyncCheckpointRecord,
     FullSyncCheckpointUpdate, FullSyncStagePageInput, GmailMessageUpsertInput, MailboxWriteError,
-    SyncMode, SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunHistoryRecord,
-    SyncRunOutcomeInput, SyncRunRegressionKind, SyncRunSummaryRecord, SyncStateRecord,
-    SyncStateUpdate, SyncStatus, unique_sorted_strings,
+    SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunHistoryRecord, SyncRunOutcomeInput,
+    SyncRunSummaryRecord, SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
 };
 use crate::gmail::GmailLabel;
 use crate::store::connection;
@@ -16,16 +19,10 @@ use rusqlite::{Connection, ToSql, TransactionBehavior, params, params_from_iter}
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::str::FromStr;
 
 const DELETE_BATCH_SIZE: usize = 400;
 const FULL_SYNC_STAGE_PAGE_STATUS_PARTIAL: &str = "partial";
 const FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE: &str = "complete";
-const SYNC_RUN_HISTORY_RETENTION_PER_ACCOUNT: i64 = 1_000;
-const SYNC_RUN_SUMMARY_RECENT_WINDOW: usize = 10;
-const SYNC_RUN_REGRESSION_SUCCESS_WINDOW: usize = 5;
-const SYNC_RUN_RETRY_BASELINE_WINDOW: usize = 3;
-const SYNC_RUN_REGRESSION_MIN_MESSAGES: i64 = 100;
 
 pub(crate) struct MailboxWriterConnection {
     connection: Connection,
@@ -542,10 +539,12 @@ pub(crate) fn persist_successful_sync_outcome(
     let sync_state = upsert_sync_state_record_in_transaction(&transaction, sync_state)?;
     let history = insert_sync_run_history_in_transaction(&transaction, outcome)?;
     prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)?;
+    let comparability = comparability_for_outcome(outcome);
     let summary = recompute_sync_run_summary_in_transaction(
         &transaction,
         &outcome.account_id,
         outcome.sync_mode,
+        &comparability,
         outcome.finished_at_epoch_s,
     )?;
     transaction.commit()?;
@@ -563,10 +562,12 @@ pub(crate) fn persist_failed_sync_outcome(
     let sync_state = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
     let history = insert_sync_run_history_in_transaction(&transaction, outcome)?;
     prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)?;
+    let comparability = comparability_for_outcome(outcome);
     let summary = recompute_sync_run_summary_in_transaction(
         &transaction,
         &outcome.account_id,
         outcome.sync_mode,
+        &comparability,
         outcome.finished_at_epoch_s,
     )?;
     transaction.commit()?;
@@ -1897,11 +1898,14 @@ fn insert_sync_run_history_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     outcome: &SyncRunOutcomeInput,
 ) -> Result<SyncRunHistoryRecord> {
-    transaction.execute(
+    let mut statement = transaction.prepare_cached(
         "INSERT INTO gmail_sync_run_history (
              account_id,
              sync_mode,
              status,
+             comparability_kind,
+             comparability_key,
+             startup_seed_run_id,
              started_at_epoch_s,
              finished_at_epoch_s,
              bootstrap_query,
@@ -1954,67 +1958,86 @@ fn insert_sync_run_history_in_transaction(
              messages_per_second,
              error_message
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54)",
-        params![
-            &outcome.account_id,
-            outcome.sync_mode.as_str(),
-            outcome.status.as_str(),
-            outcome.started_at_epoch_s,
-            outcome.finished_at_epoch_s,
-            &outcome.bootstrap_query,
-            &outcome.cursor_history_id,
-            if outcome.fallback_from_history { 1_i64 } else { 0_i64 },
-            if outcome.resumed_from_checkpoint { 1_i64 } else { 0_i64 },
-            outcome.pages_fetched,
-            outcome.messages_listed,
-            outcome.messages_upserted,
-            outcome.messages_deleted,
-            outcome.labels_synced,
-            outcome.checkpoint_reused_pages,
-            outcome.checkpoint_reused_messages_upserted,
-            if outcome.pipeline_enabled { 1_i64 } else { 0_i64 },
-            outcome.pipeline_list_queue_high_water,
-            outcome.pipeline_write_queue_high_water,
-            outcome.pipeline_write_batch_count,
-            outcome.pipeline_writer_wait_ms,
-            outcome.pipeline_fetch_batch_count,
-            outcome.pipeline_fetch_batch_avg_ms,
-            outcome.pipeline_fetch_batch_max_ms,
-            outcome.pipeline_writer_tx_count,
-            outcome.pipeline_writer_tx_avg_ms,
-            outcome.pipeline_writer_tx_max_ms,
-            outcome.pipeline_reorder_buffer_high_water,
-            outcome.pipeline_staged_message_count,
-            outcome.pipeline_staged_delete_count,
-            outcome.pipeline_staged_attachment_count,
-            if outcome.adaptive_pacing_enabled { 1_i64 } else { 0_i64 },
-            outcome.quota_units_budget_per_minute,
-            outcome.message_fetch_concurrency,
-            outcome.quota_units_cap_per_minute,
-            outcome.message_fetch_concurrency_cap,
-            outcome.starting_quota_units_per_minute,
-            outcome.starting_message_fetch_concurrency,
-            outcome.effective_quota_units_per_minute,
-            outcome.effective_message_fetch_concurrency,
-            outcome.adaptive_downshift_count,
-            outcome.estimated_quota_units_reserved,
-            outcome.http_attempt_count,
-            outcome.retry_count,
-            outcome.quota_pressure_retry_count,
-            outcome.concurrency_pressure_retry_count,
-            outcome.backend_retry_count,
-            outcome.throttle_wait_count,
-            outcome.throttle_wait_ms,
-            outcome.retry_after_wait_ms,
-            outcome.duration_ms,
-            outcome.pages_per_second,
-            outcome.messages_per_second,
-            &outcome.error_message,
-        ],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57)",
     )?;
+    statement.execute(params![
+        &outcome.account_id,
+        outcome.sync_mode.as_str(),
+        outcome.status.as_str(),
+        outcome.comparability_kind.as_str(),
+        &outcome.comparability_key,
+        outcome.startup_seed_run_id,
+        outcome.started_at_epoch_s,
+        outcome.finished_at_epoch_s,
+        &outcome.bootstrap_query,
+        &outcome.cursor_history_id,
+        if outcome.fallback_from_history {
+            1_i64
+        } else {
+            0_i64
+        },
+        if outcome.resumed_from_checkpoint {
+            1_i64
+        } else {
+            0_i64
+        },
+        outcome.pages_fetched,
+        outcome.messages_listed,
+        outcome.messages_upserted,
+        outcome.messages_deleted,
+        outcome.labels_synced,
+        outcome.checkpoint_reused_pages,
+        outcome.checkpoint_reused_messages_upserted,
+        if outcome.pipeline_enabled {
+            1_i64
+        } else {
+            0_i64
+        },
+        outcome.pipeline_list_queue_high_water,
+        outcome.pipeline_write_queue_high_water,
+        outcome.pipeline_write_batch_count,
+        outcome.pipeline_writer_wait_ms,
+        outcome.pipeline_fetch_batch_count,
+        outcome.pipeline_fetch_batch_avg_ms,
+        outcome.pipeline_fetch_batch_max_ms,
+        outcome.pipeline_writer_tx_count,
+        outcome.pipeline_writer_tx_avg_ms,
+        outcome.pipeline_writer_tx_max_ms,
+        outcome.pipeline_reorder_buffer_high_water,
+        outcome.pipeline_staged_message_count,
+        outcome.pipeline_staged_delete_count,
+        outcome.pipeline_staged_attachment_count,
+        if outcome.adaptive_pacing_enabled {
+            1_i64
+        } else {
+            0_i64
+        },
+        outcome.quota_units_budget_per_minute,
+        outcome.message_fetch_concurrency,
+        outcome.quota_units_cap_per_minute,
+        outcome.message_fetch_concurrency_cap,
+        outcome.starting_quota_units_per_minute,
+        outcome.starting_message_fetch_concurrency,
+        outcome.effective_quota_units_per_minute,
+        outcome.effective_message_fetch_concurrency,
+        outcome.adaptive_downshift_count,
+        outcome.estimated_quota_units_reserved,
+        outcome.http_attempt_count,
+        outcome.retry_count,
+        outcome.quota_pressure_retry_count,
+        outcome.concurrency_pressure_retry_count,
+        outcome.backend_retry_count,
+        outcome.throttle_wait_count,
+        outcome.throttle_wait_ms,
+        outcome.retry_after_wait_ms,
+        outcome.duration_ms,
+        outcome.pages_per_second,
+        outcome.messages_per_second,
+        &outcome.error_message,
+    ])?;
 
     let run_id = transaction.last_insert_rowid();
-    read_sync_run_history_record(transaction, run_id)?
+    super::read::read_sync_run_history_record(transaction, run_id)?
         .ok_or_else(|| anyhow!("sync run history row {run_id} disappeared after insert"))
 }
 
@@ -2022,7 +2045,7 @@ fn prune_sync_run_history_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     account_id: &str,
 ) -> Result<()> {
-    transaction.execute(
+    let mut statement = transaction.prepare_cached(
         "DELETE FROM gmail_sync_run_history
          WHERE run_id IN (
              SELECT run_id
@@ -2038,116 +2061,9 @@ fn prune_sync_run_history_in_transaction(
              )
              WHERE row_number > ?2
          )",
-        params![account_id, SYNC_RUN_HISTORY_RETENTION_PER_ACCOUNT],
     )?;
+    statement.execute(params![account_id, SYNC_RUN_HISTORY_RETENTION_PER_ACCOUNT])?;
     Ok(())
-}
-
-fn recompute_sync_run_summary_in_transaction(
-    transaction: &rusqlite::Transaction<'_>,
-    account_id: &str,
-    sync_mode: SyncMode,
-    updated_at_epoch_s: i64,
-) -> Result<SyncRunSummaryRecord> {
-    let history = read_sync_run_history_rows_for_summary(transaction, account_id, sync_mode)?;
-    ensure!(
-        !history.is_empty(),
-        "sync run summary requires at least one history row"
-    );
-
-    let latest = &history[0];
-    let recent_window = history.len().min(SYNC_RUN_SUMMARY_RECENT_WINDOW);
-    let recent_rows = &history[..recent_window];
-    let recent_success_count = recent_rows
-        .iter()
-        .filter(|row| row.status == SyncStatus::Ok)
-        .count() as i64;
-    let recent_failure_count = recent_rows
-        .iter()
-        .filter(|row| row.status == SyncStatus::Failed)
-        .count() as i64;
-    let recent_failure_streak = history
-        .iter()
-        .take_while(|row| row.status == SyncStatus::Failed)
-        .count() as i64;
-    let recent_clean_success_streak = history
-        .iter()
-        .take_while(|row| is_clean_success(row))
-        .count() as i64;
-
-    let best_clean_run = history
-        .iter()
-        .filter(|row| is_clean_success(row))
-        .max_by(|left, right| compare_best_clean_run(left, right));
-
-    let regression = detect_sync_run_regression(&history);
-
-    transaction.execute(
-        "INSERT INTO gmail_sync_run_summary (
-             account_id,
-             sync_mode,
-             latest_run_id,
-             latest_status,
-             latest_finished_at_epoch_s,
-             best_clean_run_id,
-             best_clean_quota_units_per_minute,
-             best_clean_message_fetch_concurrency,
-             best_clean_messages_per_second,
-             best_clean_duration_ms,
-             recent_success_count,
-             recent_failure_count,
-             recent_failure_streak,
-             recent_clean_success_streak,
-             regression_detected,
-             regression_kind,
-             regression_run_id,
-             regression_message,
-             updated_at_epoch_s
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-         ON CONFLICT (account_id, sync_mode) DO UPDATE SET
-             latest_run_id = excluded.latest_run_id,
-             latest_status = excluded.latest_status,
-             latest_finished_at_epoch_s = excluded.latest_finished_at_epoch_s,
-             best_clean_run_id = excluded.best_clean_run_id,
-             best_clean_quota_units_per_minute = excluded.best_clean_quota_units_per_minute,
-             best_clean_message_fetch_concurrency = excluded.best_clean_message_fetch_concurrency,
-             best_clean_messages_per_second = excluded.best_clean_messages_per_second,
-             best_clean_duration_ms = excluded.best_clean_duration_ms,
-             recent_success_count = excluded.recent_success_count,
-             recent_failure_count = excluded.recent_failure_count,
-             recent_failure_streak = excluded.recent_failure_streak,
-             recent_clean_success_streak = excluded.recent_clean_success_streak,
-             regression_detected = excluded.regression_detected,
-             regression_kind = excluded.regression_kind,
-             regression_run_id = excluded.regression_run_id,
-             regression_message = excluded.regression_message,
-             updated_at_epoch_s = excluded.updated_at_epoch_s",
-        params![
-            account_id,
-            sync_mode.as_str(),
-            latest.run_id,
-            latest.status.as_str(),
-            latest.finished_at_epoch_s,
-            best_clean_run.map(|row| row.run_id),
-            best_clean_run.map(|row| row.effective_quota_units_per_minute),
-            best_clean_run.map(|row| row.effective_message_fetch_concurrency),
-            best_clean_run.map(|row| row.messages_per_second),
-            best_clean_run.map(|row| row.duration_ms),
-            recent_success_count,
-            recent_failure_count,
-            recent_failure_streak,
-            recent_clean_success_streak,
-            if regression.is_some() { 1_i64 } else { 0_i64 },
-            regression.as_ref().map(|value| value.kind.as_str()),
-            regression.as_ref().map(|value| value.run_id),
-            regression.as_ref().map(|value| value.message.as_str()),
-            updated_at_epoch_s,
-        ],
-    )?;
-
-    read_sync_run_summary(transaction, account_id, sync_mode)?
-        .ok_or_else(|| anyhow!("sync run summary disappeared after upsert"))
 }
 
 fn delete_account_messages(
@@ -2168,405 +2084,6 @@ fn delete_account_messages(
         [account_id],
     )?;
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct DetectedSyncRunRegression {
-    kind: SyncRunRegressionKind,
-    run_id: i64,
-    message: String,
-}
-
-fn read_sync_run_history_rows_for_summary(
-    transaction: &rusqlite::Transaction<'_>,
-    account_id: &str,
-    sync_mode: SyncMode,
-) -> Result<Vec<SyncRunHistoryRecord>> {
-    let mut statement = transaction.prepare_cached(
-        "SELECT
-             run_id,
-             account_id,
-             sync_mode,
-             status,
-             started_at_epoch_s,
-             finished_at_epoch_s,
-             bootstrap_query,
-             cursor_history_id,
-             fallback_from_history,
-             resumed_from_checkpoint,
-             pages_fetched,
-             messages_listed,
-             messages_upserted,
-             messages_deleted,
-             labels_synced,
-             checkpoint_reused_pages,
-             checkpoint_reused_messages_upserted,
-             pipeline_enabled,
-             pipeline_list_queue_high_water,
-             pipeline_write_queue_high_water,
-             pipeline_write_batch_count,
-             pipeline_writer_wait_ms,
-             pipeline_fetch_batch_count,
-             pipeline_fetch_batch_avg_ms,
-             pipeline_fetch_batch_max_ms,
-             pipeline_writer_tx_count,
-             pipeline_writer_tx_avg_ms,
-             pipeline_writer_tx_max_ms,
-             pipeline_reorder_buffer_high_water,
-             pipeline_staged_message_count,
-             pipeline_staged_delete_count,
-             pipeline_staged_attachment_count,
-             adaptive_pacing_enabled,
-             quota_units_budget_per_minute,
-             message_fetch_concurrency,
-             quota_units_cap_per_minute,
-             message_fetch_concurrency_cap,
-             starting_quota_units_per_minute,
-             starting_message_fetch_concurrency,
-             effective_quota_units_per_minute,
-             effective_message_fetch_concurrency,
-             adaptive_downshift_count,
-             estimated_quota_units_reserved,
-             http_attempt_count,
-             retry_count,
-             quota_pressure_retry_count,
-             concurrency_pressure_retry_count,
-             backend_retry_count,
-             throttle_wait_count,
-             throttle_wait_ms,
-             retry_after_wait_ms,
-             duration_ms,
-             pages_per_second,
-             messages_per_second,
-             error_message
-         FROM gmail_sync_run_history
-         WHERE account_id = ?1
-           AND sync_mode = ?2
-         ORDER BY finished_at_epoch_s DESC, run_id DESC",
-    )?;
-    let rows = statement
-        .query_map(params![account_id, sync_mode.as_str()], |row| {
-            Ok(SyncRunHistoryRecord {
-                run_id: row.get(0)?,
-                account_id: row.get(1)?,
-                sync_mode: SyncMode::from_str(&row.get::<_, String>(2)?).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        2,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-                status: SyncStatus::from_str(&row.get::<_, String>(3)?).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-                started_at_epoch_s: row.get(4)?,
-                finished_at_epoch_s: row.get(5)?,
-                bootstrap_query: row.get(6)?,
-                cursor_history_id: row.get(7)?,
-                fallback_from_history: row.get::<_, i64>(8)? != 0,
-                resumed_from_checkpoint: row.get::<_, i64>(9)? != 0,
-                pages_fetched: row.get(10)?,
-                messages_listed: row.get(11)?,
-                messages_upserted: row.get(12)?,
-                messages_deleted: row.get(13)?,
-                labels_synced: row.get(14)?,
-                checkpoint_reused_pages: row.get(15)?,
-                checkpoint_reused_messages_upserted: row.get(16)?,
-                pipeline_enabled: row.get::<_, i64>(17)? != 0,
-                pipeline_list_queue_high_water: row.get(18)?,
-                pipeline_write_queue_high_water: row.get(19)?,
-                pipeline_write_batch_count: row.get(20)?,
-                pipeline_writer_wait_ms: row.get(21)?,
-                pipeline_fetch_batch_count: row.get(22)?,
-                pipeline_fetch_batch_avg_ms: row.get(23)?,
-                pipeline_fetch_batch_max_ms: row.get(24)?,
-                pipeline_writer_tx_count: row.get(25)?,
-                pipeline_writer_tx_avg_ms: row.get(26)?,
-                pipeline_writer_tx_max_ms: row.get(27)?,
-                pipeline_reorder_buffer_high_water: row.get(28)?,
-                pipeline_staged_message_count: row.get(29)?,
-                pipeline_staged_delete_count: row.get(30)?,
-                pipeline_staged_attachment_count: row.get(31)?,
-                adaptive_pacing_enabled: row.get::<_, i64>(32)? != 0,
-                quota_units_budget_per_minute: row.get(33)?,
-                message_fetch_concurrency: row.get(34)?,
-                quota_units_cap_per_minute: row.get(35)?,
-                message_fetch_concurrency_cap: row.get(36)?,
-                starting_quota_units_per_minute: row.get(37)?,
-                starting_message_fetch_concurrency: row.get(38)?,
-                effective_quota_units_per_minute: row.get(39)?,
-                effective_message_fetch_concurrency: row.get(40)?,
-                adaptive_downshift_count: row.get(41)?,
-                estimated_quota_units_reserved: row.get(42)?,
-                http_attempt_count: row.get(43)?,
-                retry_count: row.get(44)?,
-                quota_pressure_retry_count: row.get(45)?,
-                concurrency_pressure_retry_count: row.get(46)?,
-                backend_retry_count: row.get(47)?,
-                throttle_wait_count: row.get(48)?,
-                throttle_wait_ms: row.get(49)?,
-                retry_after_wait_ms: row.get(50)?,
-                duration_ms: row.get(51)?,
-                pages_per_second: row.get(52)?,
-                messages_per_second: row.get(53)?,
-                error_message: row.get(54)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-fn read_sync_run_history_record(
-    transaction: &rusqlite::Transaction<'_>,
-    run_id: i64,
-) -> Result<Option<SyncRunHistoryRecord>> {
-    let mut rows = transaction.prepare_cached(
-        "SELECT
-             run_id,
-             account_id,
-             sync_mode,
-             status,
-             started_at_epoch_s,
-             finished_at_epoch_s,
-             bootstrap_query,
-             cursor_history_id,
-             fallback_from_history,
-             resumed_from_checkpoint,
-             pages_fetched,
-             messages_listed,
-             messages_upserted,
-             messages_deleted,
-             labels_synced,
-             checkpoint_reused_pages,
-             checkpoint_reused_messages_upserted,
-             pipeline_enabled,
-             pipeline_list_queue_high_water,
-             pipeline_write_queue_high_water,
-             pipeline_write_batch_count,
-             pipeline_writer_wait_ms,
-             pipeline_fetch_batch_count,
-             pipeline_fetch_batch_avg_ms,
-             pipeline_fetch_batch_max_ms,
-             pipeline_writer_tx_count,
-             pipeline_writer_tx_avg_ms,
-             pipeline_writer_tx_max_ms,
-             pipeline_reorder_buffer_high_water,
-             pipeline_staged_message_count,
-             pipeline_staged_delete_count,
-             pipeline_staged_attachment_count,
-             adaptive_pacing_enabled,
-             quota_units_budget_per_minute,
-             message_fetch_concurrency,
-             quota_units_cap_per_minute,
-             message_fetch_concurrency_cap,
-             starting_quota_units_per_minute,
-             starting_message_fetch_concurrency,
-             effective_quota_units_per_minute,
-             effective_message_fetch_concurrency,
-             adaptive_downshift_count,
-             estimated_quota_units_reserved,
-             http_attempt_count,
-             retry_count,
-             quota_pressure_retry_count,
-             concurrency_pressure_retry_count,
-             backend_retry_count,
-             throttle_wait_count,
-             throttle_wait_ms,
-             retry_after_wait_ms,
-             duration_ms,
-             pages_per_second,
-             messages_per_second,
-             error_message
-         FROM gmail_sync_run_history
-         WHERE run_id = ?1",
-    )?;
-    let mut rows = rows.query([run_id])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    Ok(Some(SyncRunHistoryRecord {
-        run_id: row.get(0)?,
-        account_id: row.get(1)?,
-        sync_mode: SyncMode::from_str(&row.get::<_, String>(2)?).map_err(|error| anyhow!(error))?,
-        status: SyncStatus::from_str(&row.get::<_, String>(3)?).map_err(|error| anyhow!(error))?,
-        started_at_epoch_s: row.get(4)?,
-        finished_at_epoch_s: row.get(5)?,
-        bootstrap_query: row.get(6)?,
-        cursor_history_id: row.get(7)?,
-        fallback_from_history: row.get::<_, i64>(8)? != 0,
-        resumed_from_checkpoint: row.get::<_, i64>(9)? != 0,
-        pages_fetched: row.get(10)?,
-        messages_listed: row.get(11)?,
-        messages_upserted: row.get(12)?,
-        messages_deleted: row.get(13)?,
-        labels_synced: row.get(14)?,
-        checkpoint_reused_pages: row.get(15)?,
-        checkpoint_reused_messages_upserted: row.get(16)?,
-        pipeline_enabled: row.get::<_, i64>(17)? != 0,
-        pipeline_list_queue_high_water: row.get(18)?,
-        pipeline_write_queue_high_water: row.get(19)?,
-        pipeline_write_batch_count: row.get(20)?,
-        pipeline_writer_wait_ms: row.get(21)?,
-        pipeline_fetch_batch_count: row.get(22)?,
-        pipeline_fetch_batch_avg_ms: row.get(23)?,
-        pipeline_fetch_batch_max_ms: row.get(24)?,
-        pipeline_writer_tx_count: row.get(25)?,
-        pipeline_writer_tx_avg_ms: row.get(26)?,
-        pipeline_writer_tx_max_ms: row.get(27)?,
-        pipeline_reorder_buffer_high_water: row.get(28)?,
-        pipeline_staged_message_count: row.get(29)?,
-        pipeline_staged_delete_count: row.get(30)?,
-        pipeline_staged_attachment_count: row.get(31)?,
-        adaptive_pacing_enabled: row.get::<_, i64>(32)? != 0,
-        quota_units_budget_per_minute: row.get(33)?,
-        message_fetch_concurrency: row.get(34)?,
-        quota_units_cap_per_minute: row.get(35)?,
-        message_fetch_concurrency_cap: row.get(36)?,
-        starting_quota_units_per_minute: row.get(37)?,
-        starting_message_fetch_concurrency: row.get(38)?,
-        effective_quota_units_per_minute: row.get(39)?,
-        effective_message_fetch_concurrency: row.get(40)?,
-        adaptive_downshift_count: row.get(41)?,
-        estimated_quota_units_reserved: row.get(42)?,
-        http_attempt_count: row.get(43)?,
-        retry_count: row.get(44)?,
-        quota_pressure_retry_count: row.get(45)?,
-        concurrency_pressure_retry_count: row.get(46)?,
-        backend_retry_count: row.get(47)?,
-        throttle_wait_count: row.get(48)?,
-        throttle_wait_ms: row.get(49)?,
-        retry_after_wait_ms: row.get(50)?,
-        duration_ms: row.get(51)?,
-        pages_per_second: row.get(52)?,
-        messages_per_second: row.get(53)?,
-        error_message: row.get(54)?,
-    }))
-}
-
-fn is_clean_success(row: &SyncRunHistoryRecord) -> bool {
-    row.status == SyncStatus::Ok
-        && row.messages_listed > 0
-        && row.retry_count == 0
-        && row.quota_pressure_retry_count == 0
-        && row.concurrency_pressure_retry_count == 0
-        && row.backend_retry_count == 0
-}
-
-fn compare_best_clean_run(
-    left: &SyncRunHistoryRecord,
-    right: &SyncRunHistoryRecord,
-) -> std::cmp::Ordering {
-    left.messages_per_second
-        .partial_cmp(&right.messages_per_second)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| {
-            right
-                .estimated_quota_units_reserved
-                .cmp(&left.estimated_quota_units_reserved)
-        })
-        .then_with(|| {
-            right
-                .effective_message_fetch_concurrency
-                .cmp(&left.effective_message_fetch_concurrency)
-        })
-        .then_with(|| left.run_id.cmp(&right.run_id))
-}
-
-fn detect_sync_run_regression(
-    history: &[SyncRunHistoryRecord],
-) -> Option<DetectedSyncRunRegression> {
-    let latest = history.first()?;
-    if latest.status == SyncStatus::Failed {
-        let failure_streak = history
-            .iter()
-            .take_while(|row| row.status == SyncStatus::Failed)
-            .count();
-        if failure_streak >= 2 {
-            return Some(DetectedSyncRunRegression {
-                kind: SyncRunRegressionKind::FailureStreak,
-                run_id: latest.run_id,
-                message: format!(
-                    "{} consecutive {} sync failures",
-                    failure_streak, latest.sync_mode
-                ),
-            });
-        }
-        return None;
-    }
-
-    if (latest.quota_pressure_retry_count > 0 || latest.concurrency_pressure_retry_count > 0)
-        && history
-            .iter()
-            .skip(1)
-            .filter(|row| row.status == SyncStatus::Ok)
-            .take(SYNC_RUN_RETRY_BASELINE_WINDOW)
-            .all(|row| {
-                row.quota_pressure_retry_count == 0 && row.concurrency_pressure_retry_count == 0
-            })
-    {
-        return Some(DetectedSyncRunRegression {
-            kind: SyncRunRegressionKind::RetryPressure,
-            run_id: latest.run_id,
-            message: format!(
-                "retry pressure appeared after {} clean successful {} runs",
-                SYNC_RUN_RETRY_BASELINE_WINDOW, latest.sync_mode
-            ),
-        });
-    }
-
-    if latest.messages_listed < SYNC_RUN_REGRESSION_MIN_MESSAGES {
-        return None;
-    }
-
-    let baseline_rows = history
-        .iter()
-        .skip(1)
-        .filter(|row| {
-            row.status == SyncStatus::Ok && row.messages_listed >= SYNC_RUN_REGRESSION_MIN_MESSAGES
-        })
-        .take(SYNC_RUN_REGRESSION_SUCCESS_WINDOW)
-        .collect::<Vec<_>>();
-    if baseline_rows.len() < SYNC_RUN_REGRESSION_SUCCESS_WINDOW {
-        return None;
-    }
-
-    let avg_messages_per_second = baseline_rows
-        .iter()
-        .map(|row| row.messages_per_second)
-        .sum::<f64>()
-        / baseline_rows.len() as f64;
-    if avg_messages_per_second > 0.0 && latest.messages_per_second < avg_messages_per_second * 0.7 {
-        return Some(DetectedSyncRunRegression {
-            kind: SyncRunRegressionKind::ThroughputDrop,
-            run_id: latest.run_id,
-            message: format!(
-                "messages_per_second dropped from {:.3} baseline to {:.3}",
-                avg_messages_per_second, latest.messages_per_second
-            ),
-        });
-    }
-
-    let avg_duration_ms = baseline_rows
-        .iter()
-        .map(|row| row.duration_ms as f64)
-        .sum::<f64>()
-        / baseline_rows.len() as f64;
-    if latest.duration_ms as f64 > avg_duration_ms * 1.5 {
-        return Some(DetectedSyncRunRegression {
-            kind: SyncRunRegressionKind::DurationSpike,
-            run_id: latest.run_id,
-            message: format!(
-                "duration_ms rose from {:.0} baseline to {}",
-                avg_duration_ms, latest.duration_ms
-            ),
-        });
-    }
-
-    None
 }
 
 fn create_preserved_attachment_vault_stage(

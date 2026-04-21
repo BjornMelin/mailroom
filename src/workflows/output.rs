@@ -445,6 +445,10 @@ mod tests {
             sync_report: Some(SyncRunReport {
                 run_id: 0,
                 mode: SyncMode::Full,
+                comparability_kind: crate::store::mailbox::SyncRunComparabilityKind::FullRecentDays,
+                comparability_key: String::from("7"),
+                comparability_label: String::from("full recent_days=7"),
+                startup_seed_run_id: None,
                 fallback_from_history: false,
                 resumed_from_checkpoint: false,
                 bootstrap_query: String::from("newer_than:7d"),
