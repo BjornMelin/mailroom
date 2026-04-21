@@ -328,6 +328,11 @@ Relevant `sync perf explain` output fields include:
 - `regression_detected`
 - `regression_kind`
 
+`sync perf explain` intentionally suppresses drift output for incremental runs
+when the workload is too small or too skewed to compare meaningfully against the
+saved clean baseline. In those cases `comparable_to_baseline` is `false` and
+`drift` is omitted instead of overstating a regression on tiny runs.
+
 ## Safety boundaries
 
 - sync is read-only against Gmail

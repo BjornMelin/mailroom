@@ -458,6 +458,12 @@ fn build_verification_report(
     label_report: LabelAuditReport,
     mailbox: Option<MailboxCoverageReport>,
 ) -> VerificationAuditReport {
+    let rules_file_path = config_report
+        .config
+        .workspace
+        .runtime_root
+        .join("automation.toml");
+    let rules_file_exists = rules_file_path.exists();
     let bootstrap_query = scoped_mailbox
         .as_ref()
         .and_then(|mailbox| mailbox.sync_state.as_ref())
@@ -554,58 +560,51 @@ fn build_verification_report(
             "Numbered and legacy label overlaps still exist; clean them up before broad automation applies.",
         ));
     }
-    if !config_report
-        .config
-        .workspace
-        .runtime_root
-        .join("automation.toml")
-        .exists()
-    {
+    if !rules_file_exists {
         warnings.push(String::from(
             "No active .mailroom/automation.toml ruleset is present yet; use the verification runbook before real bulk actions.",
         ));
     }
 
-    let mut next_steps = vec![
-        String::from(
+    let mut next_steps = Vec::new();
+    if readiness.deep_audit_sync_recommended {
+        next_steps.push(String::from(
             "Run `cargo run -- sync run --profile deep-audit --json` once to build a deeper audit corpus before final rule tuning.",
-        ),
-        String::from(
-            "Run `cargo run -- audit labels --json` and retire numbered-vs-legacy label duplicates before real bulk applies.",
-        ),
-        String::from(
-            "Use self-addressed canary threads for draft/send validation before any real reply workflow rollout.",
-        ),
-        String::from(
-            "Seed first-wave rules with exact senders plus age thresholds, then preview micro-batches before execute.",
-        ),
-        String::from(
-            "Keep first live automation actions to archive plus label only; defer trash and unsubscribe execution.",
-        ),
-    ];
-    if !readiness.list_header_rule_tuning_ready {
-        next_steps.insert(
-            3,
-            String::from(
-                "Do not rely on `has_list_unsubscribe` or `list_id_contains` rules until the deeper sync shows nonzero list-header coverage.",
-            ),
-        );
+        ));
     }
+    if label_report.numbered_overlap_count > 0 {
+        next_steps.push(String::from(
+            "Run `cargo run -- audit labels --json` and retire numbered-vs-legacy label duplicates before real bulk applies.",
+        ));
+    }
+    if !readiness.draft_send_canary_ready {
+        next_steps.push(String::from(
+            "Use self-addressed canary threads for draft/send validation before any real reply workflow rollout.",
+        ));
+    }
+    if !readiness.list_header_rule_tuning_ready {
+        next_steps.push(String::from(
+            "Do not rely on `has_list_unsubscribe` or `list_id_contains` rules until the deeper sync shows nonzero list-header coverage.",
+        ));
+    }
+    if !rules_file_exists {
+        next_steps.push(String::from(
+            "Seed first-wave rules with exact senders plus age thresholds, then preview micro-batches before execute.",
+        ));
+    } else if readiness.sender_rule_tuning_ready {
+        next_steps.push(String::from(
+            "Preview first-wave sender and list-header micro-batches before any broader execute run.",
+        ));
+    }
+    next_steps.push(String::from(
+        "Keep first live automation actions to archive plus label only; defer trash and unsubscribe execution.",
+    ));
 
     VerificationAuditReport {
         account_id: label_report.account_id.clone(),
         authenticated: has_live_auth,
-        rules_file_path: config_report
-            .config
-            .workspace
-            .runtime_root
-            .join("automation.toml"),
-        rules_file_exists: config_report
-            .config
-            .workspace
-            .runtime_root
-            .join("automation.toml")
-            .exists(),
+        rules_file_path,
+        rules_file_exists,
         bootstrap_query,
         bootstrap_recent_days,
         mailbox,
@@ -884,6 +883,7 @@ mod tests {
         build_label_audit_report, extract_recent_days_from_bootstrap_query, labels,
         normalize_label_name, normalize_label_name_without_prefix, verification,
     };
+    use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::resolve;
     use crate::gmail::GmailLabel;
     use crate::store::accounts;
@@ -1308,6 +1308,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verification_omits_completed_next_steps_when_mailbox_is_ready() {
+        let repo_root = unique_temp_dir("mailroom-audit-verification-ready-next-steps");
+        let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+        seed_credentials(&config_report, "operator@example.com");
+        fs::write(
+            config_report
+                .config
+                .workspace
+                .runtime_root
+                .join("automation.toml"),
+            "[[rules]]\nid = \"seed\"\naction = { archive = true }\n",
+        )
+        .unwrap();
+
+        seed_account(&config_report, "operator@example.com", 365, 2, 2, "scope:a");
+        replace_labels(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+            &[
+                gmail_label("INBOX", "INBOX", "system"),
+                gmail_label("Label_1", "0. To Reply", "user"),
+            ],
+            100,
+        )
+        .unwrap();
+        upsert_messages(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &[message_with_headers(
+                "gmail:operator@example.com",
+                "m-1",
+                "t-1",
+                "101",
+                GmailAutomationHeaders {
+                    list_id_header: Some(String::from("list.example.com")),
+                    list_unsubscribe_header: Some(String::from("<mailto:list@example.com>")),
+                    ..GmailAutomationHeaders::default()
+                },
+            )],
+            100,
+        )
+        .unwrap();
+        upsert_sync_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &SyncStateUpdate {
+                account_id: String::from("gmail:operator@example.com"),
+                cursor_history_id: Some(String::from("101")),
+                bootstrap_query: String::from("newer_than:365d"),
+                last_sync_mode: SyncMode::Full,
+                last_sync_status: SyncStatus::Ok,
+                last_error: None,
+                last_sync_epoch_s: 101,
+                last_full_sync_success_epoch_s: Some(101),
+                last_incremental_sync_success_epoch_s: None,
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
+                pipeline_fetch_batch_count: 0,
+                pipeline_fetch_batch_avg_ms: 0,
+                pipeline_fetch_batch_max_ms: 0,
+                pipeline_writer_tx_count: 0,
+                pipeline_writer_tx_avg_ms: 0,
+                pipeline_writer_tx_max_ms: 0,
+                pipeline_reorder_buffer_high_water: 0,
+                pipeline_staged_message_count: 0,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
+            },
+        )
+        .unwrap();
+
+        let report = verification(&config_report).unwrap();
+
+        assert!(report.warnings.is_empty());
+        assert!(report.readiness.manual_mutation_ready);
+        assert!(report.readiness.sender_rule_tuning_ready);
+        assert!(report.readiness.list_header_rule_tuning_ready);
+        assert!(report.readiness.draft_send_canary_ready);
+        assert!(!report.readiness.deep_audit_sync_recommended);
+        assert!(
+            !report
+                .next_steps
+                .iter()
+                .any(|step| step.contains("sync run --profile deep-audit"))
+        );
+        assert!(
+            !report
+                .next_steps
+                .iter()
+                .any(|step| step.contains("retire numbered-vs-legacy"))
+        );
+        assert!(
+            !report
+                .next_steps
+                .iter()
+                .any(|step| step.contains("self-addressed canary"))
+        );
+        assert!(
+            report.next_steps.iter().any(
+                |step| step.contains("Preview first-wave sender and list-header micro-batches")
+            )
+        );
+    }
+
     fn label(
         label_id: &str,
         name: &str,
@@ -1369,6 +1481,22 @@ mod tests {
         thread_id: &str,
         history_id: &str,
     ) -> GmailMessageUpsertInput {
+        message_with_headers(
+            account_id,
+            message_id,
+            thread_id,
+            history_id,
+            GmailAutomationHeaders::default(),
+        )
+    }
+
+    fn message_with_headers(
+        account_id: &str,
+        message_id: &str,
+        thread_id: &str,
+        history_id: &str,
+        automation_headers: GmailAutomationHeaders,
+    ) -> GmailMessageUpsertInput {
         GmailMessageUpsertInput {
             account_id: account_id.to_owned(),
             message_id: message_id.to_owned(),
@@ -1385,7 +1513,7 @@ mod tests {
             bcc_header: String::new(),
             reply_to_header: String::new(),
             size_estimate: 123,
-            automation_headers: GmailAutomationHeaders::default(),
+            automation_headers,
             label_ids: vec![String::from("INBOX")],
             label_names_text: String::from("INBOX"),
             attachments: Vec::new(),
@@ -1394,6 +1522,24 @@ mod tests {
 
     fn unique_temp_dir(prefix: &str) -> TempDir {
         Builder::new().prefix(prefix).tempdir().unwrap()
+    }
+
+    fn seed_credentials(config_report: &crate::config::ConfigReport, email_address: &str) {
+        let credential_store = FileCredentialStore::new(
+            config_report
+                .config
+                .gmail
+                .credential_path(&config_report.config.workspace),
+        );
+        credential_store
+            .save(&StoredCredentials {
+                account_id: format!("gmail:{email_address}"),
+                access_token: secrecy::SecretString::from(String::from("access-token")),
+                refresh_token: Some(secrecy::SecretString::from(String::from("refresh-token"))),
+                expires_at_epoch_s: Some(u64::MAX),
+                scopes: vec![String::from("scope:a")],
+            })
+            .unwrap();
     }
 
     fn write_inline_config_and_malformed_imported_oauth(repo_root: &std::path::Path) {

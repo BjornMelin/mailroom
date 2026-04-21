@@ -35,6 +35,9 @@ use std::time::Instant;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::{JoinSet, spawn_blocking};
 
+const SYNC_PERF_INCREMENTAL_MIN_MEANINGFUL_WORK: i64 = 5;
+const SYNC_PERF_INCREMENTAL_MAX_WORK_SPREAD_RATIO: i64 = 3;
+
 pub async fn sync_run(
     config_report: &ConfigReport,
     force_full: bool,
@@ -338,10 +341,7 @@ pub async fn sync_perf_explain(
     let comparable_to_baseline = latest_run
         .as_ref()
         .zip(baseline_run.as_ref())
-        .map(|(latest, baseline)| {
-            latest.comparability_kind == baseline.comparability_kind
-                && latest.comparability_key == baseline.comparability_key
-        })
+        .map(|(latest, baseline)| sync_perf_runs_are_comparable(latest, baseline))
         .unwrap_or(false);
     let drift = latest_run
         .as_ref()
@@ -359,6 +359,48 @@ pub async fn sync_perf_explain(
         drift,
         runs,
     })
+}
+
+fn sync_perf_runs_are_comparable(
+    latest: &store::mailbox::SyncRunHistoryRecord,
+    baseline: &store::mailbox::SyncRunHistoryRecord,
+) -> bool {
+    if latest.comparability_kind != baseline.comparability_kind
+        || latest.comparability_key != baseline.comparability_key
+    {
+        return false;
+    }
+
+    match latest.comparability_kind {
+        store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier => {
+            incremental_sync_perf_runs_are_comparable(latest, baseline)
+        }
+        store::mailbox::SyncRunComparabilityKind::FullRecentDays
+        | store::mailbox::SyncRunComparabilityKind::FullQuery => true,
+    }
+}
+
+fn incremental_sync_perf_runs_are_comparable(
+    latest: &store::mailbox::SyncRunHistoryRecord,
+    baseline: &store::mailbox::SyncRunHistoryRecord,
+) -> bool {
+    let latest_work = sync_perf_incremental_total_work(latest);
+    let baseline_work = sync_perf_incremental_total_work(baseline);
+    if latest_work < SYNC_PERF_INCREMENTAL_MIN_MEANINGFUL_WORK
+        || baseline_work < SYNC_PERF_INCREMENTAL_MIN_MEANINGFUL_WORK
+    {
+        return false;
+    }
+
+    let larger_work = latest_work.max(baseline_work);
+    let smaller_work = latest_work.min(baseline_work);
+    larger_work <= smaller_work.saturating_mul(SYNC_PERF_INCREMENTAL_MAX_WORK_SPREAD_RATIO)
+}
+
+fn sync_perf_incremental_total_work(run: &store::mailbox::SyncRunHistoryRecord) -> i64 {
+    run.messages_listed
+        .max(0)
+        .saturating_add(run.messages_deleted.max(0))
 }
 
 fn sync_mode(
