@@ -137,6 +137,11 @@ fn render_run_detail(
         format!("status={}", run.status),
         format!("rule_file_path={}", sanitize(&run.rule_file_path)),
         format!("rule_file_hash={}", run.rule_file_hash),
+        format!("selected_rule_count={}", run.selected_rule_ids.len()),
+        format!(
+            "selected_rule_ids={}",
+            sanitize(&run.selected_rule_ids.join(","))
+        ),
         format!("candidate_count={}", detail.candidates.len()),
         format!("event_count={}", detail.events.len()),
         String::from("results_format=tsv"),
@@ -160,6 +165,26 @@ fn render_run_detail(
             sanitize(&candidate.subject),
         )
     }));
+    if !detail.candidates.is_empty() {
+        lines.push(String::from("candidate_details_format=tsv"));
+        lines.push(String::from(
+            "candidate_id\tfrom_address\tattachment_count\tlabels\tmatched_predicates\taction_add_labels\taction_remove_labels\tlist_id_header\tprecedence_header",
+        ));
+        lines.extend(detail.candidates.iter().map(|candidate| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                candidate.candidate_id,
+                sanitize(candidate.from_address.as_deref().unwrap_or_default()),
+                candidate.attachment_count,
+                sanitize(&candidate.label_names.join(" | ")),
+                sanitize(&render_match_reason(&candidate.reason)),
+                sanitize(&candidate.action.add_label_names.join(" | ")),
+                sanitize(&candidate.action.remove_label_names.join(" | ")),
+                sanitize(candidate.list_id_header.as_deref().unwrap_or_default()),
+                sanitize(candidate.precedence_header.as_deref().unwrap_or_default()),
+            )
+        }));
+    }
     if !detail.events.is_empty() {
         lines.push(String::from("events_format=tsv"));
         lines.push(String::from(
@@ -177,6 +202,35 @@ fn render_run_detail(
         }));
     }
     lines.join("\n") + "\n"
+}
+
+fn render_match_reason(reason: &crate::store::automation::AutomationMatchReason) -> String {
+    let mut predicates = Vec::new();
+    if let Some(from_address) = &reason.from_address {
+        predicates.push(format!("from={from_address}"));
+    }
+    if !reason.subject_terms.is_empty() {
+        predicates.push(format!("subject~{}", reason.subject_terms.join("|")));
+    }
+    if !reason.label_names.is_empty() {
+        predicates.push(format!("label_any={}", reason.label_names.join("|")));
+    }
+    if let Some(days) = reason.older_than_days {
+        predicates.push(format!("older_than_days={days}"));
+    }
+    if let Some(has_attachments) = reason.has_attachments {
+        predicates.push(format!("has_attachments={has_attachments}"));
+    }
+    if let Some(has_list_unsubscribe) = reason.has_list_unsubscribe {
+        predicates.push(format!("has_list_unsubscribe={has_list_unsubscribe}"));
+    }
+    if !reason.list_id_terms.is_empty() {
+        predicates.push(format!("list_id~{}", reason.list_id_terms.join("|")));
+    }
+    if !reason.precedence_values.is_empty() {
+        predicates.push(format!("precedence={}", reason.precedence_values.join("|")));
+    }
+    predicates.join(", ")
 }
 
 fn sanitize(value: &str) -> String {
