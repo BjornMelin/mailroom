@@ -58,6 +58,12 @@ Inspect persisted historical sync-run telemetry for the active mailbox:
 cargo run -- sync history --limit 20 --json
 ```
 
+Explain the latest run against the best comparable clean baseline:
+
+```bash
+cargo run -- sync perf explain --limit 20 --json
+```
+
 For real-mailbox hardening before the first production ruleset, use one deeper
 audit sync once:
 
@@ -128,11 +134,12 @@ Persisted sync state behavior:
 - `last_incremental_sync_success_epoch_s` is updated only after a successful incremental replay
 - failed syncs update status and error details without overwriting the last successful timestamps
 - every terminal sync attempt also appends one historical run record in SQLite
-- Mailroom keeps a compact per-account, per-mode summary row with the latest
-  outcome, best clean budget, recent streak counts, and automatic regression
-  flags
-- v1 history is passive analytics only: it informs operators and doctor output,
-  but it does not directly override adaptive pacing decisions
+- Mailroom keeps a compact per-account, per-mode, per-comparability-bucket
+  summary row with the latest outcome, best clean budget, recent streak counts,
+  and automatic regression flags
+- comparable clean history can seed adaptive pacing startup targets for later
+  runs, but in-run pacing ownership still stays with the live adaptive
+  controller and current operator ceilings
 
 Full bootstrap checkpoint behavior:
 
@@ -239,6 +246,10 @@ Relevant sync fields in JSON output include:
 Relevant `sync run` output fields now also include:
 
 - `run_id`
+- `comparability_kind`
+- `comparability_key`
+- `comparability_label`
+- `startup_seed_run_id`
 - `resumed_from_checkpoint`
 - `checkpoint_reused_pages`
 - `checkpoint_reused_messages_upserted`
@@ -279,6 +290,9 @@ Relevant `sync history` output fields include:
 
 - `summary.latest_run_id`
 - `summary.latest_status`
+- `summary.comparability_kind`
+- `summary.comparability_key`
+- `summary.comparability_label`
 - `summary.best_clean_quota_units_per_minute`
 - `summary.best_clean_message_fetch_concurrency`
 - `summary.best_clean_messages_per_second`
@@ -288,9 +302,25 @@ Relevant `sync history` output fields include:
 - `summary.regression_kind`
 - `runs[*].run_id`
 - `runs[*].sync_mode`
+- `runs[*].comparability_key`
 - `runs[*].status`
 - `runs[*].messages_listed`
 - `runs[*].messages_per_second`
+
+Relevant `sync perf explain` output fields include:
+
+- `latest_run.run_id`
+- `latest_run.comparability_label`
+- `baseline_run.run_id`
+- `baseline_run.comparability_label`
+- `comparable_to_baseline`
+- `drift.messages_per_second_delta`
+- `drift.duration_ms_delta`
+- `drift.retry_count_delta`
+- `drift.effective_quota_units_per_minute_delta`
+- `drift.effective_message_fetch_concurrency_delta`
+- `regression_detected`
+- `regression_kind`
 
 ## Safety boundaries
 

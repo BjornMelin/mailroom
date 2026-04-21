@@ -132,7 +132,19 @@ sync flags still act as per-run ceilings over those learned values.
 Historical sync telemetry is stored in SQLite as well. Mailroom appends one
 terminal run row per successful or failed sync attempt, prunes retained history
 to the newest 1000 rows per account, and recomputes one compact summary row per
-account and sync mode for `doctor`, `store doctor`, and `sync history`.
+account, sync mode, and comparability bucket for `doctor`, `store doctor`,
+`sync history`, and `sync perf explain`.
+
+Comparability buckets keep unlike workloads from polluting each other:
+
+- full sync runs are bucketed by a normalized bootstrap query shape, using a
+  `newer_than:<days>d` tier when available
+- incremental sync runs are bucketed by workload size tiers derived from the
+  number of changed and deleted messages
+
+Comparable clean history can seed the startup quota budget and message-fetch
+concurrency for later runs, but `gmail_sync_pacing_state` remains the single
+durable owner of learned pacing and CLI flags still cap each run.
 
 ## Hardening defaults
 
