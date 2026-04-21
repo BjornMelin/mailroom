@@ -241,7 +241,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(8));
+    assert_eq!(store_report.schema_version, Some(9));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -873,6 +873,96 @@ async fn full_sync_keeps_the_newest_history_cursor_across_pages() {
 }
 
 #[tokio::test]
+async fn full_sync_failure_after_staging_a_page_preserves_existing_mailbox_cache() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "999").await;
+    mount_labels(&mock_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param_is_missing("pageToken"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-staged", "threadId": "t-staged"}],
+            "nextPageToken": "page-2",
+            "resultSizeEstimate": 2
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("pageToken", "page-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-fail", "threadId": "t-fail"}],
+            "resultSizeEstimate": 2
+        })))
+        .mount(&mock_server)
+        .await;
+    mount_message_metadata(&mock_server, "m-staged", "950", "Staged but not finalized").await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/m-fail"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("later page metadata failure"))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    seed_existing_mailbox(&config_report, "250", "cached-1", "Existing cached message");
+
+    let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("users/me/messages/m-fail"));
+
+    let mailbox = store::mailbox::inspect_mailbox(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mailbox.message_count, 1);
+    assert_eq!(
+        mailbox
+            .sync_state
+            .as_ref()
+            .and_then(|state| state.cursor_history_id.as_deref()),
+        Some("250")
+    );
+
+    let cached_results = store::mailbox::search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::mailbox::SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("Existing"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(cached_results.len(), 1);
+    assert_eq!(cached_results[0].message_id, "cached-1");
+
+    let staged_results = store::mailbox::search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::mailbox::SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("finalized"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert!(staged_results.is_empty());
+}
+
+#[tokio::test]
 async fn incremental_sync_skips_messages_deleted_on_later_history_pages() {
     let mock_server = MockServer::start().await;
     mount_profile(&mock_server, "350").await;
@@ -1316,6 +1406,11 @@ fn seed_existing_mailbox_with_custom_labels(
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/09-mailbox-full-sync-staging/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/08-automation-rules-and-bulk-actions/down.sql"

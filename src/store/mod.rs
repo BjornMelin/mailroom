@@ -379,7 +379,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 8);
+        assert_eq!(report.schema_version, 9);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -393,13 +393,17 @@ mod tests {
                        'gmail_labels',
                        'gmail_messages',
                        'gmail_message_labels',
-                       'gmail_sync_state'
+                       'gmail_sync_state',
+                       'gmail_full_sync_stage_labels',
+                       'gmail_full_sync_stage_messages',
+                       'gmail_full_sync_stage_message_labels',
+                       'gmail_full_sync_stage_attachments'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 6);
+        assert_eq!(substrate_tables, 10);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -683,6 +687,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/09-mailbox-full-sync-staging/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/08-automation-rules-and-bulk-actions/down.sql"
             ))
             .unwrap();
@@ -707,7 +716,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 8);
+        assert_eq!(migration_report.schema_version, 9);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();

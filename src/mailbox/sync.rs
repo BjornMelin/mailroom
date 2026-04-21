@@ -174,7 +174,12 @@ async fn run_full_sync(
     let mut messages_listed = 0usize;
     let mut messages_upserted = 0usize;
     let mut cursor_history_id = Some(context.account.history_id.clone());
-    let mut upserts = Vec::new();
+
+    context.store_handle.reset_full_sync_stage().await?;
+    context
+        .store_handle
+        .stage_full_sync_labels(context.labels)
+        .await?;
 
     loop {
         let page = context
@@ -210,7 +215,10 @@ async fn run_full_sync(
             context.label_names_by_id,
         );
         messages_upserted += page_upserts.len();
-        upserts.extend(page_upserts);
+        context
+            .store_handle
+            .stage_full_sync_messages(&page_upserts)
+            .await?;
 
         page_token = page.next_page_token;
         if page_token.is_none() {
@@ -231,9 +239,7 @@ async fn run_full_sync(
     let now_epoch_s = current_epoch_seconds()?;
     let sync_state = context
         .store_handle
-        .commit_full_sync(
-            context.labels,
-            upserts,
+        .finalize_full_sync_from_stage(
             now_epoch_s,
             success_sync_state_update(
                 context.account,
@@ -243,6 +249,7 @@ async fn run_full_sync(
             ),
         )
         .await?;
+    let _ = context.store_handle.reset_full_sync_stage().await;
 
     finalize_sync(sync_state, bootstrap_query, finalize_input)
 }
@@ -591,24 +598,68 @@ impl MailboxStoreHandle {
         .await??)
     }
 
-    async fn commit_full_sync(
+    async fn reset_full_sync_stage(&self) -> Result<()> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        spawn_blocking(move || {
+            store::mailbox::reset_full_sync_stage(&database_path, busy_timeout_ms, &account_id)
+        })
+        .await?
+    }
+
+    async fn stage_full_sync_labels(&self, labels: &[GmailLabel]) -> Result<()> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        let labels = labels.to_vec();
+        spawn_blocking(move || {
+            store::mailbox::stage_full_sync_labels(
+                &database_path,
+                busy_timeout_ms,
+                &account_id,
+                &labels,
+            )
+        })
+        .await?
+    }
+
+    async fn stage_full_sync_messages(
         &self,
-        labels: &[GmailLabel],
-        messages: Vec<store::mailbox::GmailMessageUpsertInput>,
+        messages: &[store::mailbox::GmailMessageUpsertInput],
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        let messages = messages.to_vec();
+        spawn_blocking(move || {
+            store::mailbox::stage_full_sync_messages(
+                &database_path,
+                busy_timeout_ms,
+                &account_id,
+                &messages,
+            )
+        })
+        .await?
+    }
+
+    async fn finalize_full_sync_from_stage(
+        &self,
         updated_at_epoch_s: i64,
         sync_state_update: store::mailbox::SyncStateUpdate,
     ) -> Result<store::mailbox::SyncStateRecord> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
-        let labels = labels.to_vec();
         spawn_blocking(move || {
-            store::mailbox::commit_full_sync(
+            store::mailbox::finalize_full_sync_from_stage(
                 &database_path,
                 busy_timeout_ms,
                 &account_id,
-                &labels,
-                &messages,
                 updated_at_epoch_s,
                 &sync_state_update,
             )
