@@ -30,6 +30,7 @@ The native Rust core owns:
 - remote Gmail draft projection and send orchestration
 - reviewed cleanup actions for archive, label, and trash
 - typed automation rule parsing, snapshot persistence, and thread-first bulk apply
+- read-only label audit, readiness verification, and ruleset-hardening guidance
 - structured CLI output
 
 ### TUI layer
@@ -79,6 +80,7 @@ The current native substrate is intentionally narrow but now usable:
 - local draft revisions with file attachments and remote Gmail draft synchronization
 - explicit draft send and reviewed cleanup actions that resync the mailbox afterward
 - typed TOML automation rules and persisted review snapshots for bulk cleanup
+- read-only audit commands for label taxonomy drift, header coverage, and rollout readiness
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
 This substrate now covers the first complete operator loop for search, thread
@@ -101,6 +103,10 @@ Detailed attachment ownership is defined in
 Detailed automation ownership is defined in
 `docs/decisions/0006-review-first-automation-rules.md` and
 `docs/operations/automation-rules-and-bulk-actions.md`.
+
+Detailed verification and hardening ownership is defined in
+`docs/decisions/0007-verification-audit-hardening.md` and
+`docs/operations/verification-and-hardening.md`.
 
 ## Non-goals for v1
 

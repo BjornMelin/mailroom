@@ -37,6 +37,10 @@ Workflow commands require:
 - an authenticated active Gmail account
 - a locally synced mailbox entry for the target thread
 
+For first-time real-mailbox rollout, especially before draft/send or cleanup is
+used broadly, follow [`verification-and-hardening.md`](verification-and-hardening.md)
+first so the canary thread path and deep sync posture are already proven.
+
 If a thread is not in the local cache yet, run `mailroom sync run` first.
 
 All workflow commands with `--json` return the normalized Mailroom envelope:

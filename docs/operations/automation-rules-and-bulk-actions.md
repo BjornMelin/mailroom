@@ -26,6 +26,8 @@ Before using automation commands:
 ```bash
 cargo run -- auth status --json
 cargo run -- sync run --json
+cargo run -- audit verification --json
+cargo run -- audit labels --json
 cp config/automation.example.toml .mailroom/automation.toml
 ```
 
@@ -143,9 +145,11 @@ does not mutate Gmail.
 Plain output includes:
 
 - run metadata
+- selected rule IDs
 - candidate count
 - event count
 - one TSV row per candidate
+- a second TSV section with per-candidate match reasoning and label/action detail
 
 Candidate rows expose:
 
@@ -156,6 +160,17 @@ Candidate rows expose:
 - `apply_status`
 - `has_unsubscribe`
 - `subject`
+
+Candidate detail rows expose:
+
+- `from_address`
+- `attachment_count`
+- `labels`
+- `matched_predicates`
+- `action_add_labels`
+- `action_remove_labels`
+- `list_id_header`
+- `precedence_header`
 
 The JSON payload also includes header-derived unsubscribe hints:
 
@@ -204,3 +219,8 @@ This slice adds:
 4. Inspect the saved run by ID.
 5. Apply only the reviewed run with `--execute`.
 6. Re-run sync or `doctor` if you want to inspect the reconciled local state.
+
+For the real-mailbox hardening sequence, do not jump straight from rule editing
+to `automation apply --execute`. Follow
+[`verification-and-hardening.md`](verification-and-hardening.md) first so the
+label taxonomy, deep-sync coverage, and canary mutation path are already proven.

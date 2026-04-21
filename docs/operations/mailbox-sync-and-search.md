@@ -33,10 +33,23 @@ Run a normal sync:
 cargo run -- sync run --json
 ```
 
+Lower the Gmail budget and concurrency if a deep resync needs extra headroom:
+
+```bash
+cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
+```
+
 Force a fresh bootstrap over a specific recent window:
 
 ```bash
 cargo run -- sync run --full --recent-days 30 --json
+```
+
+For real-mailbox hardening before the first production ruleset, use one deeper
+audit sync once:
+
+```bash
+cargo run -- sync run --full --recent-days 365 --json
 ```
 
 Run a local search:
@@ -69,13 +82,16 @@ The sync flow is one-shot and local-first:
 1. refresh the active account from Gmail profile data
 2. refresh the label catalog
 3. decide between full bootstrap and incremental replay
-4. fetch Gmail message payloads with bounded concurrency
+4. fetch Gmail message payloads with bounded concurrency and quota-aware pacing
 5. persist mailbox rows, attachment rows, label joins, FTS rows, and sync cursor state
 
 Default bootstrap behavior:
 
 - query: `in:anywhere -in:spam -in:trash newer_than:{N}d`
 - default `N`: `90`
+- default quota budget: `12000` Gmail quota units per minute
+- default message fetch concurrency: `4`
+- default list/history page size: `500`
 - storage: metadata, snippet, and attachment rows
 
 Incremental sync behavior:
@@ -93,6 +109,14 @@ Persisted sync state behavior:
 - `last_full_sync_success_epoch_s` is updated only after a successful full bootstrap
 - `last_incremental_sync_success_epoch_s` is updated only after a successful incremental replay
 - failed syncs update status and error details without overwriting the last successful timestamps
+
+Quota hardening behavior:
+
+- Gmail read calls are budgeted by documented quota units instead of raw request count
+- `users.messages.list` and `users.messages.get` are paced under one shared limiter
+- GET retries respect `Retry-After` when present
+- Gmail usage-limit `403` responses (`rateLimitExceeded`, `userRateLimitExceeded`) are retried like `429`
+- sync reports now include estimated reserved quota units, retry count, throttle wait totals, and the effective fetch concurrency
 
 ## Search behavior
 
@@ -145,3 +169,7 @@ Relevant sync fields in JSON output include:
 - Mailroom mutates mailbox state only through the explicit thread workflow
   cleanup and draft/send commands, not through sync/search itself
 - repo-local `.mailroom/` remains the only runtime storage location by default
+
+If the goal is first-time real-mailbox rollout rather than daily operations,
+continue with [`verification-and-hardening.md`](verification-and-hardening.md)
+after sync health is green.

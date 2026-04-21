@@ -65,9 +65,15 @@ The review-first automation slice is now in place too:
 - thread-first archive, label, and trash bulk actions gated behind `--execute`
 - unsubscribe assistance through list headers in candidate inspection output
 
-The next implementation slice should improve operator review ergonomics and the
-future TUI surface, not re-open auth, account, config, store, sync, workflow,
-attachment, or automation ownership.
+The verification and hardening slice is now in place too:
+
+- read-only `audit labels` output for overlap, numbered-vs-legacy, and empty-label review
+- read-only `audit verification` output for deep-sync readiness, header coverage, and first-wave rollout posture
+- operator runbooks for deep audit syncs, self-canary send tests, and micro-batch archive/label rollout
+
+The next implementation slice should focus on the real personal ruleset rollout
+and operator ergonomics on top of the shipped audit surface, not re-open auth,
+account, config, store, sync, workflow, attachment, or automation ownership.
 
 ## Deferred
 
