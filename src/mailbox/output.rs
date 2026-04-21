@@ -1,4 +1,4 @@
-use crate::mailbox::{SearchReport, SyncRunReport};
+use crate::mailbox::{SearchReport, SyncHistoryReport, SyncRunReport};
 use anyhow::Result;
 
 impl SyncRunReport {
@@ -14,6 +14,7 @@ impl SyncRunReport {
 
     fn render_plain(&self) -> String {
         [
+            format!("run_id={}", self.run_id),
             format!("mode={}", self.mode),
             format!("fallback_from_history={}", self.fallback_from_history),
             format!("resumed_from_checkpoint={}", self.resumed_from_checkpoint),
@@ -141,9 +142,85 @@ impl SyncRunReport {
             format!("duration_ms={}", self.duration_ms),
             format!("pages_per_second={:.3}", self.pages_per_second),
             format!("messages_per_second={:.3}", self.messages_per_second),
+            format!("regression_detected={}", self.regression_detected),
+            format!(
+                "regression_kind={}",
+                self.regression_kind
+                    .map(|kind| kind.to_string())
+                    .unwrap_or_else(|| String::from("<none>"))
+            ),
         ]
         .join("\n")
             + "\n"
+    }
+}
+
+impl SyncHistoryReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        if json {
+            crate::cli_output::print_json_success(self)?;
+        } else {
+            print!("{}", self.render_plain());
+        }
+
+        Ok(())
+    }
+
+    fn render_plain(&self) -> String {
+        let mut lines = vec![
+            format!("account_id={}", self.account_id),
+            format!("limit={}", self.limit),
+            format!("run_count={}", self.runs.len()),
+        ];
+
+        match &self.summary {
+            Some(summary) => {
+                lines.push(format!("summary_sync_mode={}", summary.sync_mode));
+                lines.push(format!("summary_latest_run_id={}", summary.latest_run_id));
+                lines.push(format!("summary_latest_status={}", summary.latest_status));
+                lines.push(format!(
+                    "summary_best_clean_quota_units_per_minute={}",
+                    summary
+                        .best_clean_quota_units_per_minute
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| String::from("<none>"))
+                ));
+                lines.push(format!(
+                    "summary_best_clean_message_fetch_concurrency={}",
+                    summary
+                        .best_clean_message_fetch_concurrency
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| String::from("<none>"))
+                ));
+                lines.push(format!(
+                    "summary_regression_kind={}",
+                    summary
+                        .regression_kind
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| String::from("<none>"))
+                ));
+            }
+            None => lines.push(String::from("summary_sync_mode=<none>")),
+        }
+
+        lines.push(String::from(
+            "runs_format=tsv\trun_id\tfinished_at_epoch_s\tsync_mode\tstatus\tmessages_listed\tmessages_per_second\teffective_quota_units_per_minute\teffective_message_fetch_concurrency\tretry_count",
+        ));
+        lines.extend(self.runs.iter().map(|run| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{}\t{}",
+                run.run_id,
+                run.finished_at_epoch_s,
+                run.sync_mode,
+                run.status,
+                run.messages_listed,
+                run.messages_per_second,
+                run.effective_quota_units_per_minute,
+                run.effective_message_fetch_concurrency,
+                run.retry_count,
+            )
+        }));
+        lines.join("\n") + "\n"
     }
 }
 

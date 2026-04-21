@@ -2830,6 +2830,7 @@ mod tests {
     #[test]
     fn best_effort_sync_report_preserves_successful_sync_results() {
         let report = SyncRunReport {
+            run_id: 0,
             mode: SyncMode::Incremental,
             fallback_from_history: false,
             resumed_from_checkpoint: false,
@@ -2882,6 +2883,8 @@ mod tests {
             duration_ms: 100,
             pages_per_second: 10.0,
             messages_per_second: 30.0,
+            regression_detected: false,
+            regression_kind: None,
         };
 
         let sync_report = best_effort_sync_report(Ok(report), "sync failed").unwrap();

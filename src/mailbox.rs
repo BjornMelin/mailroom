@@ -16,9 +16,9 @@ mod tests;
 #[path = "mailbox/util.rs"]
 mod util;
 
-pub use model::{SearchReport, SearchRequest, SyncRunOptions, SyncRunReport};
+pub use model::{SearchReport, SearchRequest, SyncHistoryReport, SyncRunOptions, SyncRunReport};
 pub use search::search;
-pub use sync::{sync_run, sync_run_with_options};
+pub use sync::{sync_history, sync_run, sync_run_with_options};
 
 pub const DEFAULT_BOOTSTRAP_RECENT_DAYS: u32 = 90;
 pub const DEFAULT_SEARCH_LIMIT: usize = 25;

@@ -443,6 +443,7 @@ mod tests {
                 remove_label_names: vec![],
             }),
             sync_report: Some(SyncRunReport {
+                run_id: 0,
                 mode: SyncMode::Full,
                 fallback_from_history: false,
                 resumed_from_checkpoint: false,
@@ -495,6 +496,8 @@ mod tests {
                 duration_ms: 100,
                 pages_per_second: 10.0,
                 messages_per_second: 20.0,
+                regression_detected: false,
+                regression_kind: None,
             }),
         }
     }

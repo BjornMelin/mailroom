@@ -349,6 +349,15 @@ pub enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show persisted historical sync-run telemetry for the active mailbox
+    History {
+        /// Maximum number of runs to return
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

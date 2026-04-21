@@ -1,6 +1,6 @@
 use crate::config::ConfigReport;
 use crate::gmail::{GmailClient, GmailLabel, GmailMessageCatalog};
-use crate::mailbox::model::{FinalizeSyncInput, SyncRunOptions};
+use crate::mailbox::model::{FinalizeSyncInput, SyncHistoryReport, SyncRunOptions};
 use crate::mailbox::pacing::{AdaptiveSyncPacing, AdaptiveSyncPacingReport};
 use crate::mailbox::pipeline::{
     ListedPage, PIPELINE_LIST_QUEUE_CAPACITY, PIPELINE_WRITE_BATCH_MESSAGE_TARGET,
@@ -57,6 +57,7 @@ pub async fn sync_run_with_options(
             "message_fetch_concurrency must be greater than zero"
         ));
     }
+    let sync_started_at_epoch_s = current_epoch_seconds()?;
 
     let gmail_client = crate::gmail_client_for_config(config_report)?
         .with_quota_budget(options.quota_units_per_minute)?;
@@ -160,6 +161,24 @@ pub async fn sync_run_with_options(
             let metrics = gmail_client.request_metrics_snapshot();
             populate_sync_report_metrics(&mut report, pacing_report, metrics, &options);
             populate_sync_report_timing(&mut report, sync_started_at.elapsed());
+            let sync_state = store_handle
+                .load_sync_state()
+                .await?
+                .ok_or_else(|| anyhow!("sync state disappeared after successful sync"))?;
+            let (_, history, summary) = store_handle
+                .persist_successful_sync_outcome(
+                    &sync_state,
+                    &success_outcome_input(
+                        &account.account_id,
+                        sync_started_at_epoch_s,
+                        now_epoch_s,
+                        &report,
+                    ),
+                )
+                .await?;
+            report.run_id = history.run_id;
+            report.regression_detected = summary.regression_detected;
+            report.regression_kind = summary.regression_kind;
             Ok(report)
         }
         (Ok(_), Err(error)) => Err(error),
@@ -167,15 +186,24 @@ pub async fn sync_run_with_options(
             let pacing_persist_result =
                 persist_sync_pacing_failure(&store_handle, &account, &mut pacing, &gmail_client)
                     .await;
+            let pacing_report = pacing.report();
+            let metrics = gmail_client
+                .request_metrics_snapshot()
+                .unwrap_or_else(default_gmail_quota_metrics_snapshot);
             let persist_result = writer_shutdown_result.and(
                 persist_sync_state_failure(
                     &store_handle,
                     &account,
-                    failure_bootstrap_query,
-                    failure_mode,
-                    failure_cursor_history_id,
-                    failure_pipeline_report,
-                    sync_error.to_string(),
+                    FailedSyncOutcomeContext {
+                        bootstrap_query: failure_bootstrap_query,
+                        mode: failure_mode,
+                        cursor_history_id: failure_cursor_history_id,
+                        pipeline_report: failure_pipeline_report,
+                        started_at_epoch_s: sync_started_at_epoch_s,
+                        pacing_report,
+                        metrics,
+                        error_message: sync_error.to_string(),
+                    },
                 )
                 .await,
             );
@@ -185,6 +213,54 @@ pub async fn sync_run_with_options(
             ))
         }
     }
+}
+
+pub async fn sync_history(config_report: &ConfigReport, limit: usize) -> Result<SyncHistoryReport> {
+    if limit == 0 {
+        return Err(anyhow!("history limit must be greater than zero"));
+    }
+    store::init(config_report)?;
+
+    let account_id = resolve_sync_history_account_id(config_report)?;
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let account_id_for_summary = account_id.clone();
+    let account_id_for_history = account_id.clone();
+
+    let (summary, runs) = spawn_blocking(move || {
+        let mailbox = store::mailbox::inspect_mailbox_account(
+            &database_path,
+            busy_timeout_ms,
+            &account_id_for_summary,
+        )?;
+        let summary = match mailbox
+            .as_ref()
+            .and_then(|mailbox| mailbox.sync_state.as_ref())
+        {
+            Some(sync_state) => store::mailbox::get_sync_run_summary(
+                &database_path,
+                busy_timeout_ms,
+                &account_id_for_summary,
+                sync_state.last_sync_mode,
+            )?,
+            None => mailbox.and_then(|mailbox| mailbox.sync_run_summary),
+        };
+        let runs = store::mailbox::list_sync_run_history(
+            &database_path,
+            busy_timeout_ms,
+            &account_id_for_history,
+            limit,
+        )?;
+        Ok::<_, anyhow::Error>((summary, runs))
+    })
+    .await??;
+
+    Ok(SyncHistoryReport {
+        account_id,
+        limit,
+        summary,
+        runs,
+    })
 }
 
 fn sync_mode(
@@ -244,6 +320,17 @@ struct PreparedIncrementalBatch {
     listed_count: usize,
     upserts: Vec<store::mailbox::GmailMessageUpsertInput>,
     message_ids_to_delete: Vec<String>,
+}
+
+struct FailedSyncOutcomeContext<'a> {
+    bootstrap_query: &'a str,
+    mode: store::mailbox::SyncMode,
+    cursor_history_id: Option<String>,
+    pipeline_report: PipelineStatsReport,
+    started_at_epoch_s: i64,
+    pacing_report: AdaptiveSyncPacingReport,
+    metrics: crate::gmail::GmailQuotaMetricsSnapshot,
+    error_message: String,
 }
 
 #[derive(Debug)]
@@ -1143,6 +1230,7 @@ fn finalize_sync(
     input: FinalizeSyncInput,
 ) -> Result<SyncRunReport> {
     Ok(SyncRunReport {
+        run_id: 0,
         mode: input.mode,
         fallback_from_history: input.fallback_from_history,
         resumed_from_checkpoint: input.resumed_from_checkpoint,
@@ -1197,6 +1285,8 @@ fn finalize_sync(
         duration_ms: 0,
         pages_per_second: 0.0,
         messages_per_second: 0.0,
+        regression_detected: false,
+        regression_kind: None,
     })
 }
 
@@ -1267,6 +1357,181 @@ fn populate_sync_report_timing(report: &mut SyncRunReport, elapsed: std::time::D
     }
 }
 
+fn success_outcome_input(
+    account_id: &str,
+    started_at_epoch_s: i64,
+    finished_at_epoch_s: i64,
+    report: &SyncRunReport,
+) -> store::mailbox::SyncRunOutcomeInput {
+    store::mailbox::SyncRunOutcomeInput {
+        account_id: account_id.to_owned(),
+        sync_mode: report.mode,
+        status: store::mailbox::SyncStatus::Ok,
+        started_at_epoch_s,
+        finished_at_epoch_s,
+        bootstrap_query: report.bootstrap_query.clone(),
+        cursor_history_id: Some(report.cursor_history_id.clone()),
+        fallback_from_history: report.fallback_from_history,
+        resumed_from_checkpoint: report.resumed_from_checkpoint,
+        pages_fetched: usize_to_i64(report.pages_fetched),
+        messages_listed: usize_to_i64(report.messages_listed),
+        messages_upserted: usize_to_i64(report.messages_upserted),
+        messages_deleted: usize_to_i64(report.messages_deleted),
+        labels_synced: usize_to_i64(report.labels_synced),
+        checkpoint_reused_pages: usize_to_i64(report.checkpoint_reused_pages),
+        checkpoint_reused_messages_upserted: usize_to_i64(
+            report.checkpoint_reused_messages_upserted,
+        ),
+        pipeline_enabled: report.pipeline_enabled,
+        pipeline_list_queue_high_water: usize_to_i64(report.pipeline_list_queue_high_water),
+        pipeline_write_queue_high_water: usize_to_i64(report.pipeline_write_queue_high_water),
+        pipeline_write_batch_count: usize_to_i64(report.pipeline_write_batch_count),
+        pipeline_writer_wait_ms: u64_to_i64(report.pipeline_writer_wait_ms),
+        pipeline_fetch_batch_count: usize_to_i64(report.pipeline_fetch_batch_count),
+        pipeline_fetch_batch_avg_ms: u64_to_i64(report.pipeline_fetch_batch_avg_ms),
+        pipeline_fetch_batch_max_ms: u64_to_i64(report.pipeline_fetch_batch_max_ms),
+        pipeline_writer_tx_count: usize_to_i64(report.pipeline_writer_tx_count),
+        pipeline_writer_tx_avg_ms: u64_to_i64(report.pipeline_writer_tx_avg_ms),
+        pipeline_writer_tx_max_ms: u64_to_i64(report.pipeline_writer_tx_max_ms),
+        pipeline_reorder_buffer_high_water: usize_to_i64(report.pipeline_reorder_buffer_high_water),
+        pipeline_staged_message_count: usize_to_i64(report.pipeline_staged_message_count),
+        pipeline_staged_delete_count: usize_to_i64(report.pipeline_staged_delete_count),
+        pipeline_staged_attachment_count: usize_to_i64(report.pipeline_staged_attachment_count),
+        adaptive_pacing_enabled: report.adaptive_pacing_enabled,
+        quota_units_budget_per_minute: i64::from(report.quota_units_budget_per_minute),
+        message_fetch_concurrency: usize_to_i64(report.message_fetch_concurrency),
+        quota_units_cap_per_minute: i64::from(report.quota_units_cap_per_minute),
+        message_fetch_concurrency_cap: usize_to_i64(report.message_fetch_concurrency_cap),
+        starting_quota_units_per_minute: i64::from(report.starting_quota_units_per_minute),
+        starting_message_fetch_concurrency: usize_to_i64(report.starting_message_fetch_concurrency),
+        effective_quota_units_per_minute: i64::from(report.effective_quota_units_per_minute),
+        effective_message_fetch_concurrency: usize_to_i64(
+            report.effective_message_fetch_concurrency,
+        ),
+        adaptive_downshift_count: u64_to_i64(report.adaptive_downshift_count),
+        estimated_quota_units_reserved: u64_to_i64(report.estimated_quota_units_reserved),
+        http_attempt_count: u64_to_i64(report.http_attempt_count),
+        retry_count: u64_to_i64(report.retry_count),
+        quota_pressure_retry_count: u64_to_i64(report.quota_pressure_retry_count),
+        concurrency_pressure_retry_count: u64_to_i64(report.concurrency_pressure_retry_count),
+        backend_retry_count: u64_to_i64(report.backend_retry_count),
+        throttle_wait_count: u64_to_i64(report.throttle_wait_count),
+        throttle_wait_ms: u64_to_i64(report.throttle_wait_ms),
+        retry_after_wait_ms: u64_to_i64(report.retry_after_wait_ms),
+        duration_ms: u64_to_i64(report.duration_ms),
+        pages_per_second: report.pages_per_second,
+        messages_per_second: report.messages_per_second,
+        error_message: None,
+    }
+}
+
+fn failure_outcome_input(
+    account_id: &str,
+    finished_at_epoch_s: i64,
+    failure: &FailedSyncOutcomeContext<'_>,
+) -> store::mailbox::SyncRunOutcomeInput {
+    store::mailbox::SyncRunOutcomeInput {
+        account_id: account_id.to_owned(),
+        sync_mode: failure.mode,
+        status: store::mailbox::SyncStatus::Failed,
+        started_at_epoch_s: failure.started_at_epoch_s,
+        finished_at_epoch_s,
+        bootstrap_query: failure.bootstrap_query.to_owned(),
+        cursor_history_id: failure.cursor_history_id.clone(),
+        fallback_from_history: false,
+        resumed_from_checkpoint: false,
+        pages_fetched: 0,
+        messages_listed: 0,
+        messages_upserted: 0,
+        messages_deleted: 0,
+        labels_synced: 0,
+        checkpoint_reused_pages: 0,
+        checkpoint_reused_messages_upserted: 0,
+        pipeline_enabled: failure.pipeline_report.pipeline_enabled,
+        pipeline_list_queue_high_water: usize_to_i64(failure.pipeline_report.list_queue_high_water),
+        pipeline_write_queue_high_water: usize_to_i64(
+            failure.pipeline_report.write_queue_high_water,
+        ),
+        pipeline_write_batch_count: usize_to_i64(failure.pipeline_report.write_batch_count),
+        pipeline_writer_wait_ms: u64_to_i64(failure.pipeline_report.writer_wait_ms),
+        pipeline_fetch_batch_count: usize_to_i64(failure.pipeline_report.fetch_batch_count),
+        pipeline_fetch_batch_avg_ms: u64_to_i64(failure.pipeline_report.fetch_batch_avg_ms),
+        pipeline_fetch_batch_max_ms: u64_to_i64(failure.pipeline_report.fetch_batch_max_ms),
+        pipeline_writer_tx_count: usize_to_i64(failure.pipeline_report.writer_tx_count),
+        pipeline_writer_tx_avg_ms: u64_to_i64(failure.pipeline_report.writer_tx_avg_ms),
+        pipeline_writer_tx_max_ms: u64_to_i64(failure.pipeline_report.writer_tx_max_ms),
+        pipeline_reorder_buffer_high_water: usize_to_i64(
+            failure.pipeline_report.reorder_buffer_high_water,
+        ),
+        pipeline_staged_message_count: usize_to_i64(failure.pipeline_report.staged_message_count),
+        pipeline_staged_delete_count: usize_to_i64(failure.pipeline_report.staged_delete_count),
+        pipeline_staged_attachment_count: usize_to_i64(
+            failure.pipeline_report.staged_attachment_count,
+        ),
+        adaptive_pacing_enabled: failure.pacing_report.adaptive_pacing_enabled,
+        quota_units_budget_per_minute: i64::from(
+            failure.pacing_report.effective_quota_units_per_minute,
+        ),
+        message_fetch_concurrency: usize_to_i64(
+            failure.pacing_report.effective_message_fetch_concurrency,
+        ),
+        quota_units_cap_per_minute: i64::from(failure.pacing_report.quota_units_cap_per_minute),
+        message_fetch_concurrency_cap: usize_to_i64(
+            failure.pacing_report.message_fetch_concurrency_cap,
+        ),
+        starting_quota_units_per_minute: i64::from(
+            failure.pacing_report.starting_quota_units_per_minute,
+        ),
+        starting_message_fetch_concurrency: usize_to_i64(
+            failure.pacing_report.starting_message_fetch_concurrency,
+        ),
+        effective_quota_units_per_minute: i64::from(
+            failure.pacing_report.effective_quota_units_per_minute,
+        ),
+        effective_message_fetch_concurrency: usize_to_i64(
+            failure.pacing_report.effective_message_fetch_concurrency,
+        ),
+        adaptive_downshift_count: u64_to_i64(failure.pacing_report.adaptive_downshift_count),
+        estimated_quota_units_reserved: u64_to_i64(failure.metrics.reserved_units),
+        http_attempt_count: u64_to_i64(failure.metrics.http_attempts),
+        retry_count: u64_to_i64(failure.metrics.retry_count),
+        quota_pressure_retry_count: u64_to_i64(failure.metrics.quota_pressure_retry_count),
+        concurrency_pressure_retry_count: u64_to_i64(
+            failure.metrics.concurrency_pressure_retry_count,
+        ),
+        backend_retry_count: u64_to_i64(failure.metrics.backend_retry_count),
+        throttle_wait_count: u64_to_i64(failure.metrics.throttle_wait_count),
+        throttle_wait_ms: u64_to_i64(failure.metrics.throttle_wait_ms),
+        retry_after_wait_ms: u64_to_i64(failure.metrics.retry_after_wait_ms),
+        duration_ms: 0,
+        pages_per_second: 0.0,
+        messages_per_second: 0.0,
+        error_message: Some(failure.error_message.clone()),
+    }
+}
+
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn default_gmail_quota_metrics_snapshot() -> crate::gmail::GmailQuotaMetricsSnapshot {
+    crate::gmail::GmailQuotaMetricsSnapshot {
+        reserved_units: 0,
+        http_attempts: 0,
+        retry_count: 0,
+        quota_pressure_retry_count: 0,
+        concurrency_pressure_retry_count: 0,
+        backend_retry_count: 0,
+        throttle_wait_count: 0,
+        throttle_wait_ms: 0,
+        retry_after_wait_ms: 0,
+    }
+}
+
 async fn load_sync_state(
     store_handle: &MailboxStoreHandle,
 ) -> Result<Option<store::mailbox::SyncStateRecord>> {
@@ -1276,60 +1541,69 @@ async fn load_sync_state(
 async fn persist_sync_state_failure(
     store_handle: &MailboxStoreHandle,
     account: &AccountRecord,
-    bootstrap_query: &str,
-    mode: store::mailbox::SyncMode,
-    cursor_history_id: Option<String>,
-    pipeline_report: PipelineStatsReport,
-    error: String,
+    failure: FailedSyncOutcomeContext<'_>,
 ) -> Result<()> {
-    let now_epoch_s = current_epoch_seconds()?;
+    let finished_at_epoch_s = current_epoch_seconds()?;
+    let sync_state_update = store::mailbox::SyncStateUpdate {
+        account_id: account.account_id.clone(),
+        cursor_history_id: failure.cursor_history_id.clone(),
+        bootstrap_query: failure.bootstrap_query.to_owned(),
+        last_sync_mode: failure.mode,
+        last_sync_status: store::mailbox::SyncStatus::Failed,
+        last_error: Some(failure.error_message.clone()),
+        last_sync_epoch_s: finished_at_epoch_s,
+        last_full_sync_success_epoch_s: None,
+        last_incremental_sync_success_epoch_s: None,
+        pipeline_enabled: failure.pipeline_report.pipeline_enabled,
+        pipeline_list_queue_high_water: usize_to_i64(failure.pipeline_report.list_queue_high_water),
+        pipeline_write_queue_high_water: usize_to_i64(
+            failure.pipeline_report.write_queue_high_water,
+        ),
+        pipeline_write_batch_count: usize_to_i64(failure.pipeline_report.write_batch_count),
+        pipeline_writer_wait_ms: u64_to_i64(failure.pipeline_report.writer_wait_ms),
+        pipeline_fetch_batch_count: usize_to_i64(failure.pipeline_report.fetch_batch_count),
+        pipeline_fetch_batch_avg_ms: u64_to_i64(failure.pipeline_report.fetch_batch_avg_ms),
+        pipeline_fetch_batch_max_ms: u64_to_i64(failure.pipeline_report.fetch_batch_max_ms),
+        pipeline_writer_tx_count: usize_to_i64(failure.pipeline_report.writer_tx_count),
+        pipeline_writer_tx_avg_ms: u64_to_i64(failure.pipeline_report.writer_tx_avg_ms),
+        pipeline_writer_tx_max_ms: u64_to_i64(failure.pipeline_report.writer_tx_max_ms),
+        pipeline_reorder_buffer_high_water: usize_to_i64(
+            failure.pipeline_report.reorder_buffer_high_water,
+        ),
+        pipeline_staged_message_count: usize_to_i64(failure.pipeline_report.staged_message_count),
+        pipeline_staged_delete_count: usize_to_i64(failure.pipeline_report.staged_delete_count),
+        pipeline_staged_attachment_count: usize_to_i64(
+            failure.pipeline_report.staged_attachment_count,
+        ),
+    };
     let _ = store_handle
-        .upsert_sync_state(store::mailbox::SyncStateUpdate {
-            account_id: account.account_id.clone(),
-            cursor_history_id,
-            bootstrap_query: bootstrap_query.to_owned(),
-            last_sync_mode: mode,
-            last_sync_status: store::mailbox::SyncStatus::Failed,
-            last_error: Some(error),
-            last_sync_epoch_s: now_epoch_s,
-            last_full_sync_success_epoch_s: None,
-            last_incremental_sync_success_epoch_s: None,
-            pipeline_enabled: pipeline_report.pipeline_enabled,
-            pipeline_list_queue_high_water: i64::try_from(pipeline_report.list_queue_high_water)
-                .unwrap_or(i64::MAX),
-            pipeline_write_queue_high_water: i64::try_from(pipeline_report.write_queue_high_water)
-                .unwrap_or(i64::MAX),
-            pipeline_write_batch_count: i64::try_from(pipeline_report.write_batch_count)
-                .unwrap_or(i64::MAX),
-            pipeline_writer_wait_ms: i64::try_from(pipeline_report.writer_wait_ms)
-                .unwrap_or(i64::MAX),
-            pipeline_fetch_batch_count: i64::try_from(pipeline_report.fetch_batch_count)
-                .unwrap_or(i64::MAX),
-            pipeline_fetch_batch_avg_ms: i64::try_from(pipeline_report.fetch_batch_avg_ms)
-                .unwrap_or(i64::MAX),
-            pipeline_fetch_batch_max_ms: i64::try_from(pipeline_report.fetch_batch_max_ms)
-                .unwrap_or(i64::MAX),
-            pipeline_writer_tx_count: i64::try_from(pipeline_report.writer_tx_count)
-                .unwrap_or(i64::MAX),
-            pipeline_writer_tx_avg_ms: i64::try_from(pipeline_report.writer_tx_avg_ms)
-                .unwrap_or(i64::MAX),
-            pipeline_writer_tx_max_ms: i64::try_from(pipeline_report.writer_tx_max_ms)
-                .unwrap_or(i64::MAX),
-            pipeline_reorder_buffer_high_water: i64::try_from(
-                pipeline_report.reorder_buffer_high_water,
-            )
-            .unwrap_or(i64::MAX),
-            pipeline_staged_message_count: i64::try_from(pipeline_report.staged_message_count)
-                .unwrap_or(i64::MAX),
-            pipeline_staged_delete_count: i64::try_from(pipeline_report.staged_delete_count)
-                .unwrap_or(i64::MAX),
-            pipeline_staged_attachment_count: i64::try_from(
-                pipeline_report.staged_attachment_count,
-            )
-            .unwrap_or(i64::MAX),
-        })
+        .persist_failed_sync_outcome(
+            &sync_state_update,
+            &failure_outcome_input(&account.account_id, finished_at_epoch_s, &failure),
+        )
         .await?;
     Ok(())
+}
+
+fn resolve_sync_history_account_id(config_report: &ConfigReport) -> Result<String> {
+    if let Some(active_account) = store::accounts::get_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )? {
+        return Ok(active_account.account_id);
+    }
+
+    if let Some(mailbox) = store::mailbox::inspect_mailbox(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )? && let Some(sync_state) = mailbox.sync_state
+    {
+        return Ok(sync_state.account_id);
+    }
+
+    Err(anyhow!(
+        "no active Gmail account found; run `mailroom auth login` first"
+    ))
 }
 
 async fn initialize_full_sync_checkpoint(
@@ -2033,6 +2307,54 @@ impl MailboxStoreHandle {
         let busy_timeout_ms = self.busy_timeout_ms;
         spawn_blocking(move || {
             store::mailbox::upsert_sync_pacing_state(&database_path, busy_timeout_ms, &update)
+        })
+        .await?
+    }
+
+    async fn persist_successful_sync_outcome(
+        &self,
+        sync_state: &store::mailbox::SyncStateRecord,
+        outcome: &store::mailbox::SyncRunOutcomeInput,
+    ) -> Result<(
+        store::mailbox::SyncStateRecord,
+        store::mailbox::SyncRunHistoryRecord,
+        store::mailbox::SyncRunSummaryRecord,
+    )> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let sync_state = sync_state.clone();
+        let outcome = outcome.clone();
+        spawn_blocking(move || {
+            store::mailbox::persist_successful_sync_outcome(
+                &database_path,
+                busy_timeout_ms,
+                &sync_state,
+                &outcome,
+            )
+        })
+        .await?
+    }
+
+    async fn persist_failed_sync_outcome(
+        &self,
+        sync_state_update: &store::mailbox::SyncStateUpdate,
+        outcome: &store::mailbox::SyncRunOutcomeInput,
+    ) -> Result<(
+        store::mailbox::SyncStateRecord,
+        store::mailbox::SyncRunHistoryRecord,
+        store::mailbox::SyncRunSummaryRecord,
+    )> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let sync_state_update = sync_state_update.clone();
+        let outcome = outcome.clone();
+        spawn_blocking(move || {
+            store::mailbox::persist_failed_sync_outcome(
+                &database_path,
+                busy_timeout_ms,
+                &sync_state_update,
+                &outcome,
+            )
         })
         .await?
     }

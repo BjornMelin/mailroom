@@ -231,6 +231,10 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
                 json: *json,
                 operation: "sync.benchmark",
             },
+            SyncCommand::History { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "sync.history",
+            },
         },
         Commands::Workflow { command } => match command {
             WorkflowCommand::List { json, .. } => CommandMetadata {
@@ -551,6 +555,9 @@ async fn handle_sync_command(
         )
         .await?
         .print(json)?,
+        SyncCommand::History { limit, json } => mailbox::sync_history(&config_report, limit)
+            .await?
+            .print(json)?,
     }
 
     Ok(())

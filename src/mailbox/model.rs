@@ -21,6 +21,7 @@ pub struct SyncRunOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncRunReport {
+    pub run_id: i64,
     pub mode: store::mailbox::SyncMode,
     pub fallback_from_history: bool,
     pub resumed_from_checkpoint: bool,
@@ -73,6 +74,16 @@ pub struct SyncRunReport {
     pub duration_ms: u64,
     pub pages_per_second: f64,
     pub messages_per_second: f64,
+    pub regression_detected: bool,
+    pub regression_kind: Option<store::mailbox::SyncRunRegressionKind>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncHistoryReport {
+    pub account_id: String,
+    pub limit: usize,
+    pub summary: Option<store::mailbox::SyncRunSummaryRecord>,
+    pub runs: Vec<store::mailbox::SyncRunHistoryRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]

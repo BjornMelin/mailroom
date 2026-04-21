@@ -7,8 +7,9 @@ mod write;
 
 pub(crate) use read::{
     get_attachment_detail, get_full_sync_checkpoint, get_latest_thread_message,
-    get_mailbox_coverage, get_sync_pacing_state, get_sync_state, inspect_mailbox,
-    inspect_mailbox_account, list_attachments, list_label_usage, resolve_label_ids_by_names,
+    get_mailbox_coverage, get_sync_pacing_state, get_sync_run_summary, get_sync_state,
+    inspect_mailbox, inspect_mailbox_account, list_attachments, list_label_usage,
+    list_sync_run_history, resolve_label_ids_by_names,
 };
 pub(crate) use search::search_messages;
 pub(crate) use types::{
@@ -17,7 +18,8 @@ pub(crate) use types::{
     FullSyncCheckpointUpdate, FullSyncStagePageInput, GmailAttachmentUpsertInput,
     GmailAutomationHeaders, GmailMessageUpsertInput, LabelUsageRecord, MailboxCoverageReport,
     MailboxDoctorReport, MailboxReadError, MailboxWriteError, SearchQuery, SearchResult, SyncMode,
-    SyncPacingPressureKind, SyncPacingStateRecord, SyncPacingStateUpdate, SyncStateRecord,
+    SyncPacingPressureKind, SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunHistoryRecord,
+    SyncRunOutcomeInput, SyncRunRegressionKind, SyncRunSummaryRecord, SyncStateRecord,
     SyncStateUpdate, SyncStatus, ThreadMessageSnapshot,
 };
 #[cfg(test)]
@@ -30,8 +32,9 @@ pub(crate) use write::{
     stage_incremental_sync_batch, update_full_sync_checkpoint_labels, upsert_messages,
 };
 pub(crate) use write::{
-    MailboxWriterConnection, record_attachment_export, set_attachment_vault_state,
-    upsert_sync_pacing_state, upsert_sync_state,
+    MailboxWriterConnection, persist_failed_sync_outcome, persist_successful_sync_outcome,
+    record_attachment_export, set_attachment_vault_state, upsert_sync_pacing_state,
+    upsert_sync_state,
 };
 
 use std::collections::BTreeSet;

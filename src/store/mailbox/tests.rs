@@ -2,10 +2,12 @@ use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
     FullSyncCheckpointStatus, FullSyncCheckpointUpdate, GmailAttachmentUpsertInput,
     GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError, SearchQuery, SyncMode,
-    SyncPacingPressureKind, SyncPacingStateUpdate, SyncStateUpdate, SyncStatus, commit_full_sync,
-    commit_incremental_sync, finalize_full_sync_from_stage, finalize_incremental_from_stage,
-    get_attachment_detail, get_full_sync_checkpoint, get_sync_state, inspect_mailbox,
-    list_attachments, list_label_usage, prepare_full_sync_checkpoint, record_attachment_export,
+    SyncPacingPressureKind, SyncPacingStateUpdate, SyncRunOutcomeInput, SyncRunRegressionKind,
+    SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
+    finalize_full_sync_from_stage, finalize_incremental_from_stage, get_attachment_detail,
+    get_full_sync_checkpoint, get_sync_run_summary, get_sync_state, inspect_mailbox,
+    list_attachments, list_label_usage, list_sync_run_history, persist_failed_sync_outcome,
+    persist_successful_sync_outcome, prepare_full_sync_checkpoint, record_attachment_export,
     replace_labels, replace_labels_and_report_reindex, replace_messages, reset_full_sync_stage,
     reset_incremental_sync_stage, search::build_plain_fts5_query, search_messages,
     set_attachment_vault_state, stage_full_sync_labels, stage_full_sync_messages,
@@ -2971,6 +2973,196 @@ fn update_full_sync_checkpoint_labels_preserves_staged_messages() {
 }
 
 #[test]
+fn persist_successful_sync_outcome_records_history_and_summary() {
+    let repo_root = unique_temp_dir("mailroom-sync-history-success");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 0,
+            threads_total: 0,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    let sync_state = upsert_sync_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SyncStateUpdate {
+            account_id: account.account_id.clone(),
+            cursor_history_id: Some(String::from("100")),
+            bootstrap_query: String::from("newer_than:90d"),
+            last_sync_mode: SyncMode::Incremental,
+            last_sync_status: SyncStatus::Ok,
+            last_error: None,
+            last_sync_epoch_s: 100,
+            last_full_sync_success_epoch_s: Some(90),
+            last_incremental_sync_success_epoch_s: Some(100),
+            pipeline_enabled: false,
+            pipeline_list_queue_high_water: 0,
+            pipeline_write_queue_high_water: 0,
+            pipeline_write_batch_count: 0,
+            pipeline_writer_wait_ms: 0,
+            pipeline_fetch_batch_count: 0,
+            pipeline_fetch_batch_avg_ms: 0,
+            pipeline_fetch_batch_max_ms: 0,
+            pipeline_writer_tx_count: 0,
+            pipeline_writer_tx_avg_ms: 0,
+            pipeline_writer_tx_max_ms: 0,
+            pipeline_reorder_buffer_high_water: 0,
+            pipeline_staged_message_count: 0,
+            pipeline_staged_delete_count: 0,
+            pipeline_staged_attachment_count: 0,
+        },
+    )
+    .unwrap();
+
+    let (_, history, summary) = persist_successful_sync_outcome(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &sync_state,
+        &sample_sync_run_outcome(
+            &account.account_id,
+            SyncMode::Incremental,
+            SyncStatus::Ok,
+            100,
+            110,
+            125,
+            125.0,
+            0,
+            0,
+            0,
+        ),
+    )
+    .unwrap();
+
+    assert!(history.run_id > 0);
+    assert_eq!(summary.latest_run_id, history.run_id);
+    assert_eq!(summary.best_clean_run_id, Some(history.run_id));
+    assert!(!summary.regression_detected);
+
+    let history_rows = list_sync_run_history(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        10,
+    )
+    .unwrap();
+    assert_eq!(history_rows.len(), 1);
+    assert_eq!(history_rows[0].run_id, history.run_id);
+
+    let persisted_summary = get_sync_run_summary(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        SyncMode::Incremental,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(persisted_summary.best_clean_run_id, Some(history.run_id));
+}
+
+#[test]
+fn persist_failed_sync_outcome_detects_failure_streak_regression() {
+    let repo_root = unique_temp_dir("mailroom-sync-history-failure");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("200"),
+            messages_total: 0,
+            threads_total: 0,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 200,
+        },
+    )
+    .unwrap();
+
+    for finished_at_epoch_s in [210, 220] {
+        persist_failed_sync_outcome(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &SyncStateUpdate {
+                account_id: account.account_id.clone(),
+                cursor_history_id: Some(String::from("200")),
+                bootstrap_query: String::from("newer_than:90d"),
+                last_sync_mode: SyncMode::Incremental,
+                last_sync_status: SyncStatus::Failed,
+                last_error: Some(String::from("sync failed")),
+                last_sync_epoch_s: finished_at_epoch_s,
+                last_full_sync_success_epoch_s: Some(190),
+                last_incremental_sync_success_epoch_s: Some(190),
+                pipeline_enabled: true,
+                pipeline_list_queue_high_water: 1,
+                pipeline_write_queue_high_water: 1,
+                pipeline_write_batch_count: 1,
+                pipeline_writer_wait_ms: 1,
+                pipeline_fetch_batch_count: 1,
+                pipeline_fetch_batch_avg_ms: 1,
+                pipeline_fetch_batch_max_ms: 1,
+                pipeline_writer_tx_count: 1,
+                pipeline_writer_tx_avg_ms: 1,
+                pipeline_writer_tx_max_ms: 1,
+                pipeline_reorder_buffer_high_water: 1,
+                pipeline_staged_message_count: 1,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
+            },
+            &sample_sync_run_outcome(
+                &account.account_id,
+                SyncMode::Incremental,
+                SyncStatus::Failed,
+                finished_at_epoch_s - 5,
+                finished_at_epoch_s,
+                0,
+                0.0,
+                0,
+                0,
+                0,
+            ),
+        )
+        .unwrap();
+    }
+
+    let summary = get_sync_run_summary(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        SyncMode::Incremental,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(summary.regression_detected);
+    assert_eq!(
+        summary.regression_kind,
+        Some(SyncRunRegressionKind::FailureStreak)
+    );
+    assert_eq!(summary.recent_failure_streak, 2);
+
+    let history = list_sync_run_history(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        10,
+    )
+    .unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history.iter().all(|row| row.status == SyncStatus::Failed));
+}
+
+#[test]
 fn finalize_full_sync_from_stage_clears_checkpoint_state() {
     let repo_root = unique_temp_dir("mailroom-mailbox-stage-checkpoint-finalize-clear");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
@@ -3509,4 +3701,76 @@ fn benchmark_attachment_lane_full_sync_tiers() {
 
 fn unique_temp_dir(prefix: &str) -> TempDir {
     Builder::new().prefix(prefix).tempdir().unwrap()
+}
+
+fn sample_sync_run_outcome(
+    account_id: &str,
+    sync_mode: SyncMode,
+    status: SyncStatus,
+    started_at_epoch_s: i64,
+    finished_at_epoch_s: i64,
+    messages_listed: i64,
+    messages_per_second: f64,
+    quota_pressure_retry_count: i64,
+    concurrency_pressure_retry_count: i64,
+    backend_retry_count: i64,
+) -> SyncRunOutcomeInput {
+    SyncRunOutcomeInput {
+        account_id: account_id.to_owned(),
+        sync_mode,
+        status,
+        started_at_epoch_s,
+        finished_at_epoch_s,
+        bootstrap_query: String::from("newer_than:90d"),
+        cursor_history_id: Some(String::from("cursor-1")),
+        fallback_from_history: false,
+        resumed_from_checkpoint: false,
+        pages_fetched: 1,
+        messages_listed,
+        messages_upserted: messages_listed,
+        messages_deleted: 0,
+        labels_synced: 3,
+        checkpoint_reused_pages: 0,
+        checkpoint_reused_messages_upserted: 0,
+        pipeline_enabled: true,
+        pipeline_list_queue_high_water: 1,
+        pipeline_write_queue_high_water: 1,
+        pipeline_write_batch_count: 1,
+        pipeline_writer_wait_ms: 1,
+        pipeline_fetch_batch_count: 1,
+        pipeline_fetch_batch_avg_ms: 1,
+        pipeline_fetch_batch_max_ms: 1,
+        pipeline_writer_tx_count: 1,
+        pipeline_writer_tx_avg_ms: 1,
+        pipeline_writer_tx_max_ms: 1,
+        pipeline_reorder_buffer_high_water: 1,
+        pipeline_staged_message_count: messages_listed.max(0),
+        pipeline_staged_delete_count: 0,
+        pipeline_staged_attachment_count: 0,
+        adaptive_pacing_enabled: true,
+        quota_units_budget_per_minute: 12_000,
+        message_fetch_concurrency: 4,
+        quota_units_cap_per_minute: 12_000,
+        message_fetch_concurrency_cap: 4,
+        starting_quota_units_per_minute: 12_000,
+        starting_message_fetch_concurrency: 4,
+        effective_quota_units_per_minute: 12_000,
+        effective_message_fetch_concurrency: 4,
+        adaptive_downshift_count: 0,
+        estimated_quota_units_reserved: 500,
+        http_attempt_count: 3,
+        retry_count: quota_pressure_retry_count
+            + concurrency_pressure_retry_count
+            + backend_retry_count,
+        quota_pressure_retry_count,
+        concurrency_pressure_retry_count,
+        backend_retry_count,
+        throttle_wait_count: 0,
+        throttle_wait_ms: 0,
+        retry_after_wait_ms: 0,
+        duration_ms: 100,
+        pages_per_second: 10.0,
+        messages_per_second,
+        error_message: (status == SyncStatus::Failed).then(|| String::from("sync failed")),
+    }
 }

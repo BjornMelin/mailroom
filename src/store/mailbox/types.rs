@@ -171,6 +171,146 @@ pub(crate) struct SyncPacingStateRecord {
     pub(crate) updated_at_epoch_s: i64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SyncRunOutcomeInput {
+    pub(crate) account_id: String,
+    pub(crate) sync_mode: SyncMode,
+    pub(crate) status: SyncStatus,
+    pub(crate) started_at_epoch_s: i64,
+    pub(crate) finished_at_epoch_s: i64,
+    pub(crate) bootstrap_query: String,
+    pub(crate) cursor_history_id: Option<String>,
+    pub(crate) fallback_from_history: bool,
+    pub(crate) resumed_from_checkpoint: bool,
+    pub(crate) pages_fetched: i64,
+    pub(crate) messages_listed: i64,
+    pub(crate) messages_upserted: i64,
+    pub(crate) messages_deleted: i64,
+    pub(crate) labels_synced: i64,
+    pub(crate) checkpoint_reused_pages: i64,
+    pub(crate) checkpoint_reused_messages_upserted: i64,
+    pub(crate) pipeline_enabled: bool,
+    pub(crate) pipeline_list_queue_high_water: i64,
+    pub(crate) pipeline_write_queue_high_water: i64,
+    pub(crate) pipeline_write_batch_count: i64,
+    pub(crate) pipeline_writer_wait_ms: i64,
+    pub(crate) pipeline_fetch_batch_count: i64,
+    pub(crate) pipeline_fetch_batch_avg_ms: i64,
+    pub(crate) pipeline_fetch_batch_max_ms: i64,
+    pub(crate) pipeline_writer_tx_count: i64,
+    pub(crate) pipeline_writer_tx_avg_ms: i64,
+    pub(crate) pipeline_writer_tx_max_ms: i64,
+    pub(crate) pipeline_reorder_buffer_high_water: i64,
+    pub(crate) pipeline_staged_message_count: i64,
+    pub(crate) pipeline_staged_delete_count: i64,
+    pub(crate) pipeline_staged_attachment_count: i64,
+    pub(crate) adaptive_pacing_enabled: bool,
+    pub(crate) quota_units_budget_per_minute: i64,
+    pub(crate) message_fetch_concurrency: i64,
+    pub(crate) quota_units_cap_per_minute: i64,
+    pub(crate) message_fetch_concurrency_cap: i64,
+    pub(crate) starting_quota_units_per_minute: i64,
+    pub(crate) starting_message_fetch_concurrency: i64,
+    pub(crate) effective_quota_units_per_minute: i64,
+    pub(crate) effective_message_fetch_concurrency: i64,
+    pub(crate) adaptive_downshift_count: i64,
+    pub(crate) estimated_quota_units_reserved: i64,
+    pub(crate) http_attempt_count: i64,
+    pub(crate) retry_count: i64,
+    pub(crate) quota_pressure_retry_count: i64,
+    pub(crate) concurrency_pressure_retry_count: i64,
+    pub(crate) backend_retry_count: i64,
+    pub(crate) throttle_wait_count: i64,
+    pub(crate) throttle_wait_ms: i64,
+    pub(crate) retry_after_wait_ms: i64,
+    pub(crate) duration_ms: i64,
+    pub(crate) pages_per_second: f64,
+    pub(crate) messages_per_second: f64,
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct SyncRunHistoryRecord {
+    pub(crate) run_id: i64,
+    pub(crate) account_id: String,
+    pub(crate) sync_mode: SyncMode,
+    pub(crate) status: SyncStatus,
+    pub(crate) started_at_epoch_s: i64,
+    pub(crate) finished_at_epoch_s: i64,
+    pub(crate) bootstrap_query: String,
+    pub(crate) cursor_history_id: Option<String>,
+    pub(crate) fallback_from_history: bool,
+    pub(crate) resumed_from_checkpoint: bool,
+    pub(crate) pages_fetched: i64,
+    pub(crate) messages_listed: i64,
+    pub(crate) messages_upserted: i64,
+    pub(crate) messages_deleted: i64,
+    pub(crate) labels_synced: i64,
+    pub(crate) checkpoint_reused_pages: i64,
+    pub(crate) checkpoint_reused_messages_upserted: i64,
+    pub(crate) pipeline_enabled: bool,
+    pub(crate) pipeline_list_queue_high_water: i64,
+    pub(crate) pipeline_write_queue_high_water: i64,
+    pub(crate) pipeline_write_batch_count: i64,
+    pub(crate) pipeline_writer_wait_ms: i64,
+    pub(crate) pipeline_fetch_batch_count: i64,
+    pub(crate) pipeline_fetch_batch_avg_ms: i64,
+    pub(crate) pipeline_fetch_batch_max_ms: i64,
+    pub(crate) pipeline_writer_tx_count: i64,
+    pub(crate) pipeline_writer_tx_avg_ms: i64,
+    pub(crate) pipeline_writer_tx_max_ms: i64,
+    pub(crate) pipeline_reorder_buffer_high_water: i64,
+    pub(crate) pipeline_staged_message_count: i64,
+    pub(crate) pipeline_staged_delete_count: i64,
+    pub(crate) pipeline_staged_attachment_count: i64,
+    pub(crate) adaptive_pacing_enabled: bool,
+    pub(crate) quota_units_budget_per_minute: i64,
+    pub(crate) message_fetch_concurrency: i64,
+    pub(crate) quota_units_cap_per_minute: i64,
+    pub(crate) message_fetch_concurrency_cap: i64,
+    pub(crate) starting_quota_units_per_minute: i64,
+    pub(crate) starting_message_fetch_concurrency: i64,
+    pub(crate) effective_quota_units_per_minute: i64,
+    pub(crate) effective_message_fetch_concurrency: i64,
+    pub(crate) adaptive_downshift_count: i64,
+    pub(crate) estimated_quota_units_reserved: i64,
+    pub(crate) http_attempt_count: i64,
+    pub(crate) retry_count: i64,
+    pub(crate) quota_pressure_retry_count: i64,
+    pub(crate) concurrency_pressure_retry_count: i64,
+    pub(crate) backend_retry_count: i64,
+    pub(crate) throttle_wait_count: i64,
+    pub(crate) throttle_wait_ms: i64,
+    pub(crate) retry_after_wait_ms: i64,
+    pub(crate) duration_ms: i64,
+    pub(crate) pages_per_second: f64,
+    pub(crate) messages_per_second: f64,
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(crate) struct SyncRunSummaryRecord {
+    pub(crate) account_id: String,
+    pub(crate) sync_mode: SyncMode,
+    pub(crate) latest_run_id: i64,
+    pub(crate) latest_status: SyncStatus,
+    pub(crate) latest_finished_at_epoch_s: i64,
+    pub(crate) best_clean_run_id: Option<i64>,
+    pub(crate) best_clean_quota_units_per_minute: Option<i64>,
+    pub(crate) best_clean_message_fetch_concurrency: Option<i64>,
+    pub(crate) best_clean_messages_per_second: Option<f64>,
+    pub(crate) best_clean_duration_ms: Option<i64>,
+    pub(crate) recent_success_count: i64,
+    pub(crate) recent_failure_count: i64,
+    pub(crate) recent_failure_streak: i64,
+    pub(crate) recent_clean_success_streak: i64,
+    pub(crate) regression_detected: bool,
+    pub(crate) regression_kind: Option<SyncRunRegressionKind>,
+    pub(crate) regression_run_id: Option<i64>,
+    pub(crate) regression_message: Option<String>,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct SearchQuery {
     pub(crate) account_id: String,
@@ -308,11 +448,12 @@ pub(crate) struct ThreadMessageSnapshot {
     pub(crate) snippet: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct MailboxDoctorReport {
     pub(crate) sync_state: Option<SyncStateRecord>,
     pub(crate) full_sync_checkpoint: Option<FullSyncCheckpointRecord>,
     pub(crate) sync_pacing_state: Option<SyncPacingStateRecord>,
+    pub(crate) sync_run_summary: Option<SyncRunSummaryRecord>,
     pub(crate) message_count: i64,
     pub(crate) label_count: i64,
     pub(crate) indexed_message_count: i64,
@@ -398,6 +539,48 @@ impl FromStr for SyncPacingPressureKind {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum SyncRunRegressionKind {
+    FailureStreak,
+    RetryPressure,
+    ThroughputDrop,
+    DurationSpike,
+}
+
+impl SyncRunRegressionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::FailureStreak => "failure_streak",
+            Self::RetryPressure => "retry_pressure",
+            Self::ThroughputDrop => "throughput_drop",
+            Self::DurationSpike => "duration_spike",
+        }
+    }
+}
+
+impl Display for SyncRunRegressionKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SyncRunRegressionKind {
+    type Err = SyncStateStatusDecodeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "failure_streak" => Ok(Self::FailureStreak),
+            "retry_pressure" => Ok(Self::RetryPressure),
+            "throughput_drop" => Ok(Self::ThroughputDrop),
+            "duration_spike" => Ok(Self::DurationSpike),
+            _ => Err(SyncStateStatusDecodeError::RunRegressionKind(
+                value.to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SyncMode {
     Full,
     Incremental,
@@ -474,6 +657,8 @@ pub(crate) enum SyncStateStatusDecodeError {
     CheckpointStatus(String),
     #[error("invalid mailbox sync pacing pressure kind `{0}`")]
     PacingPressureKind(String),
+    #[error("invalid mailbox sync run regression kind `{0}`")]
+    RunRegressionKind(String),
 }
 
 #[derive(Debug, Error)]

@@ -268,6 +268,104 @@ impl StoreDoctorReport {
                     }
                     None => println!("mailbox_sync_pacing_learned_quota_units_per_minute=<none>"),
                 }
+                match &mailbox.sync_run_summary {
+                    Some(summary) => {
+                        println!("mailbox_sync_run_summary_mode={}", summary.sync_mode);
+                        println!(
+                            "mailbox_sync_run_summary_latest_run_id={}",
+                            summary.latest_run_id
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_latest_status={}",
+                            summary.latest_status
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_latest_finished_at_epoch_s={}",
+                            summary.latest_finished_at_epoch_s
+                        );
+                        match summary.best_clean_run_id {
+                            Some(run_id) => {
+                                println!("mailbox_sync_run_summary_best_clean_run_id={run_id}")
+                            }
+                            None => println!("mailbox_sync_run_summary_best_clean_run_id=<none>"),
+                        }
+                        match summary.best_clean_quota_units_per_minute {
+                            Some(value) => println!(
+                                "mailbox_sync_run_summary_best_clean_quota_units_per_minute={value}"
+                            ),
+                            None => println!(
+                                "mailbox_sync_run_summary_best_clean_quota_units_per_minute=<none>"
+                            ),
+                        }
+                        match summary.best_clean_message_fetch_concurrency {
+                            Some(value) => println!(
+                                "mailbox_sync_run_summary_best_clean_message_fetch_concurrency={value}"
+                            ),
+                            None => println!(
+                                "mailbox_sync_run_summary_best_clean_message_fetch_concurrency=<none>"
+                            ),
+                        }
+                        match summary.best_clean_messages_per_second {
+                            Some(value) => println!(
+                                "mailbox_sync_run_summary_best_clean_messages_per_second={value}"
+                            ),
+                            None => println!(
+                                "mailbox_sync_run_summary_best_clean_messages_per_second=<none>"
+                            ),
+                        }
+                        match summary.best_clean_duration_ms {
+                            Some(value) => {
+                                println!("mailbox_sync_run_summary_best_clean_duration_ms={value}")
+                            }
+                            None => {
+                                println!("mailbox_sync_run_summary_best_clean_duration_ms=<none>")
+                            }
+                        }
+                        println!(
+                            "mailbox_sync_run_summary_recent_success_count={}",
+                            summary.recent_success_count
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_recent_failure_count={}",
+                            summary.recent_failure_count
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_recent_failure_streak={}",
+                            summary.recent_failure_streak
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_recent_clean_success_streak={}",
+                            summary.recent_clean_success_streak
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_regression_detected={}",
+                            summary.regression_detected
+                        );
+                        match summary.regression_kind {
+                            Some(kind) => {
+                                println!("mailbox_sync_run_summary_regression_kind={kind}")
+                            }
+                            None => println!("mailbox_sync_run_summary_regression_kind=<none>"),
+                        }
+                        match summary.regression_run_id {
+                            Some(run_id) => {
+                                println!("mailbox_sync_run_summary_regression_run_id={run_id}")
+                            }
+                            None => println!("mailbox_sync_run_summary_regression_run_id=<none>"),
+                        }
+                        match &summary.regression_message {
+                            Some(message) => {
+                                println!("mailbox_sync_run_summary_regression_message={message}")
+                            }
+                            None => println!("mailbox_sync_run_summary_regression_message=<none>"),
+                        }
+                        println!(
+                            "mailbox_sync_run_summary_updated_at_epoch_s={}",
+                            summary.updated_at_epoch_s
+                        );
+                    }
+                    None => println!("mailbox_sync_run_summary_latest_run_id=<none>"),
+                }
             }
             if let Some(workflows) = &self.workflows {
                 println!("workflow_count={}", workflows.workflow_count);
@@ -496,7 +594,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 14);
+        assert_eq!(report.schema_version, 15);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -517,6 +615,8 @@ mod tests {
                        'gmail_full_sync_stage_attachments',
                        'gmail_full_sync_checkpoint',
                        'gmail_sync_pacing_state',
+                       'gmail_sync_run_history',
+                       'gmail_sync_run_summary',
                        'gmail_incremental_sync_stage_delete_ids',
                        'gmail_incremental_sync_stage_messages',
                        'gmail_incremental_sync_stage_message_labels',
@@ -528,7 +628,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 18);
+        assert_eq!(substrate_tables, 20);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -812,6 +912,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/15-sync-run-history/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/14-sync-pipeline-telemetry-and-page-manifests/down.sql"
             ))
             .unwrap();
@@ -866,7 +971,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 14);
+        assert_eq!(migration_report.schema_version, 15);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();
