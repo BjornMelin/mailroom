@@ -2,8 +2,8 @@ use super::{
     AppendAutomationRunEventInput, AutomationActionKind, AutomationActionSnapshot,
     AutomationApplyStatus, AutomationMatchReason, AutomationRunStatus, AutomationStoreWriteError,
     CandidateApplyResultInput, CreateAutomationRunInput, FinalizeAutomationRunInput,
-    NewAutomationRunCandidate, append_automation_run_event, create_automation_run,
-    finalize_automation_run, get_automation_run_detail, inspect_automation,
+    NewAutomationRunCandidate, append_automation_run_event, claim_automation_run_for_apply,
+    create_automation_run, finalize_automation_run, get_automation_run_detail, inspect_automation,
     list_latest_thread_candidates, record_candidate_apply_result,
 };
 use crate::config::resolve;
@@ -172,6 +172,65 @@ fn append_automation_run_event_rejects_account_mismatch() {
     .unwrap()
     .unwrap();
     assert_eq!(detail.events.len(), 1);
+
+    fs::remove_dir_all(repo_root).unwrap();
+}
+
+#[test]
+fn claim_automation_run_for_apply_transitions_previewed_runs_once() {
+    let repo_root = unique_temp_dir("mailroom-automation-claim-run");
+    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+    let detail = create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("hash"),
+            selected_rule_ids: vec![String::from("archive-digest")],
+            created_at_epoch_s: 100,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+
+    claim_automation_run_for_apply(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        detail.run.run_id,
+        101,
+    )
+    .unwrap();
+
+    let error = claim_automation_run_for_apply(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        detail.run.run_id,
+        102,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        AutomationStoreWriteError::RowCountMismatch {
+            operation,
+            expected: 1,
+            actual: 0,
+        } if operation == "claim_automation_run_for_apply"
+    ));
+
+    let refreshed = get_automation_run_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        detail.run.run_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(refreshed.run.status, AutomationRunStatus::Applying);
+    assert_eq!(refreshed.run.applied_at_epoch_s, Some(101));
 
     fs::remove_dir_all(repo_root).unwrap();
 }

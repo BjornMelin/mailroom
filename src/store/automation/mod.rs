@@ -16,8 +16,8 @@ pub(crate) use types::{
     FinalizeAutomationRunInput, NewAutomationRunCandidate,
 };
 pub(crate) use write::{
-    append_automation_run_event, create_automation_run, finalize_automation_run,
-    record_candidate_apply_result,
+    append_automation_run_event, claim_automation_run_for_apply, create_automation_run,
+    finalize_automation_run, record_candidate_apply_result,
 };
 
 fn is_missing_automation_table_error(error: &rusqlite::Error) -> bool {

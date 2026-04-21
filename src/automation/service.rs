@@ -14,8 +14,11 @@ use crate::store::automation::{
 };
 use crate::time::current_epoch_seconds;
 use anyhow::Result;
+use fs2::FileExt;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -43,6 +46,14 @@ pub enum AutomationServiceError {
     },
     #[error("automation run {run_id} was not found")]
     RunNotFound { run_id: i64 },
+    #[error("automation apply is already in progress for run {run_id}")]
+    ApplyAlreadyInProgress { run_id: i64 },
+    #[error("failed to acquire automation apply lock at {path}: {source}")]
+    ApplyLock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("automation rules file is missing: {path}")]
     RuleFileMissing { path: PathBuf },
     #[error("failed to read automation rules file {path}: {source}")]
@@ -156,26 +167,8 @@ pub async fn apply_run(
 
     ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
     init_store_task(config_report).await?;
+    let _apply_lock = acquire_apply_run_lock_task(config_report, run_id).await?;
     let detail = load_run_detail_task(config_report, run_id).await?;
-    if detail.run.status == AutomationRunStatus::Applying {
-        let applied_candidate_count = detail
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.apply_status == Some(AutomationApplyStatus::Succeeded))
-            .count();
-        let failed_candidate_count = detail
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.apply_status == Some(AutomationApplyStatus::Failed))
-            .count();
-        return Ok(AutomationApplyReport {
-            detail,
-            execute,
-            applied_candidate_count,
-            failed_candidate_count,
-            sync_report: None,
-        });
-    }
     let gmail_client = crate::gmail_client_for_config(config_report)?;
     let (profile, _) = gmail_client.get_profile_with_access_scope().await?;
     let authenticated_account_id = gmail_account_id_for_email(&profile.email_address);
@@ -193,30 +186,49 @@ pub async fn apply_run(
         .filter(|candidate| candidate.apply_status != Some(AutomationApplyStatus::Succeeded))
         .cloned()
         .collect::<Vec<_>>();
-    let started_at_epoch_s = current_epoch_seconds()?;
-
-    finalize_run_task(
-        config_report,
-        &FinalizeAutomationRunInput {
-            run_id,
-            status: AutomationRunStatus::Applying,
-            applied_at_epoch_s: started_at_epoch_s,
-        },
-    )
-    .await?;
-    append_run_event_task(
-        config_report,
-        &AppendAutomationRunEventInput {
-            run_id,
-            account_id: detail.run.account_id.clone(),
-            event_kind: String::from("apply_started"),
-            payload_json: serde_json::to_string(&json!({
-                "candidate_count": pending_candidates.len(),
-            }))?,
-            created_at_epoch_s: started_at_epoch_s,
-        },
-    )
-    .await?;
+    match detail.run.status {
+        AutomationRunStatus::Previewed => {
+            let started_at_epoch_s = current_epoch_seconds()?;
+            claim_run_for_apply_task(config_report, run_id, started_at_epoch_s).await?;
+            append_run_start_event_task(
+                config_report,
+                &detail.run.account_id,
+                run_id,
+                pending_candidates.len(),
+                started_at_epoch_s,
+            )
+            .await?;
+        }
+        AutomationRunStatus::Applying => {
+            let started_at_epoch_s = detail
+                .run
+                .applied_at_epoch_s
+                .unwrap_or(current_epoch_seconds()?);
+            if !detail
+                .events
+                .iter()
+                .any(|event| event.event_kind == "apply_started")
+            {
+                append_run_start_event_task(
+                    config_report,
+                    &detail.run.account_id,
+                    run_id,
+                    pending_candidates.len(),
+                    started_at_epoch_s,
+                )
+                .await?;
+            }
+        }
+        AutomationRunStatus::Applied | AutomationRunStatus::ApplyFailed => {
+            return Err(AutomationServiceError::RuleValidation {
+                message: format!(
+                    "automation run {run_id} has already been finalized with status {}",
+                    detail.run.status
+                ),
+            }
+            .into());
+        }
+    };
 
     let outcomes = apply_candidates(
         config_report,
@@ -301,6 +313,17 @@ pub async fn apply_run(
     })
 }
 
+#[derive(Debug)]
+struct AutomationApplyLock {
+    file: File,
+}
+
+impl Drop for AutomationApplyLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PlannedRule {
     rule: AutomationRule,
@@ -313,6 +336,100 @@ struct ApplyOutcome {
     status: AutomationApplyStatus,
     applied_at_epoch_s: i64,
     apply_error: Option<String>,
+}
+
+async fn acquire_apply_run_lock_task(
+    config_report: &ConfigReport,
+    run_id: i64,
+) -> Result<AutomationApplyLock, AutomationServiceError> {
+    let lock_path = automation_apply_lock_path(config_report);
+    spawn_blocking(move || acquire_apply_run_lock_blocking(lock_path, run_id))
+        .await
+        .map_err(|source| AutomationServiceError::BlockingTask { source })?
+}
+
+fn acquire_apply_run_lock_blocking(
+    lock_path: PathBuf,
+    run_id: i64,
+) -> Result<AutomationApplyLock, AutomationServiceError> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| AutomationServiceError::ApplyLock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(AutomationApplyLock { file }),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            Err(AutomationServiceError::ApplyAlreadyInProgress { run_id })
+        }
+        Err(source) => Err(AutomationServiceError::ApplyLock {
+            path: lock_path,
+            source,
+        }),
+    }
+}
+
+fn automation_apply_lock_path(config_report: &ConfigReport) -> PathBuf {
+    config_report
+        .config
+        .workspace
+        .state_dir
+        .join("automation-apply.lock")
+}
+
+async fn claim_run_for_apply_task(
+    config_report: &ConfigReport,
+    run_id: i64,
+    started_at_epoch_s: i64,
+) -> Result<()> {
+    let config_report = config_report.clone();
+    spawn_blocking(move || {
+        store::automation::claim_automation_run_for_apply(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            run_id,
+            started_at_epoch_s,
+        )
+    })
+    .await
+    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
+    Ok(())
+}
+
+async fn append_run_start_event_task(
+    config_report: &ConfigReport,
+    account_id: &str,
+    run_id: i64,
+    candidate_count: usize,
+    created_at_epoch_s: i64,
+) -> Result<()> {
+    let config_report = config_report.clone();
+    let account_id = account_id.to_owned();
+    spawn_blocking(move || {
+        store::automation::append_automation_run_event(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &AppendAutomationRunEventInput {
+                run_id,
+                account_id,
+                event_kind: String::from("apply_started"),
+                payload_json: serde_json::to_string(&json!({
+                    "candidate_count": candidate_count,
+                }))?,
+                created_at_epoch_s,
+            },
+        )
+    })
+    .await
+    .map_err(|source| AutomationServiceError::BlockingTask { source })?
+    .map_err(|source| AutomationServiceError::AutomationWrite { source })?;
+    Ok(())
 }
 
 fn build_run_candidates(
@@ -888,7 +1005,10 @@ fn configured_paths(config_report: &ConfigReport) -> Result<crate::workspace::Wo
 
 #[cfg(test)]
 mod tests {
-    use super::{PlannedRule, apply_run, build_run_candidates, gmail_account_id_for_email};
+    use super::{
+        AutomationServiceError, PlannedRule, acquire_apply_run_lock_blocking, apply_run,
+        automation_apply_lock_path, build_run_candidates, gmail_account_id_for_email,
+    };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::automation::model::{AutomationMatchRule, AutomationRule};
     use crate::config::{ConfigReport, resolve};
@@ -1022,9 +1142,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_run_skips_work_when_run_is_already_applying() {
+    async fn apply_run_resumes_work_when_run_is_already_applying() {
         let mock_server = MockServer::start().await;
         mount_profile_for_email(&mock_server, "operator@example.com").await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/threads/thread-1/modify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "thread-1",
+                "historyId": "710"
+            })))
+            .mount(&mock_server)
+            .await;
 
         let temp_dir = TempDir::new().unwrap();
         let config_report = config_report_for(&temp_dir, Some(&mock_server));
@@ -1059,15 +1187,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(report.detail.run.status, AutomationRunStatus::Applying);
-        assert_eq!(report.applied_candidate_count, 0);
+        assert_eq!(report.detail.run.status, AutomationRunStatus::Applied);
+        assert_eq!(report.applied_candidate_count, 1);
         assert_eq!(report.failed_candidate_count, 0);
 
         let requests = mock_server.received_requests().await.unwrap();
-        assert!(requests.iter().all(|request| {
-            request.method.as_str() != "POST"
-                && request.method.as_str() != "PATCH"
-                && request.method.as_str() != "DELETE"
+        assert!(requests.iter().any(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/gmail/v1/users/me/threads/thread-1/modify"
         }));
 
         let refreshed_run = store::automation::get_automation_run_detail(
@@ -1077,7 +1204,55 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(refreshed_run.run.status, AutomationRunStatus::Applying);
+        assert_eq!(refreshed_run.run.status, AutomationRunStatus::Applied);
+        assert_eq!(
+            refreshed_run.candidates[0].apply_status,
+            Some(AutomationApplyStatus::Succeeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_run_returns_conflict_when_apply_lock_is_held() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, None);
+        store::init(&config_report).unwrap();
+        let account = seed_account(&config_report);
+        let detail = store::automation::create_automation_run(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &CreateAutomationRunInput {
+                account_id: account.account_id.clone(),
+                rule_file_path: String::from(".mailroom/automation.toml"),
+                rule_file_hash: String::from("hash"),
+                selected_rule_ids: vec![String::from("archive-digest")],
+                created_at_epoch_s: 100,
+                candidates: vec![sample_candidate("archive-digest", "thread-1")],
+            },
+        )
+        .unwrap();
+        let _lock = acquire_apply_run_lock_blocking(
+            automation_apply_lock_path(&config_report),
+            detail.run.run_id,
+        )
+        .unwrap();
+
+        let error = apply_run(&config_report, detail.run.run_id, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<AutomationServiceError>(),
+            Some(AutomationServiceError::ApplyAlreadyInProgress { run_id })
+                if *run_id == detail.run.run_id
+        ));
+
+        let refreshed_run = store::automation::get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            detail.run.run_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(refreshed_run.run.status, AutomationRunStatus::Previewed);
         assert_eq!(refreshed_run.candidates[0].apply_status, None);
     }
 

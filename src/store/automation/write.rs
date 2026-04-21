@@ -230,6 +230,59 @@ pub(crate) fn finalize_automation_run(
     Ok(())
 }
 
+pub(crate) fn claim_automation_run_for_apply(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    run_id: i64,
+    applied_at_epoch_s: i64,
+) -> Result<(), AutomationStoreWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| AutomationStoreWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction()?;
+    let rows_updated = transaction.execute(
+        "UPDATE automation_runs
+         SET status = ?2,
+             applied_at_epoch_s = ?3
+         WHERE run_id = ?1
+           AND status = ?4",
+        params![
+            run_id,
+            AutomationRunStatus::Applying.as_str(),
+            applied_at_epoch_s,
+            AutomationRunStatus::Previewed.as_str()
+        ],
+    )?;
+    if rows_updated == 0 {
+        let run_exists = transaction
+            .query_row(
+                "SELECT 1
+                 FROM automation_runs
+                 WHERE run_id = ?1",
+                [run_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if run_exists {
+            return Err(AutomationStoreWriteError::RowCountMismatch {
+                operation: "claim_automation_run_for_apply",
+                expected: 1,
+                actual: 0,
+            });
+        }
+        return Err(AutomationStoreWriteError::MissingRun { run_id });
+    }
+    if rows_updated != 1 {
+        return Err(AutomationStoreWriteError::RowCountMismatch {
+            operation: "claim_automation_run_for_apply",
+            expected: 1,
+            actual: rows_updated,
+        });
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 pub(crate) fn append_automation_run_event(
     database_path: &Path,
     busy_timeout_ms: u64,
