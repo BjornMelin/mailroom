@@ -1,8 +1,8 @@
 use super::{
     AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, FullSyncCheckpointRecord,
     FullSyncCheckpointStatus, LabelUsageRecord, MailboxCoverageReport, MailboxDoctorReport,
-    MailboxReadError, SyncMode, SyncStateRecord, SyncStatus, ThreadMessageSnapshot,
-    is_missing_mailbox_table_error,
+    MailboxReadError, SyncMode, SyncPacingPressureKind, SyncPacingStateRecord, SyncStateRecord,
+    SyncStatus, ThreadMessageSnapshot, is_missing_mailbox_table_error,
 };
 use crate::store::connection;
 use rusqlite::types::Type;
@@ -36,6 +36,20 @@ pub(crate) fn get_full_sync_checkpoint(
     let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
         .map_err(|source| MailboxReadError::open_database(database_path, source))?;
     read_full_sync_checkpoint(&connection, account_id)
+}
+
+pub(crate) fn get_sync_pacing_state(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<SyncPacingStateRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_sync_pacing_state(&connection, account_id)
 }
 
 pub(crate) fn inspect_mailbox(
@@ -75,6 +89,13 @@ fn inspect_mailbox_with_scope(
             None => latest_full_sync_checkpoint(&connection)?,
         },
     };
+    let sync_pacing_state = match account_id {
+        Some(account_id) => read_sync_pacing_state(&connection, account_id)?,
+        None => match sync_state.as_ref() {
+            Some(sync_state) => read_sync_pacing_state(&connection, &sync_state.account_id)?,
+            None => latest_sync_pacing_state(&connection)?,
+        },
+    };
     let message_count = count_messages(&connection, account_id)?;
     let label_count = count_labels(&connection, account_id)?;
     let indexed_message_count = count_indexed_messages(&connection, account_id)?;
@@ -84,6 +105,7 @@ fn inspect_mailbox_with_scope(
     Ok(Some(MailboxDoctorReport {
         sync_state,
         full_sync_checkpoint,
+        sync_pacing_state,
         message_count,
         label_count,
         indexed_message_count,
@@ -574,6 +596,33 @@ pub(super) fn read_full_sync_checkpoint(
     }
 }
 
+pub(super) fn read_sync_pacing_state(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<SyncPacingStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 learned_quota_units_per_minute,
+                 learned_message_fetch_concurrency,
+                 clean_run_streak,
+                 last_pressure_kind,
+                 updated_at_epoch_s
+             FROM gmail_sync_pacing_state
+             WHERE account_id = ?1",
+            [account_id],
+            row_to_sync_pacing_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn latest_full_sync_checkpoint(
     connection: &Connection,
 ) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
@@ -600,6 +649,33 @@ fn latest_full_sync_checkpoint(
              LIMIT 1",
             [],
             row_to_full_sync_checkpoint,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_sync_pacing_state(
+    connection: &Connection,
+) -> Result<Option<SyncPacingStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 learned_quota_units_per_minute,
+                 learned_message_fetch_concurrency,
+                 clean_run_streak,
+                 last_pressure_kind,
+                 updated_at_epoch_s
+             FROM gmail_sync_pacing_state
+             ORDER BY updated_at_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_sync_pacing_state,
         )
         .optional();
 
@@ -654,6 +730,26 @@ fn row_to_full_sync_checkpoint(
         staged_attachment_count: row.get(12)?,
         started_at_epoch_s: row.get(13)?,
         updated_at_epoch_s: row.get(14)?,
+    })
+}
+
+fn row_to_sync_pacing_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncPacingStateRecord> {
+    let last_pressure_kind = row
+        .get::<_, Option<String>>(4)?
+        .map(|value| {
+            SyncPacingPressureKind::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?;
+
+    Ok(SyncPacingStateRecord {
+        account_id: row.get(0)?,
+        learned_quota_units_per_minute: row.get(1)?,
+        learned_message_fetch_concurrency: row.get(2)?,
+        clean_run_streak: row.get(3)?,
+        last_pressure_kind,
+        updated_at_epoch_s: row.get(5)?,
     })
 }
 

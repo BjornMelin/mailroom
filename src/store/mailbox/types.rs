@@ -113,6 +113,26 @@ pub(crate) struct FullSyncCheckpointUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct SyncPacingStateUpdate {
+    pub(crate) account_id: String,
+    pub(crate) learned_quota_units_per_minute: i64,
+    pub(crate) learned_message_fetch_concurrency: i64,
+    pub(crate) clean_run_streak: i64,
+    pub(crate) last_pressure_kind: Option<SyncPacingPressureKind>,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct SyncPacingStateRecord {
+    pub(crate) account_id: String,
+    pub(crate) learned_quota_units_per_minute: i64,
+    pub(crate) learned_message_fetch_concurrency: i64,
+    pub(crate) clean_run_streak: i64,
+    pub(crate) last_pressure_kind: Option<SyncPacingPressureKind>,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct SearchQuery {
     pub(crate) account_id: String,
     pub(crate) terms: String,
@@ -253,6 +273,7 @@ pub(crate) struct ThreadMessageSnapshot {
 pub(crate) struct MailboxDoctorReport {
     pub(crate) sync_state: Option<SyncStateRecord>,
     pub(crate) full_sync_checkpoint: Option<FullSyncCheckpointRecord>,
+    pub(crate) sync_pacing_state: Option<SyncPacingStateRecord>,
     pub(crate) message_count: i64,
     pub(crate) label_count: i64,
     pub(crate) indexed_message_count: i64,
@@ -291,6 +312,45 @@ impl FromStr for FullSyncCheckpointStatus {
             "paging" => Ok(Self::Paging),
             "ready_to_finalize" => Ok(Self::ReadyToFinalize),
             _ => Err(SyncStateStatusDecodeError::CheckpointStatus(
+                value.to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SyncPacingPressureKind {
+    Quota,
+    Concurrency,
+    Mixed,
+}
+
+impl SyncPacingPressureKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::Concurrency => "concurrency",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+impl Display for SyncPacingPressureKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SyncPacingPressureKind {
+    type Err = SyncStateStatusDecodeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "quota" => Ok(Self::Quota),
+            "concurrency" => Ok(Self::Concurrency),
+            "mixed" => Ok(Self::Mixed),
+            _ => Err(SyncStateStatusDecodeError::PacingPressureKind(
                 value.to_owned(),
             )),
         }
@@ -373,6 +433,8 @@ pub(crate) enum SyncStateStatusDecodeError {
     Status(String),
     #[error("invalid full sync checkpoint status `{0}`")]
     CheckpointStatus(String),
+    #[error("invalid mailbox sync pacing pressure kind `{0}`")]
+    PacingPressureKind(String),
 }
 
 #[derive(Debug, Error)]

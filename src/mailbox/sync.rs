@@ -1,6 +1,7 @@
 use crate::config::ConfigReport;
 use crate::gmail::{GmailClient, GmailLabel, GmailMessageCatalog};
 use crate::mailbox::model::{FinalizeSyncInput, SyncRunOptions};
+use crate::mailbox::pacing::{AdaptiveSyncPacing, AdaptiveSyncPacingReport};
 use crate::mailbox::util::{
     bootstrap_query, is_invalid_resume_page_token_error, is_stale_history_error, labels_by_id,
     message_is_excluded, newest_history_id, recipient_headers,
@@ -53,6 +54,13 @@ pub async fn sync_run_with_options(
     let account =
         crate::refresh_active_account_record_with_client(config_report, &gmail_client).await?;
     let store_handle = MailboxStoreHandle::new(config_report, &account.account_id);
+    let persisted_pacing_state = store_handle.load_sync_pacing_state().await?;
+    let mut pacing = AdaptiveSyncPacing::new(
+        persisted_pacing_state.as_ref(),
+        options.quota_units_per_minute,
+        options.message_fetch_concurrency,
+    );
+    gmail_client.update_quota_budget(pacing.starting_quota_units_per_minute())?;
     let requested_bootstrap_query = bootstrap_query(options.recent_days);
     let existing_sync_state = load_sync_state(&store_handle).await?;
     let initial_mode = sync_mode(options.force_full, existing_sync_state.as_ref());
@@ -79,12 +87,12 @@ pub async fn sync_run_with_options(
             account: &account,
             labels: &labels,
             label_names_by_id: &label_names_by_id,
-            message_fetch_concurrency: options.message_fetch_concurrency,
         };
+        observe_latest_metrics(&mut pacing, &gmail_client)?;
 
         match initial_mode {
             store::mailbox::SyncMode::Full => {
-                run_full_sync(&sync_context, initial_bootstrap_query, false).await
+                run_full_sync(&sync_context, &mut pacing, initial_bootstrap_query, false).await
             }
             store::mailbox::SyncMode::Incremental => {
                 let sync_state = existing_sync_state
@@ -92,6 +100,7 @@ pub async fn sync_run_with_options(
                     .ok_or_else(|| anyhow!("incremental sync requires an existing sync state"))?;
                 match run_incremental_sync(
                     &sync_context,
+                    &mut pacing,
                     persisted_bootstrap_query,
                     sync_state.cursor_history_id.clone(),
                 )
@@ -102,7 +111,8 @@ pub async fn sync_run_with_options(
                         failure_mode = store::mailbox::SyncMode::Full;
                         failure_cursor_history_id = None;
                         failure_bootstrap_query = persisted_bootstrap_query;
-                        run_full_sync(&sync_context, persisted_bootstrap_query, true).await
+                        run_full_sync(&sync_context, &mut pacing, persisted_bootstrap_query, true)
+                            .await
                     }
                     Err(error) => Err(error),
                 }
@@ -113,19 +123,20 @@ pub async fn sync_run_with_options(
 
     match result {
         Ok(mut report) => {
+            observe_latest_metrics(&mut pacing, &gmail_client)?;
+            let pacing_report = pacing.report();
+            let now_epoch_s = current_epoch_seconds()?;
+            let _ = store_handle
+                .upsert_sync_pacing_state(pacing.finalize_success(&account.account_id, now_epoch_s))
+                .await?;
             let metrics = gmail_client.request_metrics_snapshot();
-            report.quota_units_budget_per_minute = options.quota_units_per_minute;
-            report.message_fetch_concurrency = options.message_fetch_concurrency;
-            if let Some(metrics) = metrics {
-                report.estimated_quota_units_reserved = metrics.reserved_units;
-                report.http_attempt_count = metrics.http_attempts;
-                report.retry_count = metrics.retry_count;
-                report.throttle_wait_count = metrics.throttle_wait_count;
-                report.throttle_wait_ms = metrics.throttle_wait_ms;
-            }
+            populate_sync_report_metrics(&mut report, pacing_report, metrics, &options);
             Ok(report)
         }
         Err(sync_error) => {
+            let pacing_persist_result =
+                persist_sync_pacing_failure(&store_handle, &account, &mut pacing, &gmail_client)
+                    .await;
             let persist_result = persist_sync_state_failure(
                 &store_handle,
                 &account,
@@ -135,7 +146,10 @@ pub async fn sync_run_with_options(
                 sync_error.to_string(),
             )
             .await;
-            Err(preserve_sync_error(sync_error, persist_result))
+            Err(preserve_sync_error(
+                sync_error,
+                persist_result.and(pacing_persist_result),
+            ))
         }
     }
 }
@@ -161,7 +175,6 @@ struct SyncExecutionContext<'a> {
     account: &'a AccountRecord,
     labels: &'a [GmailLabel],
     label_names_by_id: &'a BTreeMap<String, String>,
-    message_fetch_concurrency: usize,
 }
 
 struct FullSyncCheckpointState {
@@ -171,6 +184,7 @@ struct FullSyncCheckpointState {
 
 async fn run_full_sync(
     context: &SyncExecutionContext<'_>,
+    pacing: &mut AdaptiveSyncPacing,
     bootstrap_query: &str,
     fallback_from_history: bool,
 ) -> Result<SyncRunReport> {
@@ -221,6 +235,7 @@ async fn run_full_sync(
                 context.store_handle.reset_full_sync_progress().await?;
                 return Box::pin(run_full_sync(
                     context,
+                    pacing,
                     bootstrap_query,
                     fallback_from_history,
                 ))
@@ -239,7 +254,7 @@ async fn run_full_sync(
         let (catalogs, _) = fetch_message_catalogs(
             context.gmail_client.clone(),
             message_ids,
-            context.message_fetch_concurrency,
+            pacing.current_message_fetch_concurrency(),
         )
         .await?;
 
@@ -275,6 +290,7 @@ async fn run_full_sync(
                 },
             )
             .await?;
+        observe_latest_metrics(pacing, context.gmail_client)?;
         page_token = checkpoint.record.next_page_token.clone();
         if checkpoint.record.status == store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
             break;
@@ -295,6 +311,7 @@ async fn run_full_sync(
 
 async fn run_incremental_sync(
     context: &SyncExecutionContext<'_>,
+    pacing: &mut AdaptiveSyncPacing,
     bootstrap_query: &str,
     cursor_history_id: Option<String>,
 ) -> Result<SyncRunReport> {
@@ -325,6 +342,7 @@ async fn run_incremental_sync(
             break page_history_id;
         }
     };
+    observe_latest_metrics(pacing, context.gmail_client)?;
 
     for deleted_message_id in &deleted_message_ids {
         changed_message_ids.remove(deleted_message_id);
@@ -334,9 +352,10 @@ async fn run_incremental_sync(
     let (catalogs, missing_message_ids) = fetch_message_catalogs(
         context.gmail_client.clone(),
         changed_message_ids,
-        context.message_fetch_concurrency,
+        pacing.current_message_fetch_concurrency(),
     )
     .await?;
+    observe_latest_metrics(pacing, context.gmail_client)?;
     let messages_listed = catalogs.len();
     let (upserts, excluded_message_ids) = build_incremental_changes(
         &context.account.account_id,
@@ -433,14 +452,81 @@ fn finalize_sync(
         store_message_count: sync_state.message_count,
         store_label_count: sync_state.label_count,
         store_indexed_message_count: sync_state.indexed_message_count,
+        adaptive_pacing_enabled: false,
         quota_units_budget_per_minute: 0,
         message_fetch_concurrency: 0,
+        quota_units_cap_per_minute: 0,
+        message_fetch_concurrency_cap: 0,
+        starting_quota_units_per_minute: 0,
+        starting_message_fetch_concurrency: 0,
+        effective_quota_units_per_minute: 0,
+        effective_message_fetch_concurrency: 0,
+        adaptive_downshift_count: 0,
         estimated_quota_units_reserved: 0,
         http_attempt_count: 0,
         retry_count: 0,
+        quota_pressure_retry_count: 0,
+        concurrency_pressure_retry_count: 0,
+        backend_retry_count: 0,
         throttle_wait_count: 0,
         throttle_wait_ms: 0,
+        retry_after_wait_ms: 0,
     })
+}
+
+fn observe_latest_metrics(
+    pacing: &mut AdaptiveSyncPacing,
+    gmail_client: &GmailClient,
+) -> Result<()> {
+    if let Some(snapshot) = gmail_client.request_metrics_snapshot() {
+        pacing.observe_metrics_snapshot(snapshot, Some(gmail_client))?;
+    }
+
+    Ok(())
+}
+
+async fn persist_sync_pacing_failure(
+    store_handle: &MailboxStoreHandle,
+    account: &AccountRecord,
+    pacing: &mut AdaptiveSyncPacing,
+    gmail_client: &GmailClient,
+) -> Result<()> {
+    observe_latest_metrics(pacing, gmail_client)?;
+    let now_epoch_s = current_epoch_seconds()?;
+    let _ = store_handle
+        .upsert_sync_pacing_state(pacing.finalize_failure(&account.account_id, now_epoch_s))
+        .await?;
+    Ok(())
+}
+
+fn populate_sync_report_metrics(
+    report: &mut SyncRunReport,
+    pacing_report: AdaptiveSyncPacingReport,
+    metrics: Option<crate::gmail::GmailQuotaMetricsSnapshot>,
+    options: &SyncRunOptions,
+) {
+    report.adaptive_pacing_enabled = pacing_report.adaptive_pacing_enabled;
+    report.quota_units_budget_per_minute = options.quota_units_per_minute;
+    report.message_fetch_concurrency = options.message_fetch_concurrency;
+    report.quota_units_cap_per_minute = pacing_report.quota_units_cap_per_minute;
+    report.message_fetch_concurrency_cap = pacing_report.message_fetch_concurrency_cap;
+    report.starting_quota_units_per_minute = pacing_report.starting_quota_units_per_minute;
+    report.starting_message_fetch_concurrency = pacing_report.starting_message_fetch_concurrency;
+    report.effective_quota_units_per_minute = pacing_report.effective_quota_units_per_minute;
+    report.effective_message_fetch_concurrency = pacing_report.effective_message_fetch_concurrency;
+    report.adaptive_downshift_count = pacing_report.adaptive_downshift_count;
+
+    if let Some(metrics) = metrics {
+        report.estimated_quota_units_reserved = metrics.reserved_units;
+        report.http_attempt_count = metrics.http_attempts;
+        report.retry_count = metrics.retry_count;
+        report.quota_pressure_retry_count = metrics.quota_pressure_retry_count;
+        report.concurrency_pressure_retry_count = metrics.concurrency_pressure_retry_count;
+        report.backend_retry_count = metrics.backend_retry_count;
+        report.throttle_wait_count = metrics.throttle_wait_count;
+        report.throttle_wait_ms = metrics.throttle_wait_ms;
+        report.retry_after_wait_ms = metrics.retry_after_wait_ms;
+    }
 }
 
 async fn load_sync_state(
@@ -822,6 +908,18 @@ impl MailboxStoreHandle {
         .await??)
     }
 
+    async fn load_sync_pacing_state(
+        &self,
+    ) -> Result<Option<store::mailbox::SyncPacingStateRecord>> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        Ok(spawn_blocking(move || {
+            store::mailbox::get_sync_pacing_state(&database_path, busy_timeout_ms, &account_id)
+        })
+        .await??)
+    }
+
     async fn reset_full_sync_progress(&self) -> Result<()> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
@@ -952,6 +1050,18 @@ impl MailboxStoreHandle {
         let busy_timeout_ms = self.busy_timeout_ms;
         spawn_blocking(move || {
             store::mailbox::upsert_sync_state(&database_path, busy_timeout_ms, &update)
+        })
+        .await?
+    }
+
+    async fn upsert_sync_pacing_state(
+        &self,
+        update: store::mailbox::SyncPacingStateUpdate,
+    ) -> Result<store::mailbox::SyncPacingStateRecord> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        spawn_blocking(move || {
+            store::mailbox::upsert_sync_pacing_state(&database_path, busy_timeout_ms, &update)
         })
         .await?
     }

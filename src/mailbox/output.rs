@@ -35,6 +35,7 @@ impl SyncRunReport {
                 "store_indexed_message_count={}",
                 self.store_indexed_message_count
             ),
+            format!("adaptive_pacing_enabled={}", self.adaptive_pacing_enabled),
             format!(
                 "quota_units_budget_per_minute={}",
                 self.quota_units_budget_per_minute
@@ -44,13 +45,48 @@ impl SyncRunReport {
                 self.message_fetch_concurrency
             ),
             format!(
+                "quota_units_cap_per_minute={}",
+                self.quota_units_cap_per_minute
+            ),
+            format!(
+                "message_fetch_concurrency_cap={}",
+                self.message_fetch_concurrency_cap
+            ),
+            format!(
+                "starting_quota_units_per_minute={}",
+                self.starting_quota_units_per_minute
+            ),
+            format!(
+                "starting_message_fetch_concurrency={}",
+                self.starting_message_fetch_concurrency
+            ),
+            format!(
+                "effective_quota_units_per_minute={}",
+                self.effective_quota_units_per_minute
+            ),
+            format!(
+                "effective_message_fetch_concurrency={}",
+                self.effective_message_fetch_concurrency
+            ),
+            format!("adaptive_downshift_count={}", self.adaptive_downshift_count),
+            format!(
                 "estimated_quota_units_reserved={}",
                 self.estimated_quota_units_reserved
             ),
             format!("http_attempt_count={}", self.http_attempt_count),
             format!("retry_count={}", self.retry_count),
+            format!(
+                "quota_pressure_retry_count={}",
+                self.quota_pressure_retry_count
+            ),
+            format!(
+                "concurrency_pressure_retry_count={}",
+                self.concurrency_pressure_retry_count
+            ),
+            format!("backend_retry_count={}", self.backend_retry_count),
             format!("throttle_wait_count={}", self.throttle_wait_count),
             format!("throttle_wait_ms={}", self.throttle_wait_ms),
+            format!("retry_after_wait_ms={}", self.retry_after_wait_ms),
         ]
         .join("\n")
             + "\n"

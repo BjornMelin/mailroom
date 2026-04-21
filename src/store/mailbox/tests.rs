@@ -2,14 +2,15 @@ use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
     FullSyncCheckpointStatus, FullSyncCheckpointUpdate, GmailAttachmentUpsertInput,
     GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError, SearchQuery, SyncMode,
-    SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
-    finalize_full_sync_from_stage, get_attachment_detail, get_full_sync_checkpoint, get_sync_state,
-    inspect_mailbox, list_attachments, list_label_usage, prepare_full_sync_checkpoint,
-    record_attachment_export, replace_labels, replace_labels_and_report_reindex, replace_messages,
-    reset_full_sync_stage, search::build_plain_fts5_query, search_messages,
-    set_attachment_vault_state, stage_full_sync_labels, stage_full_sync_messages,
-    stage_full_sync_page_and_update_checkpoint, update_full_sync_checkpoint_labels,
-    upsert_messages, upsert_sync_state,
+    SyncPacingPressureKind, SyncPacingStateUpdate, SyncStateUpdate, SyncStatus, commit_full_sync,
+    commit_incremental_sync, finalize_full_sync_from_stage, get_attachment_detail,
+    get_full_sync_checkpoint, get_sync_state, inspect_mailbox, list_attachments, list_label_usage,
+    prepare_full_sync_checkpoint, record_attachment_export, replace_labels,
+    replace_labels_and_report_reindex, replace_messages, reset_full_sync_stage,
+    search::build_plain_fts5_query, search_messages, set_attachment_vault_state,
+    stage_full_sync_labels, stage_full_sync_messages, stage_full_sync_page_and_update_checkpoint,
+    update_full_sync_checkpoint_labels, upsert_messages, upsert_sync_pacing_state,
+    upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -495,6 +496,19 @@ fn inspect_mailbox_reports_sync_state_and_counts() {
         },
     )
     .unwrap();
+    let pacing_state = upsert_sync_pacing_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SyncPacingStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: 9_500,
+            learned_message_fetch_concurrency: 3,
+            clean_run_streak: 2,
+            last_pressure_kind: Some(SyncPacingPressureKind::Quota),
+            updated_at_epoch_s: 205,
+        },
+    )
+    .unwrap();
 
     let stored_state = get_sync_state(
         &config_report.config.store.database_path,
@@ -521,6 +535,7 @@ fn inspect_mailbox_reports_sync_state_and_counts() {
             .and_then(|state| state.cursor_history_id.as_deref()),
         Some("201")
     );
+    assert_eq!(report.sync_pacing_state.as_ref(), Some(&pacing_state));
 
     super::delete_messages(
         &config_report.config.store.database_path,

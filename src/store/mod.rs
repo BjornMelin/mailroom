@@ -181,6 +181,33 @@ impl StoreDoctorReport {
                     }
                     None => println!("mailbox_full_sync_checkpoint_status=<none>"),
                 }
+                match &mailbox.sync_pacing_state {
+                    Some(pacing_state) => {
+                        println!(
+                            "mailbox_sync_pacing_learned_quota_units_per_minute={}",
+                            pacing_state.learned_quota_units_per_minute
+                        );
+                        println!(
+                            "mailbox_sync_pacing_learned_message_fetch_concurrency={}",
+                            pacing_state.learned_message_fetch_concurrency
+                        );
+                        println!(
+                            "mailbox_sync_pacing_clean_run_streak={}",
+                            pacing_state.clean_run_streak
+                        );
+                        match pacing_state.last_pressure_kind {
+                            Some(kind) => {
+                                println!("mailbox_sync_pacing_last_pressure_kind={kind}")
+                            }
+                            None => println!("mailbox_sync_pacing_last_pressure_kind=<none>"),
+                        }
+                        println!(
+                            "mailbox_sync_pacing_updated_at_epoch_s={}",
+                            pacing_state.updated_at_epoch_s
+                        );
+                    }
+                    None => println!("mailbox_sync_pacing_learned_quota_units_per_minute=<none>"),
+                }
             }
             if let Some(workflows) = &self.workflows {
                 println!("workflow_count={}", workflows.workflow_count);
@@ -409,7 +436,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 10);
+        assert_eq!(report.schema_version, 11);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -428,13 +455,14 @@ mod tests {
                        'gmail_full_sync_stage_messages',
                        'gmail_full_sync_stage_message_labels',
                        'gmail_full_sync_stage_attachments',
-                       'gmail_full_sync_checkpoint'
+                       'gmail_full_sync_checkpoint',
+                       'gmail_sync_pacing_state'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 11);
+        assert_eq!(substrate_tables, 12);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -544,11 +572,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(9, 10).unwrap_err();
+        let error = super::pending_migrations(10, 11).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 10 is newer than embedded migrations (9)")
+                .contains("database schema version 11 is newer than embedded migrations (10)")
         );
     }
 
@@ -718,6 +746,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/11-sync-pacing-state/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/10-full-sync-checkpoints/down.sql"
             ))
             .unwrap();
@@ -752,7 +785,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 10);
+        assert_eq!(migration_report.schema_version, 11);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();

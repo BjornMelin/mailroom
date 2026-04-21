@@ -2,6 +2,8 @@
 mod model;
 #[path = "mailbox/output.rs"]
 mod output;
+#[path = "mailbox/pacing.rs"]
+mod pacing;
 #[path = "mailbox/search.rs"]
 mod search;
 #[path = "mailbox/sync.rs"]

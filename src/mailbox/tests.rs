@@ -241,7 +241,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(10));
+    assert_eq!(store_report.schema_version, Some(11));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -643,11 +643,23 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     assert_eq!(report.bootstrap_query, requested_bootstrap_query);
     assert_eq!(report.messages_upserted, 1);
     assert_eq!(report.cursor_history_id, "700");
+    assert!(report.adaptive_pacing_enabled);
     assert_eq!(report.quota_units_budget_per_minute, 12_000);
     assert_eq!(report.message_fetch_concurrency, 4);
+    assert_eq!(report.quota_units_cap_per_minute, 12_000);
+    assert_eq!(report.message_fetch_concurrency_cap, 4);
+    assert_eq!(report.starting_quota_units_per_minute, 12_000);
+    assert_eq!(report.starting_message_fetch_concurrency, 4);
+    assert_eq!(report.effective_quota_units_per_minute, 12_000);
+    assert_eq!(report.effective_message_fetch_concurrency, 4);
+    assert_eq!(report.adaptive_downshift_count, 0);
     assert_eq!(report.estimated_quota_units_reserved, 12);
     assert_eq!(report.http_attempt_count, 4);
     assert_eq!(report.retry_count, 0);
+    assert_eq!(report.quota_pressure_retry_count, 0);
+    assert_eq!(report.concurrency_pressure_retry_count, 0);
+    assert_eq!(report.backend_retry_count, 0);
+    assert_eq!(report.retry_after_wait_ms, 0);
 
     let stored_state = store::mailbox::get_sync_state(
         &config_report.config.store.database_path,
@@ -657,6 +669,18 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     .unwrap()
     .unwrap();
     assert_eq!(stored_state.bootstrap_query, requested_bootstrap_query);
+
+    let pacing_state = store::mailbox::get_sync_pacing_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(pacing_state.learned_quota_units_per_minute, 12_000);
+    assert_eq!(pacing_state.learned_message_fetch_concurrency, 4);
+    assert_eq!(pacing_state.clean_run_streak, 1);
+    assert!(pacing_state.last_pressure_kind.is_none());
 }
 
 #[tokio::test]
@@ -1822,6 +1846,11 @@ fn seed_full_sync_checkpoint(config_report: &ConfigReport, seed: FullSyncCheckpo
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/11-sync-pacing-state/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/10-full-sync-checkpoints/down.sql"

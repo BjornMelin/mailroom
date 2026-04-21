@@ -1,11 +1,11 @@
 use super::read::{
     count_indexed_messages, count_labels, count_messages, read_full_sync_checkpoint,
-    read_sync_state,
+    read_sync_pacing_state, read_sync_state,
 };
 use super::{
     AttachmentExportEventInput, AttachmentVaultStateUpdate, FullSyncCheckpointRecord,
-    FullSyncCheckpointUpdate, GmailMessageUpsertInput, MailboxWriteError, SyncStateRecord,
-    SyncStateUpdate, unique_sorted_strings,
+    FullSyncCheckpointUpdate, GmailMessageUpsertInput, MailboxWriteError, SyncPacingStateRecord,
+    SyncPacingStateUpdate, SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
 };
 use crate::gmail::GmailLabel;
 use crate::store::connection;
@@ -357,6 +357,18 @@ pub(crate) fn upsert_sync_state(
     Ok(record)
 }
 
+pub(crate) fn upsert_sync_pacing_state(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    update: &SyncPacingStateUpdate,
+) -> Result<SyncPacingStateRecord> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    let transaction = connection.transaction()?;
+    let record = upsert_sync_pacing_state_in_transaction(&transaction, update)?;
+    transaction.commit()?;
+    Ok(record)
+}
+
 fn reset_full_sync_progress_with_connection(
     connection: &mut Connection,
     account_id: &str,
@@ -371,6 +383,41 @@ fn reset_full_sync_progress_with_connection(
     reset_full_sync_stage_in_transaction(&transaction, account_id)?;
     transaction.commit()?;
     Ok(())
+}
+
+fn upsert_sync_pacing_state_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    update: &SyncPacingStateUpdate,
+) -> Result<SyncPacingStateRecord> {
+    transaction.execute(
+        "INSERT INTO gmail_sync_pacing_state (
+             account_id,
+             learned_quota_units_per_minute,
+             learned_message_fetch_concurrency,
+             clean_run_streak,
+             last_pressure_kind,
+             updated_at_epoch_s
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (account_id) DO UPDATE SET
+             learned_quota_units_per_minute = excluded.learned_quota_units_per_minute,
+             learned_message_fetch_concurrency = excluded.learned_message_fetch_concurrency,
+             clean_run_streak = excluded.clean_run_streak,
+             last_pressure_kind = excluded.last_pressure_kind,
+             updated_at_epoch_s = excluded.updated_at_epoch_s",
+        params![
+            &update.account_id,
+            update.learned_quota_units_per_minute,
+            update.learned_message_fetch_concurrency,
+            update.clean_run_streak,
+            update.last_pressure_kind.map(|kind| kind.as_str()),
+            update.updated_at_epoch_s,
+        ],
+    )?;
+
+    let record = read_sync_pacing_state(transaction, &update.account_id)?
+        .ok_or_else(|| anyhow!("sync pacing state disappeared after upsert"))?;
+    Ok(record)
 }
 
 fn clear_full_sync_checkpoint_in_transaction(

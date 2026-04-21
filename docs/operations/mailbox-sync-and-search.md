@@ -33,7 +33,7 @@ Run a normal sync:
 cargo run -- sync run --json
 ```
 
-Lower the Gmail budget and concurrency if a deep resync needs extra headroom:
+Lower the adaptive ceilings if a deep resync needs extra headroom:
 
 ```bash
 cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
@@ -93,6 +93,8 @@ Default bootstrap behavior:
 - default message fetch concurrency: `4`
 - default list/history page size: `500`
 - storage: metadata, snippet, and attachment rows
+- adaptive pacing: default-on, persisted per account, and bounded by the current
+  CLI ceilings
 
 Incremental sync behavior:
 
@@ -125,7 +127,12 @@ Quota hardening behavior:
 - `users.messages.list` and `users.messages.get` are paced under one shared limiter
 - GET retries respect `Retry-After` when present
 - Gmail usage-limit `403` responses (`rateLimitExceeded`, `userRateLimitExceeded`) are retried like `429`
-- sync reports now include estimated reserved quota units, retry count, throttle wait totals, and the effective fetch concurrency
+- adaptive pacing downshifts quota ceilings on quota-pressure retries and steps
+  message-fetch concurrency down on Gmail concurrent-request pressure
+- adaptive pacing only upshifts learned pacing targets after later clean successful
+  runs; one-off lower CLI ceilings do not permanently ratchet learned state down
+- sync reports now include estimated reserved quota units, pressure-classified retry
+  counts, `Retry-After` wait totals, and both the capped and effective fetch pacing
 
 ## Search behavior
 
@@ -171,12 +178,25 @@ Relevant sync fields in JSON output include:
 - `last_incremental_sync_success_epoch_s`
 - `cursor_history_id`
 - `full_sync_checkpoint`
+- `sync_pacing_state`
 
 Relevant `sync run` output fields now also include:
 
 - `resumed_from_checkpoint`
 - `checkpoint_reused_pages`
 - `checkpoint_reused_messages_upserted`
+- `adaptive_pacing_enabled`
+- `quota_units_cap_per_minute`
+- `message_fetch_concurrency_cap`
+- `starting_quota_units_per_minute`
+- `starting_message_fetch_concurrency`
+- `effective_quota_units_per_minute`
+- `effective_message_fetch_concurrency`
+- `adaptive_downshift_count`
+- `quota_pressure_retry_count`
+- `concurrency_pressure_retry_count`
+- `backend_retry_count`
+- `retry_after_wait_ms`
 
 ## Safety boundaries
 

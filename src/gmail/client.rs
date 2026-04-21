@@ -1,5 +1,5 @@
 use super::quota::{
-    GmailQuotaMetricsSnapshot, GmailQuotaPolicy, GmailRequestCost,
+    GmailQuotaMetricsSnapshot, GmailQuotaPolicy, GmailRequestCost, GmailRetryClassification,
     MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE,
 };
 use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
@@ -377,12 +377,14 @@ struct GoogleApiErrorEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct GoogleApiErrorBody {
+    message: Option<String>,
     #[serde(default)]
     errors: Vec<GoogleApiErrorDetail>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GoogleApiErrorDetail {
+    message: Option<String>,
     reason: Option<String>,
 }
 
@@ -460,6 +462,20 @@ impl GmailClient {
         self.request_policy.as_ref().map(GmailQuotaPolicy::snapshot)
     }
 
+    pub(crate) fn update_quota_budget(&self, units_per_minute: u32) -> GmailResult<()> {
+        let Some(policy) = &self.request_policy else {
+            return Ok(());
+        };
+
+        policy
+            .reconfigure(units_per_minute)
+            .ok_or(GmailClientError::InvalidQuotaBudget {
+                units_per_minute,
+                minimum_units_per_minute: MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE,
+            })?;
+        Ok(())
+    }
+
     async fn acquire_request_budget(&self, request_cost: GmailRequestCost) -> GmailResult<()> {
         if let Some(policy) = &self.request_policy {
             policy
@@ -480,9 +496,15 @@ impl GmailClient {
         }
     }
 
-    fn record_retry(&self) {
+    fn record_retry(&self, classification: GmailRetryClassification) {
         if let Some(policy) = &self.request_policy {
-            policy.record_retry();
+            policy.record_retry(classification);
+        }
+    }
+
+    fn record_retry_after_wait(&self, waited: Duration) {
+        if let Some(policy) = &self.request_policy {
+            policy.record_retry_after_wait(waited);
         }
     }
 
@@ -1135,13 +1157,18 @@ impl GmailClient {
                     let status = response.status();
                     let retry_after = retry_after_delay(response.headers());
                     let body = response.text().await.unwrap_or_default();
-                    if retryable_request
-                        && is_retryable_api_response(status, &body)
+                    let retry_classification = retryable_request
+                        .then(|| classify_retryable_api_response(status, &body))
+                        .flatten();
+                    if let Some(retry_classification) = retry_classification
                         && attempt < GMAIL_MAX_RETRY_ATTEMPTS
                     {
                         let retry_delay = retry_after
                             .unwrap_or_else(|| jittered_retry_delay(retry_delay_ms, attempt));
-                        self.record_retry();
+                        self.record_retry(retry_classification);
+                        if retry_after.is_some() {
+                            self.record_retry_after_wait(retry_delay);
+                        }
                         sleep(retry_delay).await;
                         retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
                         continue;
@@ -1158,7 +1185,7 @@ impl GmailClient {
                         && is_retryable_transport_error(&error)
                         && attempt < GMAIL_MAX_RETRY_ATTEMPTS
                     {
-                        self.record_retry();
+                        self.record_retry(GmailRetryClassification::Backend);
                         sleep(retry_delay_duration(
                             &HeaderMap::new(),
                             retry_delay_ms,
@@ -1342,12 +1369,23 @@ fn matches_missing_message_error(error: &GmailClientError, message_id: &str) -> 
     )
 }
 
-fn is_retryable_api_response(status: StatusCode, body: &str) -> bool {
+fn classify_retryable_api_response(
+    status: StatusCode,
+    body: &str,
+) -> Option<GmailRetryClassification> {
     if is_retryable_status(status) {
-        return true;
+        return Some(if matches_concurrent_request_limit(body) {
+            GmailRetryClassification::ConcurrencyPressure
+        } else if status == StatusCode::TOO_MANY_REQUESTS {
+            GmailRetryClassification::QuotaPressure
+        } else {
+            GmailRetryClassification::Backend
+        });
     }
 
-    status == StatusCode::FORBIDDEN && matches_rate_limit_reason(body)
+    (status == StatusCode::FORBIDDEN)
+        .then(|| classify_forbidden_retry(body))
+        .flatten()
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -1365,18 +1403,50 @@ fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_timeout()
 }
 
-fn matches_rate_limit_reason(body: &str) -> bool {
+fn classify_forbidden_retry(body: &str) -> Option<GmailRetryClassification> {
     serde_json::from_str::<GoogleApiErrorEnvelope>(body)
         .ok()
         .and_then(|payload| payload.error)
-        .is_some_and(|error| {
-            error.errors.into_iter().any(|detail| {
-                matches!(
-                    detail.reason.as_deref(),
-                    Some("rateLimitExceeded" | "userRateLimitExceeded")
-                )
-            })
+        .and_then(|error| {
+            error
+                .errors
+                .into_iter()
+                .find_map(|detail| match detail.reason.as_deref() {
+                    Some("rateLimitExceeded" | "userRateLimitExceeded") => {
+                        Some(GmailRetryClassification::QuotaPressure)
+                    }
+                    _ => None,
+                })
         })
+}
+
+fn matches_concurrent_request_limit(body: &str) -> bool {
+    if let Ok(payload) = serde_json::from_str::<GoogleApiErrorEnvelope>(body)
+        && let Some(error) = payload.error
+    {
+        if error
+            .message
+            .as_deref()
+            .is_some_and(is_concurrent_request_limit_message)
+        {
+            return true;
+        }
+
+        return error.errors.into_iter().any(|detail| {
+            detail
+                .message
+                .as_deref()
+                .is_some_and(is_concurrent_request_limit_message)
+        });
+    }
+
+    is_concurrent_request_limit_message(body)
+}
+
+fn is_concurrent_request_limit_message(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("too many concurrent requests for user")
 }
 
 fn retry_delay_duration(headers: &HeaderMap, default_delay_ms: u64, attempt: usize) -> Duration {
@@ -1698,12 +1768,13 @@ fn build_gmail_http_client(config: &GmailConfig) -> GmailResult<reqwest::Client>
 mod tests {
     use super::{
         GmailClient, GmailClientError, GmailMessagePayload, GmailProfile, MESSAGE_CATALOG_FIELDS,
-        MESSAGE_CATALOG_FULL_FIELDS, extract_email_address, is_retryable_api_response,
+        MESSAGE_CATALOG_FULL_FIELDS, classify_retryable_api_response, extract_email_address,
         next_retry_delay_ms, payload_projection_truncated, request_supports_automatic_retry,
         retry_after_delay,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::{GmailConfig, WorkspaceConfig};
+    use crate::gmail::quota::GmailRetryClassification;
     use reqwest::header::HeaderMap;
     use reqwest::{Method, StatusCode};
     use secrecy::{ExposeSecret, SecretString};
@@ -1893,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn gmail_usage_limit_forbidden_errors_are_retryable() {
+    fn gmail_usage_limit_forbidden_errors_are_classified_as_quota_pressure() {
         let body = serde_json::to_string(&json!({
             "error": {
                 "errors": [
@@ -1907,7 +1978,40 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(is_retryable_api_response(StatusCode::FORBIDDEN, &body));
+        assert_eq!(
+            classify_retryable_api_response(StatusCode::FORBIDDEN, &body),
+            Some(GmailRetryClassification::QuotaPressure)
+        );
+    }
+
+    #[test]
+    fn gmail_concurrent_request_429_errors_are_classified_as_concurrency_pressure() {
+        let body = serde_json::to_string(&json!({
+            "error": {
+                "message": "Too many concurrent requests for user",
+                "errors": [
+                    {
+                        "domain": "usageLimits",
+                        "reason": "rateLimitExceeded",
+                        "message": "Too many concurrent requests for user"
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            classify_retryable_api_response(StatusCode::TOO_MANY_REQUESTS, &body),
+            Some(GmailRetryClassification::ConcurrencyPressure)
+        );
+    }
+
+    #[test]
+    fn gmail_backend_5xx_errors_are_classified_as_backend_pressure() {
+        assert_eq!(
+            classify_retryable_api_response(StatusCode::BAD_GATEWAY, "upstream failure"),
+            Some(GmailRetryClassification::Backend)
+        );
     }
 
     #[tokio::test]
