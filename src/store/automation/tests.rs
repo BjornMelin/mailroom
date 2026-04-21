@@ -10,14 +10,12 @@ use crate::config::resolve;
 use crate::store::{accounts, init, mailbox};
 use crate::workspace::WorkspacePaths;
 use rusqlite::Connection;
-use std::fs;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
 #[test]
 fn create_automation_run_persists_detail_and_doctor_counts() {
-    let repo_root = unique_temp_dir("mailroom-automation-run-roundtrip");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
     init(&config_report).unwrap();
@@ -100,14 +98,12 @@ fn create_automation_run_persists_detail_and_doctor_counts() {
     assert_eq!(doctor.previewed_run_count, 0);
     assert_eq!(doctor.applied_run_count, 1);
     assert_eq!(doctor.candidate_count, 1);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn append_automation_run_event_rejects_account_mismatch() {
-    let repo_root = unique_temp_dir("mailroom-automation-run-account-mismatch");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
     init(&config_report).unwrap();
@@ -172,14 +168,12 @@ fn append_automation_run_event_rejects_account_mismatch() {
     .unwrap()
     .unwrap();
     assert_eq!(detail.events.len(), 1);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn claim_automation_run_for_apply_transitions_previewed_runs_once() {
-    let repo_root = unique_temp_dir("mailroom-automation-claim-run");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
     init(&config_report).unwrap();
@@ -231,14 +225,66 @@ fn claim_automation_run_for_apply_transitions_previewed_runs_once() {
     .unwrap();
     assert_eq!(refreshed.run.status, AutomationRunStatus::Applying);
     assert_eq!(refreshed.run.applied_at_epoch_s, Some(101));
+}
 
-    fs::remove_dir_all(repo_root).unwrap();
+#[test]
+fn record_candidate_apply_result_rejects_missing_candidate() {
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+    let detail = create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("hash"),
+            selected_rule_ids: vec![String::from("archive-digest")],
+            created_at_epoch_s: 100,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+
+    let error = record_candidate_apply_result(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CandidateApplyResultInput {
+            run_id: detail.run.run_id,
+            candidate_id: detail.candidates[0].candidate_id + 1,
+            status: AutomationApplyStatus::Succeeded,
+            applied_at_epoch_s: 101,
+            apply_error: None,
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AutomationStoreWriteError::MissingCandidate {
+            run_id,
+            candidate_id,
+        } if run_id == detail.run.run_id
+            && candidate_id == detail.candidates[0].candidate_id + 1
+    ));
+
+    let refreshed = get_automation_run_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        detail.run.run_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(refreshed.candidates[0].apply_status, None);
 }
 
 #[test]
 fn list_latest_thread_candidates_returns_latest_message_and_headers() {
-    let repo_root = unique_temp_dir("mailroom-automation-thread-candidates");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
     init(&config_report).unwrap();
@@ -301,14 +347,12 @@ fn list_latest_thread_candidates_returns_latest_message_and_headers() {
         Some("<list.example.com>")
     );
     assert_eq!(candidates[0].label_names, vec![String::from("INBOX")]);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn list_latest_thread_candidates_returns_empty_for_pre_migration_schemas() {
-    let repo_root = unique_temp_dir("mailroom-automation-thread-candidates-old-schema");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
 
@@ -352,8 +396,6 @@ fn list_latest_thread_candidates_returns_empty_for_pre_migration_schemas() {
     .unwrap();
 
     assert!(candidates.is_empty());
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 fn sample_candidate() -> NewAutomationRunCandidate {
@@ -447,10 +489,6 @@ fn seed_account(config_report: &crate::config::ConfigReport) -> accounts::Accoun
     .unwrap()
 }
 
-fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
+fn temp_repo_root() -> TempDir {
+    TempDir::new().unwrap()
 }
