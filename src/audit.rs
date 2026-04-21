@@ -568,7 +568,7 @@ fn build_verification_report(
 
     let mut next_steps = vec![
         String::from(
-            "Run `cargo run -- sync run --full --recent-days 365 --json` once to build a deeper audit corpus before final rule tuning.",
+            "Run `cargo run -- sync run --profile deep-audit --json` once to build a deeper audit corpus before final rule tuning.",
         ),
         String::from(
             "Run `cargo run -- audit labels --json` and retire numbered-vs-legacy label duplicates before real bulk applies.",

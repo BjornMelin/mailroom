@@ -65,7 +65,7 @@ cargo run -- store init --json
 cargo run -- store doctor --json
 cargo run -- sync run --json
 cargo run -- sync run --full --recent-days 30 --json
-cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
+cargo run -- sync run --profile deep-audit --json
 cargo run -- search "project alpha" --label INBOX --limit 10 --json
 cargo run -- attachment list --json
 cargo run -- attachment show m-1:1.2 --json
@@ -119,7 +119,14 @@ All `--json` commands now use one normalized envelope:
 - keep message payload fetch concurrency bounded by default
 - retry Gmail `429`, `5xx`, and usage-limit `403` responses with truncated backoff
 
-Advanced knobs are available when a deep bootstrap needs extra headroom:
+The named deep-audit preset is available when a deep bootstrap needs extra
+headroom:
+
+```bash
+cargo run -- sync run --profile deep-audit --json
+```
+
+Equivalent explicit flags:
 
 ```bash
 cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json

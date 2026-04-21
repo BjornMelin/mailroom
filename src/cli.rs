@@ -314,41 +314,9 @@ pub enum AutomationRulesCommand {
 #[derive(Debug, Subcommand)]
 pub enum SyncCommand {
     /// Run a one-shot mailbox sync into the local metadata index
-    Run {
-        /// Force a full recent-window resync instead of using the stored history cursor
-        #[arg(long)]
-        full: bool,
-        /// Recent-window size in days for full bootstrap syncs
-        #[arg(long, default_value_t = crate::mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS)]
-        recent_days: u32,
-        /// Per-run adaptive ceiling for Gmail read quota units per minute
-        #[arg(long, default_value_t = crate::mailbox::DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE)]
-        quota_units_per_minute: u32,
-        /// Per-run adaptive ceiling for concurrent Gmail message fetches
-        #[arg(long, default_value_t = crate::mailbox::DEFAULT_MESSAGE_FETCH_CONCURRENCY)]
-        message_fetch_concurrency: usize,
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
+    Run(SyncRunArgs),
     /// Run a sync and report throughput and pipeline telemetry for tuning
-    Benchmark {
-        /// Force a full recent-window resync instead of using the stored history cursor
-        #[arg(long)]
-        full: bool,
-        /// Recent-window size in days for full bootstrap syncs
-        #[arg(long, default_value_t = crate::mailbox::DEFAULT_BOOTSTRAP_RECENT_DAYS)]
-        recent_days: u32,
-        /// Per-run adaptive ceiling for Gmail read quota units per minute
-        #[arg(long, default_value_t = crate::mailbox::DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE)]
-        quota_units_per_minute: u32,
-        /// Per-run adaptive ceiling for concurrent Gmail message fetches
-        #[arg(long, default_value_t = crate::mailbox::DEFAULT_MESSAGE_FETCH_CONCURRENCY)]
-        message_fetch_concurrency: usize,
-        /// Emit JSON instead of plain text
-        #[arg(long)]
-        json: bool,
-    },
+    Benchmark(SyncRunArgs),
     /// Show persisted historical sync-run telemetry for the active mailbox
     History {
         /// Maximum number of runs to return
@@ -373,6 +341,34 @@ pub enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Args, PartialEq, Eq)]
+pub struct SyncRunArgs {
+    /// Force a full recent-window resync instead of using the stored history cursor. Implied by `--profile deep-audit`.
+    #[arg(long)]
+    pub full: bool,
+    /// Named sync tuning preset. Explicit tuning flags still override the preset values.
+    #[arg(long, value_enum)]
+    pub profile: Option<SyncProfileArg>,
+    /// Recent-window size in days for full bootstrap syncs. Defaults to 90 without a profile; `deep-audit` uses 365.
+    #[arg(long)]
+    pub recent_days: Option<u32>,
+    /// Per-run adaptive ceiling for Gmail read quota units per minute. Defaults to 12000 without a profile; `deep-audit` uses 9000.
+    #[arg(long)]
+    pub quota_units_per_minute: Option<u32>,
+    /// Per-run adaptive ceiling for concurrent Gmail message fetches. Defaults to 4 without a profile; `deep-audit` uses 3.
+    #[arg(long)]
+    pub message_fetch_concurrency: Option<usize>,
+    /// Emit JSON instead of plain text
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SyncProfileArg {
+    #[value(name = "deep-audit")]
+    DeepAudit,
 }
 
 #[derive(Debug, Subcommand)]

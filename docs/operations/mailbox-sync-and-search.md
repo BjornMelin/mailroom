@@ -33,7 +33,13 @@ Run a normal sync:
 cargo run -- sync run --json
 ```
 
-Lower the adaptive ceilings if a deep resync needs extra headroom:
+Use the named preset when a deep resync needs extra headroom:
+
+```bash
+cargo run -- sync run --profile deep-audit --json
+```
+
+That preset currently expands to:
 
 ```bash
 cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
@@ -49,7 +55,7 @@ Run the same sync surface in benchmarking mode when you want explicit
 throughput and pipeline telemetry for tuning:
 
 ```bash
-cargo run -- sync benchmark --full --recent-days 365 --json
+cargo run -- sync benchmark --profile deep-audit --json
 ```
 
 Inspect persisted historical sync-run telemetry for the active mailbox:
@@ -68,7 +74,7 @@ For real-mailbox hardening before the first production ruleset, use one deeper
 audit sync once:
 
 ```bash
-cargo run -- sync run --full --recent-days 365 --json
+cargo run -- sync run --profile deep-audit --json
 ```
 
 Run a local search:

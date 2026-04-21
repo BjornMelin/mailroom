@@ -11,7 +11,7 @@ pub struct SearchRequest {
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncRunOptions {
     pub force_full: bool,
     pub recent_days: u32,

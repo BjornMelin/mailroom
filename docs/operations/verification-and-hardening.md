@@ -50,13 +50,11 @@ Keep the normal operational window narrow, but do one deeper sync before
 finalizing the first personal ruleset:
 
 ```bash
-cargo run -- sync run --full --recent-days 365 --json
+cargo run -- sync run --profile deep-audit --json
 cargo run -- audit verification --json
 ```
 
-If Gmail starts returning usage-limit errors during that one-time deep audit
-sync, rerun with a lower budget and smaller payload fanout instead of manually
-sleeping between attempts:
+The preset currently expands to:
 
 ```bash
 cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
@@ -230,7 +228,7 @@ cargo run -- auth status --json
 cargo run -- doctor --json
 cargo run -- audit labels --json
 cargo run -- audit verification --json
-cargo run -- sync run --full --recent-days 365 --json
+cargo run -- sync run --profile deep-audit --json
 cargo run -- automation rules validate --json
 cargo run -- automation run --limit 10 --json
 cargo run -- automation show <run-id> --json
