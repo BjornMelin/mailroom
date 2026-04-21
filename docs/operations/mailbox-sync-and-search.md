@@ -52,6 +52,12 @@ throughput and pipeline telemetry for tuning:
 cargo run -- sync benchmark --full --recent-days 365 --json
 ```
 
+Inspect persisted historical sync-run telemetry for the active mailbox:
+
+```bash
+cargo run -- sync history --limit 20 --json
+```
+
 For real-mailbox hardening before the first production ruleset, use one deeper
 audit sync once:
 
@@ -121,6 +127,12 @@ Persisted sync state behavior:
 - `last_full_sync_success_epoch_s` is updated only after a successful full bootstrap
 - `last_incremental_sync_success_epoch_s` is updated only after a successful incremental replay
 - failed syncs update status and error details without overwriting the last successful timestamps
+- every terminal sync attempt also appends one historical run record in SQLite
+- Mailroom keeps a compact per-account, per-mode summary row with the latest
+  outcome, best clean budget, recent streak counts, and automatic regression
+  flags
+- v1 history is passive analytics only: it informs operators and doctor output,
+  but it does not directly override adaptive pacing decisions
 
 Full bootstrap checkpoint behavior:
 
@@ -207,6 +219,7 @@ Relevant sync fields in JSON output include:
 - `cursor_history_id`
 - `full_sync_checkpoint`
 - `sync_pacing_state`
+- `sync_run_summary`
 - `pipeline_enabled`
 - `pipeline_list_queue_high_water`
 - `pipeline_write_queue_high_water`
@@ -225,6 +238,7 @@ Relevant sync fields in JSON output include:
 
 Relevant `sync run` output fields now also include:
 
+- `run_id`
 - `resumed_from_checkpoint`
 - `checkpoint_reused_pages`
 - `checkpoint_reused_messages_upserted`
@@ -258,6 +272,25 @@ Relevant `sync run` output fields now also include:
 - `duration_ms`
 - `pages_per_second`
 - `messages_per_second`
+- `regression_detected`
+- `regression_kind`
+
+Relevant `sync history` output fields include:
+
+- `summary.latest_run_id`
+- `summary.latest_status`
+- `summary.best_clean_quota_units_per_minute`
+- `summary.best_clean_message_fetch_concurrency`
+- `summary.best_clean_messages_per_second`
+- `summary.recent_failure_streak`
+- `summary.recent_clean_success_streak`
+- `summary.regression_detected`
+- `summary.regression_kind`
+- `runs[*].run_id`
+- `runs[*].sync_mode`
+- `runs[*].status`
+- `runs[*].messages_listed`
+- `runs[*].messages_per_second`
 
 ## Safety boundaries
 

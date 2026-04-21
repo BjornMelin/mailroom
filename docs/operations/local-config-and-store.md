@@ -116,6 +116,7 @@ report:
 - last successful incremental-sync epoch
 - active full-bootstrap checkpoint state when a staged full sync is in progress
 - persisted adaptive sync pacing state for the active account when present
+- persisted sync-run history summary for the active account and latest sync mode
 - last recorded pipeline metrics for the active account when sync state exists
 
 Full-bootstrap resume state is stored in SQLite, alongside the staged mailbox
@@ -127,6 +128,11 @@ Adaptive sync pacing is also stored in SQLite. The pacing row records the
 learned quota budget, learned message-fetch concurrency, clean-run streak, last
 observed pressure kind, and update time for the active account. The runtime
 sync flags still act as per-run ceilings over those learned values.
+
+Historical sync telemetry is stored in SQLite as well. Mailroom appends one
+terminal run row per successful or failed sync attempt, prunes retained history
+to the newest 1000 rows per account, and recomputes one compact summary row per
+account and sync mode for `doctor`, `store doctor`, and `sync history`.
 
 ## Hardening defaults
 
@@ -173,6 +179,8 @@ The current mailbox-oriented schema adds:
 - `gmail_sync_pacing_state`
 - `gmail_full_sync_stage_pages`
 - `gmail_full_sync_stage_page_messages`
+- `gmail_sync_run_history`
+- `gmail_sync_run_summary`
 
 The persisted sync state row also stores the last observed pipeline metrics:
 
