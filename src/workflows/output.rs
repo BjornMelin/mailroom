@@ -445,6 +445,7 @@ mod tests {
             sync_report: Some(SyncRunReport {
                 mode: SyncMode::Full,
                 fallback_from_history: false,
+                resumed_from_checkpoint: false,
                 bootstrap_query: String::from("newer_than:7d"),
                 cursor_history_id: String::from("cursor-1"),
                 pages_fetched: 1,
@@ -452,6 +453,8 @@ mod tests {
                 messages_upserted: 1,
                 messages_deleted: 0,
                 labels_synced: 3,
+                checkpoint_reused_pages: 0,
+                checkpoint_reused_messages_upserted: 0,
                 store_message_count: 4,
                 store_label_count: 5,
                 store_indexed_message_count: 6,

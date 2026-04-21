@@ -16,6 +16,7 @@ impl SyncRunReport {
         [
             format!("mode={}", self.mode),
             format!("fallback_from_history={}", self.fallback_from_history),
+            format!("resumed_from_checkpoint={}", self.resumed_from_checkpoint),
             format!("bootstrap_query={}", self.bootstrap_query),
             format!("cursor_history_id={}", self.cursor_history_id),
             format!("pages_fetched={}", self.pages_fetched),
@@ -23,6 +24,11 @@ impl SyncRunReport {
             format!("messages_upserted={}", self.messages_upserted),
             format!("messages_deleted={}", self.messages_deleted),
             format!("labels_synced={}", self.labels_synced),
+            format!("checkpoint_reused_pages={}", self.checkpoint_reused_pages),
+            format!(
+                "checkpoint_reused_messages_upserted={}",
+                self.checkpoint_reused_messages_upserted
+            ),
             format!("store_message_count={}", self.store_message_count),
             format!("store_label_count={}", self.store_label_count),
             format!(

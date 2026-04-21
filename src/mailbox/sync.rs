@@ -2,8 +2,8 @@ use crate::config::ConfigReport;
 use crate::gmail::{GmailClient, GmailLabel, GmailMessageCatalog};
 use crate::mailbox::model::{FinalizeSyncInput, SyncRunOptions};
 use crate::mailbox::util::{
-    bootstrap_query, is_stale_history_error, labels_by_id, message_is_excluded, newest_history_id,
-    recipient_headers,
+    bootstrap_query, is_invalid_resume_page_token_error, is_stale_history_error, labels_by_id,
+    message_is_excluded, newest_history_id, recipient_headers,
 };
 use crate::mailbox::{
     DEFAULT_MESSAGE_FETCH_CONCURRENCY, DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE, FULL_SYNC_PAGE_SIZE,
@@ -164,32 +164,70 @@ struct SyncExecutionContext<'a> {
     message_fetch_concurrency: usize,
 }
 
+struct FullSyncCheckpointState {
+    record: store::mailbox::FullSyncCheckpointRecord,
+    resumed_from_checkpoint: bool,
+}
+
 async fn run_full_sync(
     context: &SyncExecutionContext<'_>,
     bootstrap_query: &str,
     fallback_from_history: bool,
 ) -> Result<SyncRunReport> {
-    let mut page_token = None;
-    let mut pages_fetched = 0usize;
-    let mut messages_listed = 0usize;
-    let mut messages_upserted = 0usize;
-    let mut cursor_history_id = Some(context.account.history_id.clone());
+    let mut checkpoint =
+        initialize_full_sync_checkpoint(context, bootstrap_query, fallback_from_history).await?;
+    let checkpoint_reused_pages =
+        usize::try_from(checkpoint.record.pages_fetched).unwrap_or(usize::MAX);
+    let checkpoint_reused_messages_upserted =
+        usize::try_from(checkpoint.record.messages_upserted).unwrap_or(usize::MAX);
 
-    context.store_handle.reset_full_sync_stage().await?;
-    context
-        .store_handle
-        .stage_full_sync_labels(context.labels)
-        .await?;
+    if checkpoint.record.status == store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
+        return finalize_full_sync_report(
+            context,
+            bootstrap_query,
+            fallback_from_history,
+            checkpoint.resumed_from_checkpoint,
+            checkpoint.record,
+            checkpoint_reused_pages,
+            checkpoint_reused_messages_upserted,
+        )
+        .await;
+    }
+
+    let mut page_token = checkpoint.record.next_page_token.clone();
+    let mut pages_fetched = checkpoint_reused_pages;
+    let mut messages_listed =
+        usize::try_from(checkpoint.record.messages_listed).unwrap_or(usize::MAX);
+    let mut messages_upserted =
+        usize::try_from(checkpoint.record.messages_upserted).unwrap_or(usize::MAX);
+    let mut cursor_history_id = checkpoint.record.cursor_history_id.clone();
 
     loop {
-        let page = context
+        let page = match context
             .gmail_client
             .list_message_ids(
                 Some(bootstrap_query),
                 page_token.as_deref(),
                 FULL_SYNC_PAGE_SIZE,
             )
-            .await?;
+            .await
+        {
+            Ok(page) => page,
+            Err(error)
+                if checkpoint.resumed_from_checkpoint
+                    && page_token.is_some()
+                    && is_invalid_resume_page_token_error(&error) =>
+            {
+                context.store_handle.reset_full_sync_progress().await?;
+                return Box::pin(run_full_sync(
+                    context,
+                    bootstrap_query,
+                    fallback_from_history,
+                ))
+                .await;
+            }
+            Err(error) => return Err(error.into()),
+        };
         pages_fetched += 1;
         messages_listed += page.messages.len();
 
@@ -215,43 +253,44 @@ async fn run_full_sync(
             context.label_names_by_id,
         );
         messages_upserted += page_upserts.len();
-        context
+        let updated_at_epoch_s = current_epoch_seconds()?;
+        checkpoint.record = context
             .store_handle
-            .stage_full_sync_messages(&page_upserts)
+            .stage_full_sync_page_and_update_checkpoint(
+                &page_upserts,
+                store::mailbox::FullSyncCheckpointUpdate {
+                    bootstrap_query: bootstrap_query.to_owned(),
+                    status: match page.next_page_token {
+                        Some(_) => store::mailbox::FullSyncCheckpointStatus::Paging,
+                        None => store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize,
+                    },
+                    next_page_token: page.next_page_token.clone(),
+                    cursor_history_id: cursor_history_id.clone(),
+                    pages_fetched: i64::try_from(pages_fetched).unwrap_or(i64::MAX),
+                    messages_listed: i64::try_from(messages_listed).unwrap_or(i64::MAX),
+                    messages_upserted: i64::try_from(messages_upserted).unwrap_or(i64::MAX),
+                    labels_synced: i64::try_from(context.labels.len()).unwrap_or(i64::MAX),
+                    started_at_epoch_s: checkpoint.record.started_at_epoch_s,
+                    updated_at_epoch_s,
+                },
+            )
             .await?;
-
-        page_token = page.next_page_token;
-        if page_token.is_none() {
+        page_token = checkpoint.record.next_page_token.clone();
+        if checkpoint.record.status == store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
             break;
         }
     }
 
-    let finalize_input = FinalizeSyncInput {
-        mode: store::mailbox::SyncMode::Full,
+    finalize_full_sync_report(
+        context,
+        bootstrap_query,
         fallback_from_history,
-        cursor_history_id,
-        pages_fetched,
-        messages_listed,
-        messages_upserted,
-        messages_deleted: 0,
-        labels_synced: context.labels.len(),
-    };
-    let now_epoch_s = current_epoch_seconds()?;
-    let sync_state = context
-        .store_handle
-        .finalize_full_sync_from_stage(
-            now_epoch_s,
-            success_sync_state_update(
-                context.account,
-                bootstrap_query,
-                &finalize_input,
-                now_epoch_s,
-            ),
-        )
-        .await?;
-    let _ = context.store_handle.reset_full_sync_stage().await;
-
-    finalize_sync(sync_state, bootstrap_query, finalize_input)
+        checkpoint.resumed_from_checkpoint,
+        checkpoint.record,
+        checkpoint_reused_pages,
+        checkpoint_reused_messages_upserted,
+    )
+    .await
 }
 
 async fn run_incremental_sync(
@@ -335,12 +374,15 @@ async fn run_incremental_sync(
     let finalize_input = FinalizeSyncInput {
         mode: store::mailbox::SyncMode::Incremental,
         fallback_from_history: false,
+        resumed_from_checkpoint: false,
         cursor_history_id: Some(latest_history_id),
         pages_fetched,
         messages_listed,
         messages_upserted,
         messages_deleted,
         labels_synced: context.labels.len(),
+        checkpoint_reused_pages: 0,
+        checkpoint_reused_messages_upserted: 0,
     };
 
     finalize_sync(sync_state, bootstrap_query, finalize_input)
@@ -376,6 +418,7 @@ fn finalize_sync(
     Ok(SyncRunReport {
         mode: input.mode,
         fallback_from_history: input.fallback_from_history,
+        resumed_from_checkpoint: input.resumed_from_checkpoint,
         bootstrap_query: bootstrap_query.to_owned(),
         cursor_history_id: sync_state
             .cursor_history_id
@@ -385,6 +428,8 @@ fn finalize_sync(
         messages_upserted: input.messages_upserted,
         messages_deleted: input.messages_deleted,
         labels_synced: input.labels_synced,
+        checkpoint_reused_pages: input.checkpoint_reused_pages,
+        checkpoint_reused_messages_upserted: input.checkpoint_reused_messages_upserted,
         store_message_count: sync_state.message_count,
         store_label_count: sync_state.label_count,
         store_indexed_message_count: sync_state.indexed_message_count,
@@ -427,6 +472,173 @@ async fn persist_sync_state_failure(
         })
         .await?;
     Ok(())
+}
+
+async fn initialize_full_sync_checkpoint(
+    context: &SyncExecutionContext<'_>,
+    bootstrap_query: &str,
+    _fallback_from_history: bool,
+) -> Result<FullSyncCheckpointState> {
+    let labels_synced = i64::try_from(context.labels.len()).unwrap_or(i64::MAX);
+    let checkpoint = context.store_handle.load_full_sync_checkpoint().await?;
+    let now_epoch_s = current_epoch_seconds()?;
+
+    match checkpoint {
+        Some(checkpoint) if checkpoint.bootstrap_query != bootstrap_query => {
+            context.store_handle.reset_full_sync_progress().await?;
+            let record = context
+                .store_handle
+                .prepare_full_sync_checkpoint(
+                    context.labels,
+                    store::mailbox::FullSyncCheckpointUpdate {
+                        bootstrap_query: bootstrap_query.to_owned(),
+                        status: store::mailbox::FullSyncCheckpointStatus::Paging,
+                        next_page_token: None,
+                        cursor_history_id: Some(context.account.history_id.clone()),
+                        pages_fetched: 0,
+                        messages_listed: 0,
+                        messages_upserted: 0,
+                        labels_synced,
+                        started_at_epoch_s: now_epoch_s,
+                        updated_at_epoch_s: now_epoch_s,
+                    },
+                )
+                .await?;
+            Ok(FullSyncCheckpointState {
+                record,
+                resumed_from_checkpoint: false,
+            })
+        }
+        Some(checkpoint) => {
+            let cursor_history_id = newest_history_id(
+                checkpoint.cursor_history_id.clone(),
+                &context.account.history_id,
+            );
+            let record = context
+                .store_handle
+                .update_full_sync_checkpoint_labels(
+                    context.labels,
+                    store::mailbox::FullSyncCheckpointUpdate {
+                        bootstrap_query: checkpoint.bootstrap_query.clone(),
+                        status: checkpoint.status,
+                        next_page_token: checkpoint.next_page_token.clone(),
+                        cursor_history_id,
+                        pages_fetched: checkpoint.pages_fetched,
+                        messages_listed: checkpoint.messages_listed,
+                        messages_upserted: checkpoint.messages_upserted,
+                        labels_synced,
+                        started_at_epoch_s: checkpoint.started_at_epoch_s,
+                        updated_at_epoch_s: now_epoch_s,
+                    },
+                )
+                .await?;
+
+            if full_sync_checkpoint_is_consistent(&record, labels_synced) {
+                Ok(FullSyncCheckpointState {
+                    record,
+                    resumed_from_checkpoint: true,
+                })
+            } else {
+                context.store_handle.reset_full_sync_progress().await?;
+                let record = context
+                    .store_handle
+                    .prepare_full_sync_checkpoint(
+                        context.labels,
+                        store::mailbox::FullSyncCheckpointUpdate {
+                            bootstrap_query: bootstrap_query.to_owned(),
+                            status: store::mailbox::FullSyncCheckpointStatus::Paging,
+                            next_page_token: None,
+                            cursor_history_id: Some(context.account.history_id.clone()),
+                            pages_fetched: 0,
+                            messages_listed: 0,
+                            messages_upserted: 0,
+                            labels_synced,
+                            started_at_epoch_s: now_epoch_s,
+                            updated_at_epoch_s: now_epoch_s,
+                        },
+                    )
+                    .await?;
+                Ok(FullSyncCheckpointState {
+                    record,
+                    resumed_from_checkpoint: false,
+                })
+            }
+        }
+        None => {
+            let record = context
+                .store_handle
+                .prepare_full_sync_checkpoint(
+                    context.labels,
+                    store::mailbox::FullSyncCheckpointUpdate {
+                        bootstrap_query: bootstrap_query.to_owned(),
+                        status: store::mailbox::FullSyncCheckpointStatus::Paging,
+                        next_page_token: None,
+                        cursor_history_id: Some(context.account.history_id.clone()),
+                        pages_fetched: 0,
+                        messages_listed: 0,
+                        messages_upserted: 0,
+                        labels_synced,
+                        started_at_epoch_s: now_epoch_s,
+                        updated_at_epoch_s: now_epoch_s,
+                    },
+                )
+                .await?;
+            Ok(FullSyncCheckpointState {
+                record,
+                resumed_from_checkpoint: false,
+            })
+        }
+    }
+}
+
+fn full_sync_checkpoint_is_consistent(
+    checkpoint: &store::mailbox::FullSyncCheckpointRecord,
+    labels_synced: i64,
+) -> bool {
+    checkpoint.messages_upserted == checkpoint.staged_message_count
+        && checkpoint.labels_synced == labels_synced
+        && checkpoint.staged_label_count == labels_synced
+        && (checkpoint.status != store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize
+            || checkpoint.next_page_token.is_none())
+}
+
+async fn finalize_full_sync_report(
+    context: &SyncExecutionContext<'_>,
+    bootstrap_query: &str,
+    fallback_from_history: bool,
+    resumed_from_checkpoint: bool,
+    checkpoint: store::mailbox::FullSyncCheckpointRecord,
+    checkpoint_reused_pages: usize,
+    checkpoint_reused_messages_upserted: usize,
+) -> Result<SyncRunReport> {
+    let finalize_input = FinalizeSyncInput {
+        mode: store::mailbox::SyncMode::Full,
+        fallback_from_history,
+        resumed_from_checkpoint,
+        cursor_history_id: checkpoint.cursor_history_id.clone(),
+        pages_fetched: usize::try_from(checkpoint.pages_fetched).unwrap_or(usize::MAX),
+        messages_listed: usize::try_from(checkpoint.messages_listed).unwrap_or(usize::MAX),
+        messages_upserted: usize::try_from(checkpoint.messages_upserted).unwrap_or(usize::MAX),
+        messages_deleted: 0,
+        labels_synced: usize::try_from(checkpoint.labels_synced).unwrap_or(usize::MAX),
+        checkpoint_reused_pages,
+        checkpoint_reused_messages_upserted,
+    };
+    let now_epoch_s = current_epoch_seconds()?;
+    let sync_state = context
+        .store_handle
+        .finalize_full_sync_from_stage(
+            now_epoch_s,
+            success_sync_state_update(
+                context.account,
+                bootstrap_query,
+                &finalize_input,
+                now_epoch_s,
+            ),
+        )
+        .await?;
+
+    finalize_sync(sync_state, bootstrap_query, finalize_input)
 }
 
 fn preserve_sync_error(sync_error: anyhow::Error, persist_result: Result<()>) -> anyhow::Error {
@@ -598,50 +810,86 @@ impl MailboxStoreHandle {
         .await??)
     }
 
-    async fn reset_full_sync_stage(&self) -> Result<()> {
+    async fn load_full_sync_checkpoint(
+        &self,
+    ) -> Result<Option<store::mailbox::FullSyncCheckpointRecord>> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        Ok(spawn_blocking(move || {
+            store::mailbox::get_full_sync_checkpoint(&database_path, busy_timeout_ms, &account_id)
+        })
+        .await??)
+    }
+
+    async fn reset_full_sync_progress(&self) -> Result<()> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
         spawn_blocking(move || {
-            store::mailbox::reset_full_sync_stage(&database_path, busy_timeout_ms, &account_id)
+            store::mailbox::reset_full_sync_progress(&database_path, busy_timeout_ms, &account_id)
         })
         .await?
     }
 
-    async fn stage_full_sync_labels(&self, labels: &[GmailLabel]) -> Result<()> {
+    async fn prepare_full_sync_checkpoint(
+        &self,
+        labels: &[GmailLabel],
+        update: store::mailbox::FullSyncCheckpointUpdate,
+    ) -> Result<store::mailbox::FullSyncCheckpointRecord> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
         let labels = labels.to_vec();
         spawn_blocking(move || {
-            store::mailbox::stage_full_sync_labels(
+            store::mailbox::prepare_full_sync_checkpoint(
                 &database_path,
                 busy_timeout_ms,
                 &account_id,
                 &labels,
+                &update,
             )
         })
         .await?
     }
 
-    async fn stage_full_sync_messages(
+    async fn update_full_sync_checkpoint_labels(
+        &self,
+        labels: &[GmailLabel],
+        update: store::mailbox::FullSyncCheckpointUpdate,
+    ) -> Result<store::mailbox::FullSyncCheckpointRecord> {
+        let database_path = self.database_path.clone();
+        let busy_timeout_ms = self.busy_timeout_ms;
+        let account_id = self.account_id.clone();
+        let labels = labels.to_vec();
+        spawn_blocking(move || {
+            store::mailbox::update_full_sync_checkpoint_labels(
+                &database_path,
+                busy_timeout_ms,
+                &account_id,
+                &labels,
+                &update,
+            )
+        })
+        .await?
+    }
+
+    async fn stage_full_sync_page_and_update_checkpoint(
         &self,
         messages: &[store::mailbox::GmailMessageUpsertInput],
-    ) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
+        update: store::mailbox::FullSyncCheckpointUpdate,
+    ) -> Result<store::mailbox::FullSyncCheckpointRecord> {
         let database_path = self.database_path.clone();
         let busy_timeout_ms = self.busy_timeout_ms;
         let account_id = self.account_id.clone();
         let messages = messages.to_vec();
         spawn_blocking(move || {
-            store::mailbox::stage_full_sync_messages(
+            store::mailbox::stage_full_sync_page_and_update_checkpoint(
                 &database_path,
                 busy_timeout_ms,
                 &account_id,
                 &messages,
+                &update,
             )
         })
         .await?

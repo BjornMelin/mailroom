@@ -1,7 +1,8 @@
 use super::{
-    AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, LabelUsageRecord,
-    MailboxCoverageReport, MailboxDoctorReport, MailboxReadError, SyncMode, SyncStateRecord,
-    SyncStatus, ThreadMessageSnapshot, is_missing_mailbox_table_error,
+    AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, FullSyncCheckpointRecord,
+    FullSyncCheckpointStatus, LabelUsageRecord, MailboxCoverageReport, MailboxDoctorReport,
+    MailboxReadError, SyncMode, SyncStateRecord, SyncStatus, ThreadMessageSnapshot,
+    is_missing_mailbox_table_error,
 };
 use crate::store::connection;
 use rusqlite::types::Type;
@@ -21,6 +22,20 @@ pub(crate) fn get_sync_state(
     let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
         .map_err(|source| MailboxReadError::open_database(database_path, source))?;
     read_sync_state(&connection, account_id)
+}
+
+pub(crate) fn get_full_sync_checkpoint(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_full_sync_checkpoint(&connection, account_id)
 }
 
 pub(crate) fn inspect_mailbox(
@@ -53,6 +68,13 @@ fn inspect_mailbox_with_scope(
         Some(account_id) => read_sync_state(&connection, account_id)?,
         None => latest_sync_state(&connection)?,
     };
+    let full_sync_checkpoint = match account_id {
+        Some(account_id) => read_full_sync_checkpoint(&connection, account_id)?,
+        None => match sync_state.as_ref() {
+            Some(sync_state) => read_full_sync_checkpoint(&connection, &sync_state.account_id)?,
+            None => latest_full_sync_checkpoint(&connection)?,
+        },
+    };
     let message_count = count_messages(&connection, account_id)?;
     let label_count = count_labels(&connection, account_id)?;
     let indexed_message_count = count_indexed_messages(&connection, account_id)?;
@@ -61,6 +83,7 @@ fn inspect_mailbox_with_scope(
 
     Ok(Some(MailboxDoctorReport {
         sync_state,
+        full_sync_checkpoint,
         message_count,
         label_count,
         indexed_message_count,
@@ -515,6 +538,78 @@ fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>,
     }
 }
 
+pub(super) fn read_full_sync_checkpoint(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 bootstrap_query,
+                 status,
+                 next_page_token,
+                 cursor_history_id,
+                 pages_fetched,
+                 messages_listed,
+                 messages_upserted,
+                 labels_synced,
+                 staged_label_count,
+                 staged_message_count,
+                 staged_message_label_count,
+                 staged_attachment_count,
+                 started_at_epoch_s,
+                 updated_at_epoch_s
+             FROM gmail_full_sync_checkpoint
+             WHERE account_id = ?1",
+            [account_id],
+            row_to_full_sync_checkpoint,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_full_sync_checkpoint(
+    connection: &Connection,
+) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 bootstrap_query,
+                 status,
+                 next_page_token,
+                 cursor_history_id,
+                 pages_fetched,
+                 messages_listed,
+                 messages_upserted,
+                 labels_synced,
+                 staged_label_count,
+                 staged_message_count,
+                 staged_message_label_count,
+                 staged_attachment_count,
+                 started_at_epoch_s,
+                 updated_at_epoch_s
+             FROM gmail_full_sync_checkpoint
+             ORDER BY updated_at_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_full_sync_checkpoint,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn row_to_sync_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecord> {
     let last_sync_mode = decode_sync_mode(row.get(3)?, 3)?;
     let last_sync_status = decode_sync_status(row.get(4)?, 4)?;
@@ -532,6 +627,33 @@ fn row_to_sync_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecor
         message_count: row.get(9)?,
         label_count: row.get(10)?,
         indexed_message_count: row.get(11)?,
+    })
+}
+
+fn row_to_full_sync_checkpoint(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<FullSyncCheckpointRecord> {
+    let status =
+        FullSyncCheckpointStatus::from_str(&row.get::<_, String>(2)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
+
+    Ok(FullSyncCheckpointRecord {
+        account_id: row.get(0)?,
+        bootstrap_query: row.get(1)?,
+        status,
+        next_page_token: row.get(3)?,
+        cursor_history_id: row.get(4)?,
+        pages_fetched: row.get(5)?,
+        messages_listed: row.get(6)?,
+        messages_upserted: row.get(7)?,
+        labels_synced: row.get(8)?,
+        staged_label_count: row.get(9)?,
+        staged_message_count: row.get(10)?,
+        staged_message_label_count: row.get(11)?,
+        staged_attachment_count: row.get(12)?,
+        started_at_epoch_s: row.get(13)?,
+        updated_at_epoch_s: row.get(14)?,
     })
 }
 

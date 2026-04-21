@@ -1,12 +1,15 @@
 use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
-    GmailAttachmentUpsertInput, GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError,
-    SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
-    finalize_full_sync_from_stage, get_attachment_detail, get_sync_state, inspect_mailbox,
-    list_attachments, list_label_usage, record_attachment_export, replace_labels,
-    replace_labels_and_report_reindex, replace_messages, reset_full_sync_stage,
-    search::build_plain_fts5_query, search_messages, set_attachment_vault_state,
-    stage_full_sync_labels, stage_full_sync_messages, upsert_messages, upsert_sync_state,
+    FullSyncCheckpointStatus, FullSyncCheckpointUpdate, GmailAttachmentUpsertInput,
+    GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError, SearchQuery, SyncMode,
+    SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
+    finalize_full_sync_from_stage, get_attachment_detail, get_full_sync_checkpoint, get_sync_state,
+    inspect_mailbox, list_attachments, list_label_usage, prepare_full_sync_checkpoint,
+    record_attachment_export, replace_labels, replace_labels_and_report_reindex, replace_messages,
+    reset_full_sync_stage, search::build_plain_fts5_query, search_messages,
+    set_attachment_vault_state, stage_full_sync_labels, stage_full_sync_messages,
+    stage_full_sync_page_and_update_checkpoint, update_full_sync_checkpoint_labels,
+    upsert_messages, upsert_sync_state,
 };
 use crate::config::resolve;
 use crate::gmail::GmailLabel;
@@ -1294,6 +1297,34 @@ fn full_sync_state(account_id: &str, epoch_s: i64) -> SyncStateUpdate {
     }
 }
 
+struct FullSyncCheckpointUpdateSpec<'a> {
+    bootstrap_query: &'a str,
+    status: FullSyncCheckpointStatus,
+    next_page_token: Option<&'a str>,
+    cursor_history_id: Option<&'a str>,
+    pages_fetched: i64,
+    messages_listed: i64,
+    messages_upserted: i64,
+    labels_synced: i64,
+    started_at_epoch_s: i64,
+    updated_at_epoch_s: i64,
+}
+
+fn full_sync_checkpoint_update(spec: FullSyncCheckpointUpdateSpec<'_>) -> FullSyncCheckpointUpdate {
+    FullSyncCheckpointUpdate {
+        bootstrap_query: spec.bootstrap_query.to_owned(),
+        status: spec.status,
+        next_page_token: spec.next_page_token.map(str::to_owned),
+        cursor_history_id: spec.cursor_history_id.map(str::to_owned),
+        pages_fetched: spec.pages_fetched,
+        messages_listed: spec.messages_listed,
+        messages_upserted: spec.messages_upserted,
+        labels_synced: spec.labels_synced,
+        started_at_epoch_s: spec.started_at_epoch_s,
+        updated_at_epoch_s: spec.updated_at_epoch_s,
+    }
+}
+
 #[test]
 fn list_label_usage_counts_only_the_requested_account() {
     let repo_root = unique_temp_dir("mailroom-mailbox-label-usage-scope");
@@ -2502,6 +2533,281 @@ fn finalize_full_sync_from_stage_with_no_messages_clears_existing_live_rows() {
     )
     .unwrap();
     assert!(results.is_empty());
+}
+
+#[test]
+fn prepare_full_sync_checkpoint_exposes_progress_in_mailbox_doctor() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-stage-checkpoint-doctor");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let account_id = "gmail:operator@example.com";
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let checkpoint = prepare_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[gmail_label("INBOX", "INBOX", "system")],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: None,
+            cursor_history_id: Some("100"),
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 1,
+            started_at_epoch_s: 100,
+            updated_at_epoch_s: 100,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(checkpoint.bootstrap_query, "newer_than:90d");
+    assert_eq!(checkpoint.status, FullSyncCheckpointStatus::Paging);
+    assert_eq!(checkpoint.staged_label_count, 1);
+    assert_eq!(checkpoint.staged_message_count, 0);
+
+    let mailbox = inspect_mailbox(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    let checkpoint = mailbox.full_sync_checkpoint.unwrap();
+    assert_eq!(checkpoint.account_id, account_id);
+    assert_eq!(checkpoint.bootstrap_query, "newer_than:90d");
+    assert_eq!(checkpoint.status, FullSyncCheckpointStatus::Paging);
+    assert_eq!(checkpoint.staged_label_count, 1);
+    assert_eq!(checkpoint.staged_message_count, 0);
+}
+
+#[test]
+fn update_full_sync_checkpoint_labels_preserves_staged_messages() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-stage-checkpoint-label-refresh");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let account_id = "gmail:operator@example.com";
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let checkpoint = prepare_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[gmail_label("INBOX", "INBOX", "system")],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-2"),
+            cursor_history_id: Some("100"),
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 1,
+            started_at_epoch_s: 100,
+            updated_at_epoch_s: 100,
+        }),
+    )
+    .unwrap();
+    let checkpoint = stage_full_sync_page_and_update_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[mailbox_message(
+            account_id,
+            "staged-1",
+            "Staged checkpoint subject",
+            &["INBOX"],
+            "INBOX",
+            &["1.1"],
+        )],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-3"),
+            cursor_history_id: checkpoint.cursor_history_id.as_deref(),
+            pages_fetched: 1,
+            messages_listed: 1,
+            messages_upserted: 1,
+            labels_synced: 1,
+            started_at_epoch_s: checkpoint.started_at_epoch_s,
+            updated_at_epoch_s: 101,
+        }),
+    )
+    .unwrap();
+    assert_eq!(checkpoint.staged_message_count, 1);
+    assert_eq!(checkpoint.staged_attachment_count, 1);
+
+    let refreshed = update_full_sync_checkpoint_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[
+            gmail_label("INBOX", "INBOX", "system"),
+            gmail_label("STARRED", "STARRED", "system"),
+        ],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-3"),
+            cursor_history_id: checkpoint.cursor_history_id.as_deref(),
+            pages_fetched: checkpoint.pages_fetched,
+            messages_listed: checkpoint.messages_listed,
+            messages_upserted: checkpoint.messages_upserted,
+            labels_synced: 2,
+            started_at_epoch_s: checkpoint.started_at_epoch_s,
+            updated_at_epoch_s: 102,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(refreshed.staged_label_count, 2);
+    assert_eq!(refreshed.staged_message_count, 1);
+    assert_eq!(refreshed.staged_attachment_count, 1);
+
+    let results = search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SearchQuery {
+            account_id: account_id.to_owned(),
+            terms: String::from("checkpoint"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn finalize_full_sync_from_stage_clears_checkpoint_state() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-stage-checkpoint-finalize-clear");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let account_id = "gmail:operator@example.com";
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let checkpoint = prepare_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[gmail_label("INBOX", "INBOX", "system")],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-2"),
+            cursor_history_id: Some("100"),
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 1,
+            started_at_epoch_s: 100,
+            updated_at_epoch_s: 100,
+        }),
+    )
+    .unwrap();
+    stage_full_sync_page_and_update_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[mailbox_message(
+            account_id,
+            "finalize-1",
+            "Finalize checkpoint subject",
+            &["INBOX"],
+            "INBOX",
+            &[],
+        )],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::ReadyToFinalize,
+            next_page_token: None,
+            cursor_history_id: checkpoint.cursor_history_id.as_deref(),
+            pages_fetched: 1,
+            messages_listed: 1,
+            messages_upserted: 1,
+            labels_synced: 1,
+            started_at_epoch_s: checkpoint.started_at_epoch_s,
+            updated_at_epoch_s: 101,
+        }),
+    )
+    .unwrap();
+
+    finalize_full_sync_from_stage(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        200,
+        &full_sync_state(account_id, 200),
+    )
+    .unwrap();
+
+    assert!(
+        get_full_sync_checkpoint(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            account_id,
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    let mailbox = inspect_mailbox(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(mailbox.full_sync_checkpoint.is_none());
+    assert_eq!(mailbox.message_count, 1);
 }
 
 #[test]

@@ -110,6 +110,15 @@ Persisted sync state behavior:
 - `last_incremental_sync_success_epoch_s` is updated only after a successful incremental replay
 - failed syncs update status and error details without overwriting the last successful timestamps
 
+Full bootstrap checkpoint behavior:
+
+- full bootstraps stage labels and message pages in SQLite before the live mailbox tables are replaced
+- the active checkpoint stores the bootstrap query, current Gmail `nextPageToken`, progress counters, and staged row counts
+- if a full sync dies mid-stream and the next run uses the same bootstrap query, Mailroom resumes from the saved checkpoint instead of replaying the whole bootstrap window
+- if the requested bootstrap query changes, Mailroom discards the old checkpoint and restarts from page 1
+- if Gmail rejects a saved `pageToken`, Mailroom clears the staged checkpoint and restarts the full bootstrap safely
+- the live mailbox cache remains unchanged until the staged full sync finalizes successfully
+
 Quota hardening behavior:
 
 - Gmail read calls are budgeted by documented quota units instead of raw request count
@@ -161,6 +170,13 @@ Relevant sync fields in JSON output include:
 - `last_full_sync_success_epoch_s`
 - `last_incremental_sync_success_epoch_s`
 - `cursor_history_id`
+- `full_sync_checkpoint`
+
+Relevant `sync run` output fields now also include:
+
+- `resumed_from_checkpoint`
+- `checkpoint_reused_pages`
+- `checkpoint_reused_messages_upserted`
 
 ## Safety boundaries
 

@@ -114,6 +114,12 @@ report:
 - last attempted sync epoch
 - last successful full-sync epoch
 - last successful incremental-sync epoch
+- active full-bootstrap checkpoint state when a staged full sync is in progress
+
+Full-bootstrap resume state is stored in SQLite, alongside the staged mailbox
+rows, not in a sidecar file under `.mailroom/`. The checkpoint row records the
+bootstrap query, current `nextPageToken`, highest observed history cursor,
+progress counters, and staged row counts for the active account.
 
 ## Hardening defaults
 
@@ -154,3 +160,5 @@ The current mailbox-oriented schema adds:
 - `gmail_message_labels`
 - `gmail_sync_state`
 - `gmail_message_search`
+- `gmail_full_sync_stage_*`
+- `gmail_full_sync_checkpoint`

@@ -2832,6 +2832,7 @@ mod tests {
         let report = SyncRunReport {
             mode: SyncMode::Incremental,
             fallback_from_history: false,
+            resumed_from_checkpoint: false,
             bootstrap_query: String::from("newer_than:90d"),
             cursor_history_id: String::from("123"),
             pages_fetched: 1,
@@ -2839,6 +2840,8 @@ mod tests {
             messages_upserted: 3,
             messages_deleted: 0,
             labels_synced: 4,
+            checkpoint_reused_pages: 0,
+            checkpoint_reused_messages_upserted: 0,
             store_message_count: 3,
             store_label_count: 4,
             store_indexed_message_count: 3,

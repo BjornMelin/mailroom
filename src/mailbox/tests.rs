@@ -241,7 +241,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(9));
+    assert_eq!(store_report.schema_version, Some(10));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -963,6 +963,291 @@ async fn full_sync_failure_after_staging_a_page_preserves_existing_mailbox_cache
 }
 
 #[tokio::test]
+async fn full_sync_resume_reuses_saved_page_token_after_midstream_failure() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "999").await;
+    mount_labels(&mock_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param_is_missing("pageToken"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-stage-1", "threadId": "t-stage-1"}],
+            "nextPageToken": "page-2",
+            "resultSizeEstimate": 2
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("pageToken", "page-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-stage-2", "threadId": "t-stage-2"}],
+            "resultSizeEstimate": 2
+        })))
+        .mount(&mock_server)
+        .await;
+    mount_message_metadata(&mock_server, "m-stage-1", "950", "First staged page").await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/m-stage-2"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("second page failed"))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+
+    let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("users/me/messages/m-stage-2"));
+
+    let checkpoint = store::mailbox::get_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(checkpoint.next_page_token.as_deref(), Some("page-2"));
+    assert_eq!(checkpoint.pages_fetched, 1);
+    assert_eq!(checkpoint.messages_upserted, 1);
+
+    mock_server.reset().await;
+    mount_profile(&mock_server, "999").await;
+    mount_labels(&mock_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("pageToken", "page-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-stage-2", "threadId": "t-stage-2"}],
+            "resultSizeEstimate": 2
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    mount_message_metadata(&mock_server, "m-stage-2", "960", "Resumed page").await;
+
+    let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap();
+
+    assert!(report.resumed_from_checkpoint);
+    assert_eq!(report.checkpoint_reused_pages, 1);
+    assert_eq!(report.checkpoint_reused_messages_upserted, 1);
+    assert_eq!(report.pages_fetched, 2);
+    assert_eq!(report.messages_upserted, 2);
+    assert_eq!(report.store_message_count, 2);
+    assert!(
+        store::mailbox::get_full_sync_checkpoint(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn full_sync_ready_to_finalize_checkpoint_skips_relisting_pages() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "999").await;
+    mount_labels(&mock_server).await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    seed_full_sync_checkpoint(
+        &config_report,
+        FullSyncCheckpointSeed {
+            bootstrap_query: &bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS),
+            status: store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize,
+            next_page_token: None,
+            pages_fetched: 1,
+            messages_listed: 1,
+            messages_upserted: 1,
+            staged_messages: vec![seeded_mailbox_message(
+                "gmail:operator@example.com",
+                "m-ready",
+                "950",
+                "Checkpoint finalize subject",
+            )],
+        },
+    );
+
+    let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap();
+
+    assert!(report.resumed_from_checkpoint);
+    assert_eq!(report.checkpoint_reused_pages, 1);
+    assert_eq!(report.checkpoint_reused_messages_upserted, 1);
+    assert_eq!(report.pages_fetched, 1);
+    assert_eq!(report.messages_upserted, 1);
+    assert_eq!(report.store_message_count, 1);
+    assert!(
+        store::mailbox::get_full_sync_checkpoint(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            "gmail:operator@example.com",
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn full_sync_invalid_resume_page_token_restarts_from_scratch() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "999").await;
+    mount_labels(&mock_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param("pageToken", "expired-page"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {
+                "code": 400,
+                "message": "Invalid pageToken value",
+                "status": "INVALID_ARGUMENT"
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param_is_missing("pageToken"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-fresh", "threadId": "t-fresh"}],
+            "resultSizeEstimate": 1
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    mount_message_metadata(&mock_server, "m-fresh", "980", "Fresh after reset").await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    seed_full_sync_checkpoint(
+        &config_report,
+        FullSyncCheckpointSeed {
+            bootstrap_query: &bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS),
+            status: store::mailbox::FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("expired-page"),
+            pages_fetched: 1,
+            messages_listed: 1,
+            messages_upserted: 1,
+            staged_messages: vec![seeded_mailbox_message(
+                "gmail:operator@example.com",
+                "m-stale-stage",
+                "970",
+                "Stale staged message",
+            )],
+        },
+    );
+
+    let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap();
+
+    assert!(!report.resumed_from_checkpoint);
+    assert_eq!(report.checkpoint_reused_pages, 0);
+    assert_eq!(report.messages_upserted, 1);
+
+    let stale_results = store::mailbox::search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::mailbox::SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("stale"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert!(stale_results.is_empty());
+
+    let fresh_results = store::mailbox::search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &store::mailbox::SearchQuery {
+            account_id: String::from("gmail:operator@example.com"),
+            terms: String::from("fresh"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(fresh_results.len(), 1);
+    assert_eq!(fresh_results[0].message_id, "m-fresh");
+}
+
+#[tokio::test]
+async fn full_sync_checkpoint_query_mismatch_restarts_from_first_page() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server, "999").await;
+    mount_labels(&mock_server).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages"))
+        .and(query_param_is_missing("pageToken"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "messages": [{"id": "m-fresh-query", "threadId": "t-fresh-query"}],
+            "resultSizeEstimate": 1
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    mount_message_metadata(
+        &mock_server,
+        "m-fresh-query",
+        "981",
+        "Fresh after query mismatch",
+    )
+    .await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    seed_full_sync_checkpoint(
+        &config_report,
+        FullSyncCheckpointSeed {
+            bootstrap_query: "in:anywhere newer_than:7d",
+            status: store::mailbox::FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-9"),
+            pages_fetched: 1,
+            messages_listed: 1,
+            messages_upserted: 1,
+            staged_messages: vec![seeded_mailbox_message(
+                "gmail:operator@example.com",
+                "m-old-query",
+                "970",
+                "Old query staged message",
+            )],
+        },
+    );
+
+    let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
+        .await
+        .unwrap();
+
+    assert!(!report.resumed_from_checkpoint);
+    assert_eq!(
+        report.bootstrap_query,
+        bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS)
+    );
+    assert_eq!(report.checkpoint_reused_pages, 0);
+    assert_eq!(report.store_message_count, 1);
+}
+
+#[tokio::test]
 async fn incremental_sync_skips_messages_deleted_on_later_history_pages() {
     let mock_server = MockServer::start().await;
     mount_profile(&mock_server, "350").await;
@@ -1403,9 +1688,145 @@ fn seed_existing_mailbox_with_custom_labels(
     .unwrap();
 }
 
+fn seeded_mailbox_message(
+    account_id: &str,
+    message_id: &str,
+    history_id: &str,
+    subject: &str,
+) -> store::mailbox::GmailMessageUpsertInput {
+    store::mailbox::GmailMessageUpsertInput {
+        account_id: account_id.to_owned(),
+        message_id: message_id.to_owned(),
+        thread_id: format!("thread-{message_id}"),
+        history_id: history_id.to_owned(),
+        internal_date_epoch_ms: 1_700_000_000_000,
+        snippet: subject.to_owned(),
+        subject: subject.to_owned(),
+        from_header: String::from("Alice <alice@example.com>"),
+        from_address: Some(String::from("alice@example.com")),
+        recipient_headers: String::from("operator@example.com"),
+        to_header: String::from("operator@example.com"),
+        cc_header: String::new(),
+        bcc_header: String::new(),
+        reply_to_header: String::new(),
+        size_estimate: 123,
+        automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
+        label_ids: vec![String::from("INBOX")],
+        label_names_text: String::from("INBOX"),
+        attachments: Vec::new(),
+    }
+}
+
+struct FullSyncCheckpointSeed<'a> {
+    bootstrap_query: &'a str,
+    status: store::mailbox::FullSyncCheckpointStatus,
+    next_page_token: Option<&'a str>,
+    pages_fetched: i64,
+    messages_listed: i64,
+    messages_upserted: i64,
+    staged_messages: Vec<store::mailbox::GmailMessageUpsertInput>,
+}
+
+fn seed_full_sync_checkpoint(config_report: &ConfigReport, seed: FullSyncCheckpointSeed<'_>) {
+    store::init(config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("999"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let account_id = "gmail:operator@example.com";
+    let labels = vec![crate::gmail::GmailLabel {
+        id: String::from("INBOX"),
+        name: String::from("INBOX"),
+        label_type: String::from("system"),
+        message_list_visibility: None,
+        label_list_visibility: None,
+        messages_total: None,
+        messages_unread: None,
+        threads_total: None,
+        threads_unread: None,
+    }];
+    let checkpoint = store::mailbox::prepare_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &labels,
+        &store::mailbox::FullSyncCheckpointUpdate {
+            bootstrap_query: seed.bootstrap_query.to_owned(),
+            status: store::mailbox::FullSyncCheckpointStatus::Paging,
+            next_page_token: None,
+            cursor_history_id: Some(String::from("999")),
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 1,
+            started_at_epoch_s: 100,
+            updated_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    if seed.staged_messages.is_empty() {
+        store::mailbox::update_full_sync_checkpoint_labels(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            account_id,
+            &labels,
+            &store::mailbox::FullSyncCheckpointUpdate {
+                bootstrap_query: seed.bootstrap_query.to_owned(),
+                status: seed.status,
+                next_page_token: seed.next_page_token.map(str::to_owned),
+                cursor_history_id: checkpoint.cursor_history_id,
+                pages_fetched: seed.pages_fetched,
+                messages_listed: seed.messages_listed,
+                messages_upserted: seed.messages_upserted,
+                labels_synced: 1,
+                started_at_epoch_s: checkpoint.started_at_epoch_s,
+                updated_at_epoch_s: 101,
+            },
+        )
+        .unwrap();
+        return;
+    }
+
+    store::mailbox::stage_full_sync_page_and_update_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &seed.staged_messages,
+        &store::mailbox::FullSyncCheckpointUpdate {
+            bootstrap_query: seed.bootstrap_query.to_owned(),
+            status: seed.status,
+            next_page_token: seed.next_page_token.map(str::to_owned),
+            cursor_history_id: checkpoint.cursor_history_id,
+            pages_fetched: seed.pages_fetched,
+            messages_listed: seed.messages_listed,
+            messages_upserted: seed.messages_upserted,
+            labels_synced: 1,
+            started_at_epoch_s: checkpoint.started_at_epoch_s,
+            updated_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+}
+
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/10-full-sync-checkpoints/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/09-mailbox-full-sync-staging/down.sql"

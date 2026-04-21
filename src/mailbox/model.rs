@@ -23,6 +23,7 @@ pub struct SyncRunOptions {
 pub struct SyncRunReport {
     pub mode: store::mailbox::SyncMode,
     pub fallback_from_history: bool,
+    pub resumed_from_checkpoint: bool,
     pub bootstrap_query: String,
     pub cursor_history_id: String,
     pub pages_fetched: usize,
@@ -30,6 +31,8 @@ pub struct SyncRunReport {
     pub messages_upserted: usize,
     pub messages_deleted: usize,
     pub labels_synced: usize,
+    pub checkpoint_reused_pages: usize,
+    pub checkpoint_reused_messages_upserted: usize,
     pub store_message_count: i64,
     pub store_label_count: i64,
     pub store_indexed_message_count: i64,
@@ -57,10 +60,13 @@ pub struct SearchReport {
 pub(crate) struct FinalizeSyncInput {
     pub(crate) mode: store::mailbox::SyncMode,
     pub(crate) fallback_from_history: bool,
+    pub(crate) resumed_from_checkpoint: bool,
     pub(crate) cursor_history_id: Option<String>,
     pub(crate) pages_fetched: usize,
     pub(crate) messages_listed: usize,
     pub(crate) messages_upserted: usize,
     pub(crate) messages_deleted: usize,
     pub(crate) labels_synced: usize,
+    pub(crate) checkpoint_reused_pages: usize,
+    pub(crate) checkpoint_reused_messages_upserted: usize,
 }

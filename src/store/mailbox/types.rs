@@ -80,6 +80,39 @@ pub(crate) struct SyncStateRecord {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct FullSyncCheckpointRecord {
+    pub(crate) account_id: String,
+    pub(crate) bootstrap_query: String,
+    pub(crate) status: FullSyncCheckpointStatus,
+    pub(crate) next_page_token: Option<String>,
+    pub(crate) cursor_history_id: Option<String>,
+    pub(crate) pages_fetched: i64,
+    pub(crate) messages_listed: i64,
+    pub(crate) messages_upserted: i64,
+    pub(crate) labels_synced: i64,
+    pub(crate) staged_label_count: i64,
+    pub(crate) staged_message_count: i64,
+    pub(crate) staged_message_label_count: i64,
+    pub(crate) staged_attachment_count: i64,
+    pub(crate) started_at_epoch_s: i64,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct FullSyncCheckpointUpdate {
+    pub(crate) bootstrap_query: String,
+    pub(crate) status: FullSyncCheckpointStatus,
+    pub(crate) next_page_token: Option<String>,
+    pub(crate) cursor_history_id: Option<String>,
+    pub(crate) pages_fetched: i64,
+    pub(crate) messages_listed: i64,
+    pub(crate) messages_upserted: i64,
+    pub(crate) labels_synced: i64,
+    pub(crate) started_at_epoch_s: i64,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct SearchQuery {
     pub(crate) account_id: String,
     pub(crate) terms: String,
@@ -219,12 +252,49 @@ pub(crate) struct ThreadMessageSnapshot {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct MailboxDoctorReport {
     pub(crate) sync_state: Option<SyncStateRecord>,
+    pub(crate) full_sync_checkpoint: Option<FullSyncCheckpointRecord>,
     pub(crate) message_count: i64,
     pub(crate) label_count: i64,
     pub(crate) indexed_message_count: i64,
     pub(crate) attachment_count: i64,
     pub(crate) vaulted_attachment_count: i64,
     pub(crate) attachment_export_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FullSyncCheckpointStatus {
+    Paging,
+    ReadyToFinalize,
+}
+
+impl FullSyncCheckpointStatus {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Paging => "paging",
+            Self::ReadyToFinalize => "ready_to_finalize",
+        }
+    }
+}
+
+impl Display for FullSyncCheckpointStatus {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for FullSyncCheckpointStatus {
+    type Err = SyncStateStatusDecodeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "paging" => Ok(Self::Paging),
+            "ready_to_finalize" => Ok(Self::ReadyToFinalize),
+            _ => Err(SyncStateStatusDecodeError::CheckpointStatus(
+                value.to_owned(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -256,7 +326,7 @@ impl FromStr for SyncMode {
         match value {
             "full" => Ok(Self::Full),
             "incremental" => Ok(Self::Incremental),
-            _ => Err(SyncStateStatusDecodeError::InvalidMode(value.to_owned())),
+            _ => Err(SyncStateStatusDecodeError::Mode(value.to_owned())),
         }
     }
 }
@@ -290,7 +360,7 @@ impl FromStr for SyncStatus {
         match value {
             "ok" => Ok(Self::Ok),
             "failed" => Ok(Self::Failed),
-            _ => Err(SyncStateStatusDecodeError::InvalidStatus(value.to_owned())),
+            _ => Err(SyncStateStatusDecodeError::Status(value.to_owned())),
         }
     }
 }
@@ -298,9 +368,11 @@ impl FromStr for SyncStatus {
 #[derive(Debug, Error)]
 pub(crate) enum SyncStateStatusDecodeError {
     #[error("invalid mailbox sync mode `{0}`")]
-    InvalidMode(String),
+    Mode(String),
     #[error("invalid mailbox sync status `{0}`")]
-    InvalidStatus(String),
+    Status(String),
+    #[error("invalid full sync checkpoint status `{0}`")]
+    CheckpointStatus(String),
 }
 
 #[derive(Debug, Error)]

@@ -151,6 +151,36 @@ impl StoreDoctorReport {
                     }
                     None => println!("mailbox_sync_status=<never-run>"),
                 }
+                match &mailbox.full_sync_checkpoint {
+                    Some(checkpoint) => {
+                        println!("mailbox_full_sync_checkpoint_status={}", checkpoint.status);
+                        println!(
+                            "mailbox_full_sync_checkpoint_bootstrap_query={}",
+                            checkpoint.bootstrap_query
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_pages_fetched={}",
+                            checkpoint.pages_fetched
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_messages_upserted={}",
+                            checkpoint.messages_upserted
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_staged_message_count={}",
+                            checkpoint.staged_message_count
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_next_page_token_present={}",
+                            checkpoint.next_page_token.is_some()
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_updated_at_epoch_s={}",
+                            checkpoint.updated_at_epoch_s
+                        );
+                    }
+                    None => println!("mailbox_full_sync_checkpoint_status=<none>"),
+                }
             }
             if let Some(workflows) = &self.workflows {
                 println!("workflow_count={}", workflows.workflow_count);
@@ -379,7 +409,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 9);
+        assert_eq!(report.schema_version, 10);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -397,13 +427,14 @@ mod tests {
                        'gmail_full_sync_stage_labels',
                        'gmail_full_sync_stage_messages',
                        'gmail_full_sync_stage_message_labels',
-                       'gmail_full_sync_stage_attachments'
+                       'gmail_full_sync_stage_attachments',
+                       'gmail_full_sync_checkpoint'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 10);
+        assert_eq!(substrate_tables, 11);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -513,11 +544,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(8, 9).unwrap_err();
+        let error = super::pending_migrations(9, 10).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 9 is newer than embedded migrations (8)")
+                .contains("database schema version 10 is newer than embedded migrations (9)")
         );
     }
 
@@ -687,6 +718,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/10-full-sync-checkpoints/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/09-mailbox-full-sync-staging/down.sql"
             ))
             .unwrap();
@@ -716,7 +752,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 9);
+        assert_eq!(migration_report.schema_version, 10);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();

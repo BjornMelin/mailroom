@@ -1,7 +1,11 @@
-use super::read::{count_indexed_messages, count_labels, count_messages, read_sync_state};
+use super::read::{
+    count_indexed_messages, count_labels, count_messages, read_full_sync_checkpoint,
+    read_sync_state,
+};
 use super::{
-    AttachmentExportEventInput, AttachmentVaultStateUpdate, GmailMessageUpsertInput,
-    MailboxWriteError, SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
+    AttachmentExportEventInput, AttachmentVaultStateUpdate, FullSyncCheckpointRecord,
+    FullSyncCheckpointUpdate, GmailMessageUpsertInput, MailboxWriteError, SyncStateRecord,
+    SyncStateUpdate, unique_sorted_strings,
 };
 use crate::gmail::GmailLabel;
 use crate::store::connection;
@@ -20,6 +24,38 @@ pub(crate) struct IncrementalSyncCommit<'a> {
     pub(crate) sync_state_update: &'a SyncStateUpdate,
 }
 
+pub(crate) fn reset_full_sync_progress(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<()> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    reset_full_sync_progress_with_connection(&mut connection, account_id)
+}
+
+pub(crate) fn prepare_full_sync_checkpoint(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    labels: &[GmailLabel],
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    prepare_full_sync_checkpoint_with_connection(&mut connection, account_id, labels, update)
+}
+
+pub(crate) fn update_full_sync_checkpoint_labels(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    labels: &[GmailLabel],
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    update_full_sync_checkpoint_labels_with_connection(&mut connection, account_id, labels, update)
+}
+
+#[cfg(test)]
 pub(crate) fn reset_full_sync_stage(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -29,6 +65,7 @@ pub(crate) fn reset_full_sync_stage(
     reset_full_sync_stage_with_connection(&mut connection, account_id)
 }
 
+#[cfg(test)]
 pub(crate) fn stage_full_sync_labels(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -39,6 +76,7 @@ pub(crate) fn stage_full_sync_labels(
     stage_full_sync_labels_with_connection(&mut connection, account_id, labels)
 }
 
+#[cfg(test)]
 pub(crate) fn stage_full_sync_messages(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -47,6 +85,22 @@ pub(crate) fn stage_full_sync_messages(
 ) -> Result<()> {
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     stage_full_sync_messages_with_connection(&mut connection, account_id, messages)
+}
+
+pub(crate) fn stage_full_sync_page_and_update_checkpoint(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    messages: &[GmailMessageUpsertInput],
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
+    stage_full_sync_page_and_update_checkpoint_with_connection(
+        &mut connection,
+        account_id,
+        messages,
+        update,
+    )
 }
 
 pub(crate) fn finalize_full_sync_from_stage(
@@ -303,6 +357,66 @@ pub(crate) fn upsert_sync_state(
     Ok(record)
 }
 
+fn reset_full_sync_progress_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+) -> Result<()> {
+    ensure!(
+        !account_id.is_empty(),
+        "mailbox staging requires a non-empty account_id"
+    );
+
+    let transaction = connection.transaction()?;
+    clear_full_sync_checkpoint_in_transaction(&transaction, account_id)?;
+    reset_full_sync_stage_in_transaction(&transaction, account_id)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn clear_full_sync_checkpoint_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM gmail_full_sync_checkpoint WHERE account_id = ?1",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+fn prepare_full_sync_checkpoint_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+    labels: &[GmailLabel],
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    ensure_checkpoint_matches_account(account_id, update)?;
+
+    let transaction = connection.transaction()?;
+    clear_full_sync_checkpoint_in_transaction(&transaction, account_id)?;
+    reset_full_sync_stage_in_transaction(&transaction, account_id)?;
+    stage_full_sync_labels_in_transaction(&transaction, account_id, labels)?;
+    let record = upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?;
+    transaction.commit()?;
+    Ok(record)
+}
+
+fn update_full_sync_checkpoint_labels_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+    labels: &[GmailLabel],
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    ensure_checkpoint_matches_account(account_id, update)?;
+
+    let transaction = connection.transaction()?;
+    stage_full_sync_labels_in_transaction(&transaction, account_id, labels)?;
+    let record = upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?;
+    transaction.commit()?;
+    Ok(record)
+}
+
+#[cfg(test)]
 fn reset_full_sync_stage_with_connection(
     connection: &mut Connection,
     account_id: &str,
@@ -341,6 +455,7 @@ fn reset_full_sync_stage_in_transaction(
     Ok(())
 }
 
+#[cfg(test)]
 fn stage_full_sync_labels_with_connection(
     connection: &mut Connection,
     account_id: &str,
@@ -411,6 +526,7 @@ fn stage_full_sync_labels_in_transaction(
     Ok(())
 }
 
+#[cfg(test)]
 fn stage_full_sync_messages_with_connection(
     connection: &mut Connection,
     account_id: &str,
@@ -429,6 +545,21 @@ fn stage_full_sync_messages_with_connection(
     stage_full_sync_messages_in_transaction(&transaction, account_id, messages)?;
     transaction.commit()?;
     Ok(())
+}
+
+fn stage_full_sync_page_and_update_checkpoint_with_connection(
+    connection: &mut Connection,
+    account_id: &str,
+    messages: &[GmailMessageUpsertInput],
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    ensure_checkpoint_matches_account(account_id, update)?;
+
+    let transaction = connection.transaction()?;
+    stage_full_sync_messages_in_transaction(&transaction, account_id, messages)?;
+    let record = upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?;
+    transaction.commit()?;
+    Ok(record)
 }
 
 fn stage_full_sync_messages_in_transaction(
@@ -620,8 +751,112 @@ fn finalize_full_sync_from_stage_with_connection(
     )?;
     insert_live_search_from_stage_in_transaction(&transaction, account_id)?;
     let record = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
+    clear_full_sync_checkpoint_in_transaction(&transaction, account_id)?;
+    reset_full_sync_stage_in_transaction(&transaction, account_id)?;
     transaction.commit()?;
     Ok(record)
+}
+
+fn ensure_checkpoint_matches_account(
+    account_id: &str,
+    update: &FullSyncCheckpointUpdate,
+) -> Result<()> {
+    ensure!(
+        !account_id.is_empty(),
+        "mailbox checkpoint requires a non-empty account_id"
+    );
+    ensure!(
+        !update.bootstrap_query.is_empty(),
+        "mailbox checkpoint requires a non-empty bootstrap_query"
+    );
+    Ok(())
+}
+
+fn upsert_full_sync_checkpoint_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    update: &FullSyncCheckpointUpdate,
+) -> Result<FullSyncCheckpointRecord> {
+    let staged_label_count = count_stage_rows(
+        transaction,
+        "SELECT COUNT(*) FROM gmail_full_sync_stage_labels WHERE account_id = ?1",
+        account_id,
+    )?;
+    let staged_message_count = count_stage_rows(
+        transaction,
+        "SELECT COUNT(*) FROM gmail_full_sync_stage_messages WHERE account_id = ?1",
+        account_id,
+    )?;
+    let staged_message_label_count = count_stage_rows(
+        transaction,
+        "SELECT COUNT(*) FROM gmail_full_sync_stage_message_labels WHERE account_id = ?1",
+        account_id,
+    )?;
+    let staged_attachment_count = count_stage_rows(
+        transaction,
+        "SELECT COUNT(*) FROM gmail_full_sync_stage_attachments WHERE account_id = ?1",
+        account_id,
+    )?;
+
+    transaction.execute(
+        "INSERT INTO gmail_full_sync_checkpoint (
+             account_id,
+             bootstrap_query,
+             status,
+             next_page_token,
+             cursor_history_id,
+             pages_fetched,
+             messages_listed,
+             messages_upserted,
+             labels_synced,
+             staged_label_count,
+             staged_message_count,
+             staged_message_label_count,
+             staged_attachment_count,
+             started_at_epoch_s,
+             updated_at_epoch_s
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT (account_id) DO UPDATE SET
+             bootstrap_query = excluded.bootstrap_query,
+             status = excluded.status,
+             next_page_token = excluded.next_page_token,
+             cursor_history_id = excluded.cursor_history_id,
+             pages_fetched = excluded.pages_fetched,
+             messages_listed = excluded.messages_listed,
+             messages_upserted = excluded.messages_upserted,
+             labels_synced = excluded.labels_synced,
+             staged_label_count = excluded.staged_label_count,
+             staged_message_count = excluded.staged_message_count,
+             staged_message_label_count = excluded.staged_message_label_count,
+             staged_attachment_count = excluded.staged_attachment_count,
+             started_at_epoch_s = excluded.started_at_epoch_s,
+             updated_at_epoch_s = excluded.updated_at_epoch_s",
+        params![
+            account_id,
+            &update.bootstrap_query,
+            update.status.as_str(),
+            &update.next_page_token,
+            &update.cursor_history_id,
+            update.pages_fetched,
+            update.messages_listed,
+            update.messages_upserted,
+            update.labels_synced,
+            staged_label_count,
+            staged_message_count,
+            staged_message_label_count,
+            staged_attachment_count,
+            update.started_at_epoch_s,
+            update.updated_at_epoch_s,
+        ],
+    )?;
+
+    read_full_sync_checkpoint(transaction, account_id)?
+        .ok_or_else(|| anyhow!("full sync checkpoint disappeared after upsert"))
+}
+
+fn count_stage_rows(connection: &Connection, sql: &str, account_id: &str) -> Result<i64> {
+    Ok(connection.query_row(sql, [account_id], |row| row.get(0))?)
 }
 
 fn replace_labels_in_transaction(
