@@ -241,7 +241,7 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(11));
+    assert_eq!(store_report.schema_version, Some(12));
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 
@@ -1846,6 +1846,11 @@ fn seed_full_sync_checkpoint(config_report: &ConfigReport, seed: FullSyncCheckpo
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(include_str!(
+            "../../migrations/12-sync-pacing-state-hardening/down.sql"
+        ))
+        .unwrap();
     connection
         .execute_batch(include_str!(
             "../../migrations/11-sync-pacing-state/down.sql"

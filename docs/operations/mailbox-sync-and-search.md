@@ -131,6 +131,8 @@ Quota hardening behavior:
   message-fetch concurrency down on Gmail concurrent-request pressure
 - adaptive pacing only upshifts learned pacing targets after later clean successful
   runs; one-off lower CLI ceilings do not permanently ratchet learned state down
+- persisted pacing rows are clamped to supported bounds on load so corrupt local
+  state cannot abort sync startup
 - sync reports now include estimated reserved quota units, pressure-classified retry
   counts, `Retry-After` wait totals, and both the capped and effective fetch pacing
 

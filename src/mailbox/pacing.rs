@@ -1,4 +1,6 @@
-use crate::gmail::{GmailClient, GmailQuotaMetricsSnapshot};
+use crate::gmail::{
+    GmailClient, GmailQuotaMetricsSnapshot, MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE,
+};
 use crate::mailbox::{DEFAULT_MESSAGE_FETCH_CONCURRENCY, DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE};
 use crate::store;
 use anyhow::Result;
@@ -7,6 +9,13 @@ const DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE: u32 = 3_000;
 const QUOTA_UPSHIFT_STEP_UNITS_PER_MINUTE: u32 = 500;
 const CLEAN_STREAK_FOR_QUOTA_UPSHIFT: i64 = 2;
 const CLEAN_STREAK_FOR_CONCURRENCY_UPSHIFT: i64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalizedPersistedPacingState {
+    learned_quota_units_per_minute: u32,
+    learned_message_fetch_concurrency: usize,
+    clean_run_streak: i64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RetryDelta {
@@ -95,12 +104,10 @@ impl AdaptiveSyncPacing {
         quota_units_cap_per_minute: u32,
         message_fetch_concurrency_cap: usize,
     ) -> Self {
-        let persisted_learned_quota_units_per_minute = persisted
-            .and_then(|state| u32::try_from(state.learned_quota_units_per_minute).ok())
-            .unwrap_or(DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE);
-        let persisted_learned_message_fetch_concurrency = persisted
-            .and_then(|state| usize::try_from(state.learned_message_fetch_concurrency).ok())
-            .unwrap_or(DEFAULT_MESSAGE_FETCH_CONCURRENCY);
+        let normalized = normalize_persisted_pacing_state(persisted);
+        let persisted_learned_quota_units_per_minute = normalized.learned_quota_units_per_minute;
+        let persisted_learned_message_fetch_concurrency =
+            normalized.learned_message_fetch_concurrency;
         let starting_quota_units_per_minute =
             persisted_learned_quota_units_per_minute.min(quota_units_cap_per_minute);
         let starting_message_fetch_concurrency = persisted_learned_message_fetch_concurrency
@@ -118,7 +125,7 @@ impl AdaptiveSyncPacing {
             adaptive_downshift_count: 0,
             persisted_learned_quota_units_per_minute,
             persisted_learned_message_fetch_concurrency,
-            persisted_clean_run_streak: persisted.map_or(0, |state| state.clean_run_streak),
+            persisted_clean_run_streak: normalized.clean_run_streak,
             saw_quota_pressure: false,
             saw_concurrency_pressure: false,
             saw_backend_retry: false,
@@ -258,6 +265,44 @@ impl AdaptiveSyncPacing {
     }
 }
 
+fn normalize_persisted_pacing_state(
+    persisted: Option<&store::mailbox::SyncPacingStateRecord>,
+) -> NormalizedPersistedPacingState {
+    let Some(persisted) = persisted else {
+        return NormalizedPersistedPacingState {
+            learned_quota_units_per_minute: DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE,
+            learned_message_fetch_concurrency: DEFAULT_MESSAGE_FETCH_CONCURRENCY,
+            clean_run_streak: 0,
+        };
+    };
+
+    NormalizedPersistedPacingState {
+        learned_quota_units_per_minute: normalize_learned_quota_units_per_minute(
+            persisted.learned_quota_units_per_minute,
+        ),
+        learned_message_fetch_concurrency: normalize_learned_message_fetch_concurrency(
+            persisted.learned_message_fetch_concurrency,
+        ),
+        clean_run_streak: persisted.clean_run_streak.max(0),
+    }
+}
+
+fn normalize_learned_quota_units_per_minute(raw: i64) -> u32 {
+    let clamped = raw.clamp(
+        i64::from(MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE),
+        i64::from(DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE),
+    );
+    u32::try_from(clamped).unwrap_or(DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE)
+}
+
+fn normalize_learned_message_fetch_concurrency(raw: i64) -> usize {
+    let clamped = raw.clamp(
+        1,
+        i64::try_from(DEFAULT_MESSAGE_FETCH_CONCURRENCY).unwrap_or(1),
+    );
+    usize::try_from(clamped).unwrap_or(DEFAULT_MESSAGE_FETCH_CONCURRENCY)
+}
+
 fn pressure_kind(
     saw_quota_pressure: bool,
     saw_concurrency_pressure: bool,
@@ -364,5 +409,94 @@ mod tests {
             update.last_pressure_kind,
             Some(crate::store::mailbox::SyncPacingPressureKind::Concurrency)
         );
+    }
+
+    #[test]
+    fn startup_normalizes_corrupt_persisted_state() {
+        let pacing_state = crate::store::mailbox::SyncPacingStateRecord {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: 0,
+            learned_message_fetch_concurrency: 0,
+            clean_run_streak: -3,
+            last_pressure_kind: None,
+            updated_at_epoch_s: 100,
+        };
+        let pacing = AdaptiveSyncPacing::new(Some(&pacing_state), 12_000, 4);
+
+        assert_eq!(
+            pacing.starting_quota_units_per_minute(),
+            crate::gmail::MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE
+        );
+        assert_eq!(pacing.current_message_fetch_concurrency(), 1);
+
+        let update = pacing.finalize_success("gmail:operator@example.com", 200);
+        assert_eq!(
+            update.learned_quota_units_per_minute,
+            i64::from(crate::gmail::MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE)
+        );
+        assert_eq!(update.learned_message_fetch_concurrency, 1);
+        assert_eq!(update.clean_run_streak, 1);
+    }
+
+    #[test]
+    fn mixed_pressure_downshifts_quota_and_concurrency_in_one_window() {
+        let mut pacing = AdaptiveSyncPacing::new(None, 12_000, 4);
+        pacing
+            .observe_metrics_snapshot(snapshot(1, 1, 0), None)
+            .unwrap();
+
+        let report = pacing.report();
+        assert_eq!(report.effective_quota_units_per_minute, 9_500);
+        assert_eq!(report.effective_message_fetch_concurrency, 3);
+        assert_eq!(report.adaptive_downshift_count, 1);
+
+        let update = pacing.finalize_success("gmail:operator@example.com", 200);
+        assert_eq!(
+            update.last_pressure_kind,
+            Some(crate::store::mailbox::SyncPacingPressureKind::Mixed)
+        );
+    }
+
+    #[test]
+    fn backend_retries_reset_clean_streak_without_lowering_learned_state() {
+        let pacing_state = crate::store::mailbox::SyncPacingStateRecord {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: 9_500,
+            learned_message_fetch_concurrency: 3,
+            clean_run_streak: 2,
+            last_pressure_kind: None,
+            updated_at_epoch_s: 100,
+        };
+        let mut pacing = AdaptiveSyncPacing::new(Some(&pacing_state), 12_000, 4);
+        pacing
+            .observe_metrics_snapshot(snapshot(0, 0, 1), None)
+            .unwrap();
+
+        let update = pacing.finalize_success("gmail:operator@example.com", 200);
+        assert_eq!(update.clean_run_streak, 0);
+        assert_eq!(update.learned_quota_units_per_minute, 9_500);
+        assert_eq!(update.learned_message_fetch_concurrency, 3);
+        assert!(update.last_pressure_kind.is_none());
+    }
+
+    #[test]
+    fn lower_cli_caps_do_not_permanently_lower_learned_state_without_pressure() {
+        let pacing_state = crate::store::mailbox::SyncPacingStateRecord {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: 12_000,
+            learned_message_fetch_concurrency: 4,
+            clean_run_streak: 1,
+            last_pressure_kind: None,
+            updated_at_epoch_s: 100,
+        };
+        let pacing = AdaptiveSyncPacing::new(Some(&pacing_state), 9_000, 3);
+
+        assert_eq!(pacing.starting_quota_units_per_minute(), 9_000);
+        assert_eq!(pacing.current_message_fetch_concurrency(), 3);
+
+        let update = pacing.finalize_success("gmail:operator@example.com", 200);
+        assert_eq!(update.clean_run_streak, 2);
+        assert_eq!(update.learned_quota_units_per_minute, 12_000);
+        assert_eq!(update.learned_message_fetch_concurrency, 4);
     }
 }

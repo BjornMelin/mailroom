@@ -436,7 +436,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 11);
+        assert_eq!(report.schema_version, 12);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -746,6 +746,11 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/12-sync-pacing-state-hardening/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/11-sync-pacing-state/down.sql"
             ))
             .unwrap();
@@ -785,7 +790,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 11);
+        assert_eq!(migration_report.schema_version, 12);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();

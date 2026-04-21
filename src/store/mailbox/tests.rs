@@ -556,6 +556,113 @@ fn inspect_mailbox_reports_sync_state_and_counts() {
 }
 
 #[test]
+fn upsert_sync_pacing_state_rejects_invalid_ranges() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-sync-pacing-checks");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 0,
+            threads_total: 0,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let result = upsert_sync_pacing_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SyncPacingStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: 4,
+            learned_message_fetch_concurrency: 0,
+            clean_run_streak: -1,
+            last_pressure_kind: None,
+            updated_at_epoch_s: 110,
+        },
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn get_sync_pacing_state_rejects_invalid_pressure_kind_values() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-sync-pacing-decode");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 0,
+            threads_total: 0,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS gmail_sync_pacing_state_updated_at_idx;
+             DROP TABLE gmail_sync_pacing_state;
+             CREATE TABLE gmail_sync_pacing_state (
+                 account_id TEXT PRIMARY KEY,
+                 learned_quota_units_per_minute INTEGER NOT NULL,
+                 learned_message_fetch_concurrency INTEGER NOT NULL,
+                 clean_run_streak INTEGER NOT NULL,
+                 last_pressure_kind TEXT,
+                 updated_at_epoch_s INTEGER NOT NULL,
+                 FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
+             ) STRICT;
+             CREATE INDEX gmail_sync_pacing_state_updated_at_idx
+                 ON gmail_sync_pacing_state (updated_at_epoch_s DESC);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO gmail_sync_pacing_state (
+                 account_id,
+                 learned_quota_units_per_minute,
+                 learned_message_fetch_concurrency,
+                 clean_run_streak,
+                 last_pressure_kind,
+                 updated_at_epoch_s
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "gmail:operator@example.com",
+                12_000_i64,
+                4_i64,
+                1_i64,
+                "bogus",
+                110_i64
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let result = super::get_sync_pacing_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn inspect_mailbox_tolerates_pre_attachment_schema() {
     let repo_root = unique_temp_dir("mailroom-mailbox-inspect-pre-attachments");
     let database_path = repo_root.path().join("mailroom.sqlite3");
