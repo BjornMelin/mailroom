@@ -2,7 +2,7 @@ use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
     GmailAttachmentUpsertInput, GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError,
     SearchQuery, SyncMode, SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
-    get_attachment_detail, get_sync_state, inspect_mailbox, list_attachments,
+    get_attachment_detail, get_sync_state, inspect_mailbox, list_attachments, list_label_usage,
     record_attachment_export, replace_labels, replace_labels_and_report_reindex, replace_messages,
     search::build_plain_fts5_query, search_messages, set_attachment_vault_state, upsert_messages,
     upsert_sync_state,
@@ -1230,6 +1230,138 @@ fn gmail_label(id: &str, name: &str, label_type: &str) -> GmailLabel {
         threads_total: None,
         threads_unread: None,
     }
+}
+
+#[test]
+fn list_label_usage_counts_only_the_requested_account() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-label-usage-scope");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("other@example.com"),
+            history_id: String::from("200"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:b"),
+            refreshed_at_epoch_s: 200,
+        },
+    )
+    .unwrap();
+
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+        &[
+            gmail_label("INBOX", "INBOX", "system"),
+            gmail_label("Label_1", "Project", "user"),
+        ],
+        100,
+    )
+    .unwrap();
+    replace_labels(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:other@example.com",
+        &[gmail_label("INBOX", "INBOX", "system")],
+        200,
+    )
+    .unwrap();
+
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("101"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Project launch"),
+            subject: String::from("Operator"),
+            from_header: String::from("Alice <alice@example.com>"),
+            from_address: Some(String::from("alice@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 123,
+            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
+            label_ids: vec![String::from("INBOX"), String::from("Label_1")],
+            label_names_text: String::from("INBOX Project"),
+            attachments: Vec::new(),
+        }],
+        100,
+    )
+    .unwrap();
+    upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[GmailMessageUpsertInput {
+            account_id: String::from("gmail:other@example.com"),
+            message_id: String::from("m-2"),
+            thread_id: String::from("t-2"),
+            history_id: String::from("201"),
+            internal_date_epoch_ms: 1_700_000_000_100,
+            snippet: String::from("Inbox only"),
+            subject: String::from("Other"),
+            from_header: String::from("Bob <bob@example.com>"),
+            from_address: Some(String::from("bob@example.com")),
+            recipient_headers: String::from("other@example.com"),
+            to_header: String::from("other@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 456,
+            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: Vec::new(),
+        }],
+        200,
+    )
+    .unwrap();
+
+    let labels = list_label_usage(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:operator@example.com",
+    )
+    .unwrap();
+
+    let inbox = labels
+        .iter()
+        .find(|label| label.label_id == "INBOX")
+        .unwrap();
+    assert_eq!(inbox.local_message_count, 1);
+    assert_eq!(inbox.local_thread_count, 1);
+
+    let project = labels
+        .iter()
+        .find(|label| label.label_id == "Label_1")
+        .unwrap();
+    assert_eq!(project.local_message_count, 1);
+    assert_eq!(project.local_thread_count, 1);
 }
 
 #[test]

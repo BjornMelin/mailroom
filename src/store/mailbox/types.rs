@@ -117,6 +117,29 @@ pub(crate) struct AttachmentListQuery {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct LabelUsageRecord {
+    pub(crate) label_id: String,
+    pub(crate) name: String,
+    pub(crate) label_type: String,
+    pub(crate) messages_total: Option<i64>,
+    pub(crate) threads_total: Option<i64>,
+    pub(crate) local_message_count: i64,
+    pub(crate) local_thread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct MailboxCoverageReport {
+    pub(crate) account_id: String,
+    pub(crate) message_count: i64,
+    pub(crate) thread_count: i64,
+    pub(crate) messages_with_attachments: i64,
+    pub(crate) messages_with_list_unsubscribe: i64,
+    pub(crate) messages_with_list_id: i64,
+    pub(crate) messages_with_precedence: i64,
+    pub(crate) messages_with_auto_submitted: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AttachmentListItem {
     pub(crate) attachment_key: String,
     pub(crate) message_id: String,

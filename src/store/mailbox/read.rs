@@ -1,7 +1,7 @@
 use super::{
-    AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, MailboxDoctorReport,
-    MailboxReadError, SyncMode, SyncStateRecord, SyncStatus, ThreadMessageSnapshot,
-    is_missing_mailbox_table_error,
+    AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, LabelUsageRecord,
+    MailboxCoverageReport, MailboxDoctorReport, MailboxReadError, SyncMode, SyncStateRecord,
+    SyncStatus, ThreadMessageSnapshot, is_missing_mailbox_table_error,
 };
 use crate::store::connection;
 use rusqlite::types::Type;
@@ -27,18 +27,37 @@ pub(crate) fn inspect_mailbox(
     database_path: &Path,
     busy_timeout_ms: u64,
 ) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
+    inspect_mailbox_with_scope(database_path, busy_timeout_ms, None)
+}
+
+pub(crate) fn inspect_mailbox_account(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
+    inspect_mailbox_with_scope(database_path, busy_timeout_ms, Some(account_id))
+}
+
+fn inspect_mailbox_with_scope(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: Option<&str>,
+) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
     if !database_path.try_exists()? {
         return Ok(None);
     }
 
     let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
         .map_err(|source| MailboxReadError::open_database(database_path, source))?;
-    let sync_state = latest_sync_state(&connection)?;
-    let message_count = count_messages(&connection, None)?;
-    let label_count = count_labels(&connection, None)?;
-    let indexed_message_count = count_indexed_messages(&connection, None)?;
+    let sync_state = match account_id {
+        Some(account_id) => read_sync_state(&connection, account_id)?,
+        None => latest_sync_state(&connection)?,
+    };
+    let message_count = count_messages(&connection, account_id)?;
+    let label_count = count_labels(&connection, account_id)?;
+    let indexed_message_count = count_indexed_messages(&connection, account_id)?;
     let (attachment_count, vaulted_attachment_count, attachment_export_count) =
-        attachment_counts(&connection)?;
+        attachment_counts(&connection, account_id)?;
 
     Ok(Some(MailboxDoctorReport {
         sync_state,
@@ -51,11 +70,14 @@ pub(crate) fn inspect_mailbox(
     }))
 }
 
-fn attachment_counts(connection: &Connection) -> Result<(i64, i64, i64), MailboxReadError> {
+fn attachment_counts(
+    connection: &Connection,
+    account_id: Option<&str>,
+) -> Result<(i64, i64, i64), MailboxReadError> {
     Ok((
-        count_attachments(connection, None)?,
-        count_vaulted_attachments(connection, None)?,
-        count_attachment_export_events(connection, None)?,
+        count_attachments(connection, account_id)?,
+        count_vaulted_attachments(connection, account_id)?,
+        count_attachment_export_events(connection, account_id)?,
     ))
 }
 
@@ -317,6 +339,116 @@ pub(crate) fn resolve_label_ids_by_names(
     }
 
     Ok(resolved)
+}
+
+pub(crate) fn list_label_usage(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Vec<LabelUsageRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(Vec::new());
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    let mut statement = match connection.prepare(
+        "SELECT
+             gl.label_id,
+             gl.name,
+             gl.label_type,
+             gl.messages_total,
+             gl.threads_total,
+             COUNT(DISTINCT gm.message_rowid) AS local_message_count,
+             COUNT(DISTINCT gm.thread_id) AS local_thread_count
+         FROM gmail_labels gl
+         LEFT JOIN gmail_message_labels gml
+           ON gml.label_id = gl.label_id
+         LEFT JOIN gmail_messages gm
+           ON gm.message_rowid = gml.message_rowid
+          AND gm.account_id = gl.account_id
+         WHERE gl.account_id = ?1
+         GROUP BY
+             gl.label_id,
+             gl.name,
+             gl.label_type,
+             gl.messages_total,
+             gl.threads_total
+         ORDER BY lower(gl.name) ASC, gl.label_id ASC",
+    ) {
+        Ok(statement) => statement,
+        Err(error) if is_missing_mailbox_table_error(&error) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let rows = statement
+        .query_map([account_id], |row| {
+            Ok(LabelUsageRecord {
+                label_id: row.get(0)?,
+                name: row.get(1)?,
+                label_type: row.get(2)?,
+                messages_total: row.get(3)?,
+                threads_total: row.get(4)?,
+                local_message_count: row.get(5)?,
+                local_thread_count: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn get_mailbox_coverage(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<MailboxCoverageReport>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    let report = connection
+        .query_row(
+            "SELECT
+                 COUNT(*) AS message_count,
+                 COUNT(DISTINCT thread_id) AS thread_count,
+                 COALESCE((
+                     SELECT COUNT(DISTINCT message_rowid)
+                     FROM gmail_message_attachments
+                     WHERE account_id = ?1
+                 ), 0) AS messages_with_attachments,
+                 COALESCE(SUM(CASE WHEN list_unsubscribe_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_list_unsubscribe,
+                 COALESCE(SUM(CASE WHEN list_id_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_list_id,
+                 COALESCE(SUM(CASE WHEN precedence_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_precedence,
+                 COALESCE(SUM(CASE WHEN auto_submitted_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_auto_submitted
+             FROM gmail_messages
+             WHERE account_id = ?1",
+            [account_id],
+            |row| {
+                Ok(MailboxCoverageReport {
+                    account_id: account_id.to_owned(),
+                    message_count: row.get(0)?,
+                    thread_count: row.get(1)?,
+                    messages_with_attachments: row.get(2)?,
+                    messages_with_list_unsubscribe: row.get(3)?,
+                    messages_with_list_id: row.get(4)?,
+                    messages_with_precedence: row.get(5)?,
+                    messages_with_auto_submitted: row.get(6)?,
+                })
+            },
+        )
+        .optional();
+
+    match report {
+        Ok(report) => Ok(report),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn read_sync_state(

@@ -15,6 +15,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Inspect read-only hardening and verification reports
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     /// Authenticate Mailroom against Gmail
     Auth {
         #[command(subcommand)]
@@ -95,6 +100,22 @@ pub enum Commands {
     Store {
         #[command(subcommand)]
         command: StoreCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// Audit the locally cached Gmail label taxonomy for overlaps and stale labels
+    Labels {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect whether the local mailbox cache is ready for real ruleset hardening
+    Verification {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -1,4 +1,5 @@
 mod attachments;
+mod audit;
 mod auth;
 mod automation;
 mod cli;
@@ -15,10 +16,11 @@ mod workspace;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    AccountCommand, AttachmentCommand, AuthCommand, AutomationCommand, AutomationRulesCommand,
-    CleanupCommand, Cli, Commands, ConfigCommand, DraftAttachmentCommand, DraftCommand,
-    GmailCommand, GmailLabelsCommand, SearchArgs, StoreCommand, SyncCommand, TriageBucketArg,
-    TriageCommand, WorkflowCommand, WorkflowPromoteTargetArg, WorkflowStageArg, WorkspaceCommand,
+    AccountCommand, AttachmentCommand, AuditCommand, AuthCommand, AutomationCommand,
+    AutomationRulesCommand, CleanupCommand, Cli, Commands, ConfigCommand, DraftAttachmentCommand,
+    DraftCommand, GmailCommand, GmailLabelsCommand, SearchArgs, StoreCommand, SyncCommand,
+    TriageBucketArg, TriageCommand, WorkflowCommand, WorkflowPromoteTargetArg, WorkflowStageArg,
+    WorkspaceCommand,
 };
 use serde::Serialize;
 use std::io::Read;
@@ -75,6 +77,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
     let paths = workspace::WorkspacePaths::from_repo_root(repo_root);
 
     match cli.command {
+        Commands::Audit { command } => handle_audit_command(&paths, command)?,
         Commands::Auth { command } => handle_auth_command(&paths, command).await?,
         Commands::Account { command } => handle_account_command(&paths, command).await?,
         Commands::Config { command } => handle_config_command(&paths, command)?,
@@ -125,6 +128,16 @@ struct CommandMetadata {
 
 fn command_metadata(command: &Commands) -> CommandMetadata {
     match command {
+        Commands::Audit { command } => match command {
+            AuditCommand::Labels { json } => CommandMetadata {
+                json: *json,
+                operation: "audit.labels",
+            },
+            AuditCommand::Verification { json } => CommandMetadata {
+                json: *json,
+                operation: "audit.verification",
+            },
+        },
         Commands::Auth { command } => match command {
             AuthCommand::Setup { json, .. } => CommandMetadata {
                 json: *json,
@@ -302,6 +315,17 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
     }
 }
 
+fn handle_audit_command(paths: &workspace::WorkspacePaths, command: AuditCommand) -> Result<()> {
+    let config_report = config::resolve(paths)?;
+
+    match command {
+        AuditCommand::Labels { json } => audit::labels(&config_report)?.print(json)?,
+        AuditCommand::Verification { json } => audit::verification(&config_report)?.print(json)?,
+    }
+
+    Ok(())
+}
+
 async fn handle_auth_command(
     paths: &workspace::WorkspacePaths,
     command: AuthCommand,
@@ -379,6 +403,7 @@ fn print_roadmap() {
         "v1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export\n\
          docs: docs/roadmap/v1-search-triage-draft-queue.md\n\
          architecture: docs/architecture/system-overview.md\n\
+         hardening: docs/operations/verification-and-hardening.md\n\
          plugin-assisted ops: docs/operations/plugin-assisted-workflows.md"
     );
 }
