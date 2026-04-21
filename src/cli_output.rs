@@ -169,6 +169,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             AutomationServiceError::RunAccountMismatch { .. } => {
                 (ErrorCode::AuthRequired, "automation.account.mismatch")
             }
+            AutomationServiceError::ApplyAlreadyInProgress { .. } => {
+                (ErrorCode::Conflict, "automation.apply.in_progress")
+            }
             AutomationServiceError::InvalidLimit
             | AutomationServiceError::ExecuteRequired
             | AutomationServiceError::RuleFileMissing { .. }
@@ -179,6 +182,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             }
             AutomationServiceError::RunNotFound { .. } => {
                 (ErrorCode::NotFound, "automation.not_found")
+            }
+            AutomationServiceError::ApplyLock { .. } => {
+                (ErrorCode::StorageFailure, "automation.apply_lock")
             }
             AutomationServiceError::BlockingTask { .. } => {
                 (ErrorCode::InternalFailure, "automation.blocking_join")
@@ -535,6 +541,21 @@ mod tests {
         assert_eq!(value["error"]["kind"], json!("automation.account.mismatch"));
         assert_eq!(value["error"]["operation"], json!("automation.apply"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
+    }
+
+    #[test]
+    fn automation_apply_in_progress_maps_to_conflict_code() {
+        let error = anyhow!(AutomationServiceError::ApplyAlreadyInProgress { run_id: 42 });
+
+        let report = describe_error(&error, "automation.apply");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("conflict"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("automation.apply.in_progress")
+        );
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(5));
     }
 
     #[test]
