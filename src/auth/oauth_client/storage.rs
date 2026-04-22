@@ -313,6 +313,13 @@ fn set_owner_only_file_permissions(_path: &Path) -> Result<()> {
 }
 
 fn persist_tmp_file(tmp_path: &Path, destination: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+    }
+
     fs::rename(tmp_path, destination)?;
     Ok(())
 }

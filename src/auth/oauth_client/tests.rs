@@ -96,6 +96,53 @@ fn imported_client_becomes_the_resolved_oauth_source() {
 }
 
 #[test]
+fn imported_client_overwrites_existing_workspace_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let workspace = workspace_for(&temp_dir);
+    let config = gmail_config();
+    fs::create_dir_all(&workspace.auth_dir).unwrap();
+    fs::write(
+        workspace.auth_dir.join("gmail-oauth-client.json"),
+        r#"{
+  "installed": {
+    "client_id": "stale-client.apps.googleusercontent.com",
+    "client_secret": "stale-secret",
+    "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token"
+  }
+}"#,
+    )
+    .unwrap();
+    let credentials_path = temp_dir.path().join("client_secret_updated.json");
+    fs::write(
+        &credentials_path,
+        r#"{
+  "installed": {
+    "client_id": "updated-client.apps.googleusercontent.com",
+    "client_secret": "updated-secret",
+    "project_id": "mailroom-updated",
+    "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "redirect_uris": ["http://localhost"]
+  }
+}"#,
+    )
+    .unwrap();
+
+    let imported =
+        import_google_desktop_client(&config, &workspace, Some(credentials_path)).unwrap();
+
+    assert_eq!(
+        imported.client_id,
+        "updated-client.apps.googleusercontent.com"
+    );
+    let saved = fs::read_to_string(workspace.auth_dir.join("gmail-oauth-client.json")).unwrap();
+    assert!(saved.contains("\"updated-client.apps.googleusercontent.com\""));
+    assert!(saved.contains("\"mailroom-updated\""));
+}
+
+#[test]
 fn manual_paste_preparation_builds_standard_google_client_file() {
     let temp_dir = TempDir::new().unwrap();
     let workspace = workspace_for(&temp_dir);

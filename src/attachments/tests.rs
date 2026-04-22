@@ -381,7 +381,7 @@ fn detail_with_vault(
         gmail_attachment_id: Some(String::from("att-1")),
         filename: String::from("statement.pdf"),
         mime_type: String::from("application/pdf"),
-        size_bytes: 5,
+        size_bytes: vault_size_bytes,
         content_disposition: None,
         content_id: None,
         is_inline: false,
@@ -397,6 +397,7 @@ fn detail_with_vault(
 }
 
 fn setup_export_test_fixture(vault_bytes: Vec<u8>) -> ExportTestFixture {
+    let vault_size_bytes = i64::try_from(vault_bytes.len()).unwrap();
     let temp_dir = TempDir::new().unwrap();
     let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
@@ -443,7 +444,7 @@ fn setup_export_test_fixture(vault_bytes: Vec<u8>) -> ExportTestFixture {
                 gmail_attachment_id: Some(String::from("att-1")),
                 filename: String::from("fixture.bin"),
                 mime_type: String::from("application/octet-stream"),
-                size_bytes: 5,
+                size_bytes: vault_size_bytes,
                 content_disposition: Some(String::from("attachment")),
                 content_id: None,
                 is_inline: false,
