@@ -127,7 +127,9 @@ progress counters, and staged row counts for the active account.
 Adaptive sync pacing is also stored in SQLite. The pacing row records the
 learned quota budget, learned message-fetch concurrency, clean-run streak, last
 observed pressure kind, and update time for the active account. The runtime
-sync flags still act as per-run ceilings over those learned values.
+sync flags still act as per-run ceilings over those learned values. Mailroom's
+native Gmail quota limiter consumes this persisted pacing state directly; there
+is no second external rate-limiter configuration surface to keep in sync.
 
 Historical sync telemetry is stored in SQLite as well. Mailroom appends one
 terminal run row per successful or failed sync attempt, prunes retained history

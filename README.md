@@ -114,6 +114,8 @@ All `--json` commands now use one normalized envelope:
 
 `mailroom sync run` is quota-aware by default. Full and incremental sync now:
 
+- use Mailroom's built-in Gmail quota limiter instead of an external generic
+  rate-limiter dependency
 - budget Gmail read calls by quota units, not raw request count
 - use `500`-message list/history pages for fewer API round trips
 - keep message payload fetch concurrency bounded by default

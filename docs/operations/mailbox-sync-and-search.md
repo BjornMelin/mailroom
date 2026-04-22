@@ -33,13 +33,13 @@ Run a normal sync:
 cargo run -- sync run --json
 ```
 
-Use the named preset when a deep resync needs extra headroom:
+Use the named preset when a deep resync should trade speed for safer, deeper audit coverage:
 
 ```bash
 cargo run -- sync run --profile deep-audit --json
 ```
 
-That preset currently expands to:
+That preset currently expands to a lower-throughput configuration with reduced quota and concurrency:
 
 ```bash
 cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
@@ -70,8 +70,8 @@ Explain the latest run against the best comparable clean baseline:
 cargo run -- sync perf explain --limit 20 --json
 ```
 
-For real-mailbox hardening before the first production ruleset, use one deeper
-audit sync once:
+For real-mailbox hardening before the first production ruleset, use one deeper,
+slower, safer audit sync once:
 
 ```bash
 cargo run -- sync run --profile deep-audit --json
@@ -174,6 +174,9 @@ Bounded pipeline behavior:
 
 Quota hardening behavior:
 
+- Mailroom uses a native Gmail quota limiter instead of a generic external
+  rate-limiter crate so the sync path can keep Gmail-specific weighted costs,
+  adaptive reconfiguration, and integrated pacing telemetry in one place
 - Gmail read calls are budgeted by documented quota units instead of raw request count
 - `users.messages.list` and `users.messages.get` are paced under one shared limiter
 - GET retries respect `Retry-After` when present
