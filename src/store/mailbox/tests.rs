@@ -624,10 +624,17 @@ fn upsert_sync_pacing_state_rejects_invalid_ranges() {
     );
 
     let error = result.unwrap_err();
-    assert!(
-        error.to_string().contains("CHECK constraint failed"),
-        "expected pacing range constraint failure, got: {error:#}"
-    );
+    match error.downcast_ref::<rusqlite::Error>() {
+        Some(rusqlite::Error::SqliteFailure(_, Some(message))) => {
+            assert!(
+                message.contains("learned_quota_units_per_minute BETWEEN 5 AND 12000")
+                    || message.contains("learned_message_fetch_concurrency >= 1")
+                    || message.contains("clean_run_streak >= 0"),
+                "expected pacing range constraint failure, got: {message}"
+            );
+        }
+        other => panic!("expected sqlite constraint query error, got: {other:?}"),
+    }
 }
 
 #[test]
@@ -651,42 +658,31 @@ fn get_sync_pacing_state_rejects_invalid_pressure_kind_values() {
     )
     .unwrap();
 
+    upsert_sync_pacing_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SyncPacingStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: 12_000,
+            learned_message_fetch_concurrency: 4,
+            clean_run_streak: 1,
+            last_pressure_kind: None,
+            updated_at_epoch_s: 110,
+        },
+    )
+    .unwrap();
+
     let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
     connection
-        .execute_batch(
-            "DROP INDEX IF EXISTS gmail_sync_pacing_state_updated_at_idx;
-             DROP TABLE gmail_sync_pacing_state;
-             CREATE TABLE gmail_sync_pacing_state (
-                 account_id TEXT PRIMARY KEY,
-                 learned_quota_units_per_minute INTEGER NOT NULL,
-                 learned_message_fetch_concurrency INTEGER NOT NULL,
-                 clean_run_streak INTEGER NOT NULL,
-                 last_pressure_kind TEXT,
-                 updated_at_epoch_s INTEGER NOT NULL,
-                 FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
-             ) STRICT;
-             CREATE INDEX gmail_sync_pacing_state_updated_at_idx
-                 ON gmail_sync_pacing_state (updated_at_epoch_s DESC);",
-        )
+        .execute_batch("PRAGMA ignore_check_constraints = ON;")
         .unwrap();
     connection
         .execute(
-            "INSERT INTO gmail_sync_pacing_state (
-                 account_id,
-                 learned_quota_units_per_minute,
-                 learned_message_fetch_concurrency,
-                 clean_run_streak,
-                 last_pressure_kind,
-                 updated_at_epoch_s
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                "gmail:operator@example.com",
-                12_000_i64,
-                4_i64,
-                1_i64,
-                "bogus",
-                110_i64
-            ],
+            "UPDATE gmail_sync_pacing_state
+             SET last_pressure_kind = ?2,
+                 updated_at_epoch_s = ?3
+             WHERE account_id = ?1",
+            rusqlite::params!["gmail:operator@example.com", "bogus", 111_i64],
         )
         .unwrap();
     drop(connection);

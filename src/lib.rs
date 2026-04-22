@@ -13,7 +13,7 @@ mod time;
 mod workflows;
 mod workspace;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use clap::Parser;
 use cli::{
     AccountCommand, AttachmentCommand, AuditCommand, AuthCommand, AutomationCommand,
@@ -35,6 +35,12 @@ pub(crate) enum CliInputError {
     SnoozeRequiresUntilOrClear,
     #[error("use either --until or --clear, not both")]
     SnoozeUntilConflict,
+    #[error("--recent-days must be greater than zero")]
+    RecentDaysZero,
+    #[error("--quota-units-per-minute must be greater than zero")]
+    QuotaUnitsPerMinuteZero,
+    #[error("--message-fetch-concurrency must be greater than zero")]
+    MessageFetchConcurrencyZero,
     #[error("use exactly one of --text, --file, or --stdin")]
     DraftBodyInputSourceConflict,
     #[error("failed to read {path}: {source}")]
@@ -597,23 +603,19 @@ fn resolve_sync_run_options(args: &SyncRunArgs) -> Result<mailbox::SyncRunOption
         .unwrap_or_else(default_sync_profile_defaults);
     let recent_days = args.recent_days.unwrap_or(defaults.recent_days);
     if recent_days == 0 {
-        return Err(anyhow!("--recent-days must be greater than zero"));
+        return Err(CliInputError::RecentDaysZero.into());
     }
     let quota_units_per_minute = args
         .quota_units_per_minute
         .unwrap_or(defaults.quota_units_per_minute);
     if quota_units_per_minute == 0 {
-        return Err(anyhow!(
-            "--quota-units-per-minute must be greater than zero"
-        ));
+        return Err(CliInputError::QuotaUnitsPerMinuteZero.into());
     }
     let message_fetch_concurrency = args
         .message_fetch_concurrency
         .unwrap_or(defaults.message_fetch_concurrency);
     if message_fetch_concurrency == 0 {
-        return Err(anyhow!(
-            "--message-fetch-concurrency must be greater than zero"
-        ));
+        return Err(CliInputError::MessageFetchConcurrencyZero.into());
     }
 
     Ok(mailbox::SyncRunOptions {
@@ -1327,6 +1329,10 @@ runtime_root = "{}"
         };
 
         let error = resolve_sync_run_options(&args).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::RecentDaysZero)
+        ));
         assert_eq!(error.to_string(), "--recent-days must be greater than zero");
     }
 
@@ -1342,6 +1348,10 @@ runtime_root = "{}"
         };
 
         let error = resolve_sync_run_options(&args).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::QuotaUnitsPerMinuteZero)
+        ));
         assert_eq!(
             error.to_string(),
             "--quota-units-per-minute must be greater than zero"
@@ -1360,6 +1370,10 @@ runtime_root = "{}"
         };
 
         let error = resolve_sync_run_options(&args).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<CliInputError>(),
+            Some(CliInputError::MessageFetchConcurrencyZero)
+        ));
         assert_eq!(
             error.to_string(),
             "--message-fetch-concurrency must be greater than zero"

@@ -530,6 +530,18 @@ mod tests {
     }
 
     #[test]
+    fn sync_cli_zero_value_errors_map_to_validation_failed_code() {
+        let error = anyhow!(CliInputError::RecentDaysZero);
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("cli.validation"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
     fn automation_run_account_mismatch_maps_to_auth_required_code() {
         let error = anyhow!(AutomationServiceError::RunAccountMismatch {
             run_id: 42,
