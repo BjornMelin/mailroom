@@ -135,9 +135,12 @@ impl GmailClient {
     }
 
     pub(super) async fn active_credentials(&self) -> GmailResult<StoredCredentials> {
-        let credentials = self
-            .credential_store
-            .load()
+        let credential_store = self.credential_store.clone();
+        let credentials = tokio::task::spawn_blocking(move || credential_store.load())
+            .await
+            .map_err(|source| GmailClientError::CredentialLoad {
+                source: source.into(),
+            })?
             .map_err(|source| GmailClientError::CredentialLoad { source })?
             .ok_or(GmailClientError::MissingCredentials)?;
 
@@ -202,8 +205,13 @@ impl GmailClient {
         if refreshed.refresh_token.is_none() {
             refreshed.refresh_token = credentials.refresh_token.clone();
         }
-        self.credential_store
-            .save(&refreshed)
+        let credential_store = self.credential_store.clone();
+        let refreshed_for_save = refreshed.clone();
+        tokio::task::spawn_blocking(move || credential_store.save(&refreshed_for_save))
+            .await
+            .map_err(|source| GmailClientError::CredentialSave {
+                source: source.into(),
+            })?
             .map_err(|source| GmailClientError::CredentialSave { source })?;
         Ok(refreshed)
     }
