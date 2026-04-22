@@ -283,6 +283,27 @@ fn gmail_usage_limit_forbidden_errors_are_classified_as_quota_pressure() {
 }
 
 #[test]
+fn gmail_daily_limit_forbidden_errors_are_classified_as_quota_pressure() {
+    let body = serde_json::to_string(&json!({
+        "error": {
+            "errors": [
+                {
+                    "domain": "usageLimits",
+                    "reason": "dailyLimitExceeded",
+                    "message": "daily quota exhausted"
+                }
+            ]
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(
+        classify_retryable_api_response(StatusCode::FORBIDDEN, &body),
+        Some(GmailRetryClassification::QuotaPressure)
+    );
+}
+
+#[test]
 fn gmail_concurrent_request_429_errors_are_classified_as_concurrency_pressure() {
     let body = serde_json::to_string(&json!({
         "error": {
@@ -378,6 +399,25 @@ async fn list_labels_retries_gmail_user_rate_limit_forbidden_errors() {
 
     let requests = mock_server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
+}
+
+#[tokio::test]
+async fn get_thread_context_reports_quota_exhaustion_for_oversized_requests() {
+    let mock_server = MockServer::start().await;
+    let temp_dir = TempDir::new().unwrap();
+    let client = test_client(&mock_server, &temp_dir)
+        .with_quota_budget(5)
+        .unwrap();
+
+    let error = client.get_thread_context("thread-123").await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        GmailClientError::QuotaExhausted {
+            requested_units: 10,
+            available_units_per_minute: 5,
+        }
+    ));
 }
 
 #[tokio::test]

@@ -9,10 +9,11 @@ use crate::auth::file_store::{CredentialStore, StoredCredentials};
 use crate::auth::oauth_client::resolve as resolve_oauth_client;
 use crate::config::GmailConfig;
 use oauth2::{AuthUrl, ClientId, ClientSecret, RefreshToken, TokenUrl, basic::BasicClient};
+use rand::Rng;
 use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
 use secrecy::ExposeSecret;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
 
 const GMAIL_MAX_RETRY_DELAY_MS: u64 = 32_000;
@@ -148,8 +149,7 @@ impl GmailClient {
             crate::time::current_epoch_seconds()
                 .map_err(|source| GmailClientError::Clock { source })?,
         )
-        .map_err(|source| GmailClientError::ResponseDecode {
-            path: String::from("credentials.expiry"),
+        .map_err(|source| GmailClientError::Clock {
             source: source.into(),
         })?;
         if credentials.should_refresh(TOKEN_REFRESH_LEEWAY_SECS, now_epoch_s) {
@@ -424,9 +424,9 @@ async fn send_request_with_retry(
             policy
                 .acquire(request_cost)
                 .await
-                .map_err(|requested_units| GmailClientError::InvalidQuotaBudget {
-                    units_per_minute: policy.units_per_minute(),
-                    minimum_units_per_minute: requested_units,
+                .map_err(|requested_units| GmailClientError::QuotaExhausted {
+                    requested_units,
+                    available_units_per_minute: policy.units_per_minute(),
                 })?;
             policy.record_http_attempt();
         }
@@ -507,7 +507,7 @@ fn classify_forbidden_retry(body: &str) -> Option<GmailRetryClassification> {
                 .errors
                 .into_iter()
                 .find_map(|detail| match detail.reason.as_deref() {
-                    Some("rateLimitExceeded" | "userRateLimitExceeded") => {
+                    Some("dailyLimitExceeded" | "rateLimitExceeded" | "userRateLimitExceeded") => {
                         Some(GmailRetryClassification::QuotaPressure)
                     }
                     _ => None,
@@ -544,11 +544,7 @@ fn is_concurrent_request_limit_message(message: &str) -> bool {
         .contains("too many concurrent requests for user")
 }
 
-fn jittered_retry_delay(default_delay_ms: u64, attempt: usize) -> Duration {
-    let jitter_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.subsec_millis() as u64)
-        .unwrap_or((attempt as u64).saturating_mul(17))
-        % GMAIL_RETRY_JITTER_MS.max(1);
+fn jittered_retry_delay(default_delay_ms: u64, _attempt: usize) -> Duration {
+    let jitter_ms = rand::thread_rng().gen_range(0..GMAIL_RETRY_JITTER_MS.max(1));
     Duration::from_millis(default_delay_ms.saturating_add(jitter_ms))
 }

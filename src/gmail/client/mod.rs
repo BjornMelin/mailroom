@@ -34,6 +34,13 @@ pub(crate) enum GmailClientError {
         units_per_minute: u32,
         minimum_units_per_minute: u32,
     },
+    #[error(
+        "gmail quota budget cannot satisfy a request needing {requested_units} units with only {available_units_per_minute} units per minute"
+    )]
+    QuotaExhausted {
+        requested_units: u32,
+        available_units_per_minute: u32,
+    },
     #[error("mailroom is not authenticated; run `mailroom auth login` first")]
     MissingCredentials,
     #[error("stored Gmail credentials do not include a refresh token")]
