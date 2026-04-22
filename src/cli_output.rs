@@ -668,6 +668,77 @@ mod tests {
     }
 
     #[test]
+    fn mailbox_write_account_mismatch_maps_to_auth_required_code() {
+        let error = anyhow!(MailboxWriteError::AccountMismatch {
+            expected_account_id: String::from("gmail:expected@example.com"),
+            outcome_account_id: String::from("gmail:actual@example.com"),
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("auth_required"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("store.mailbox.write.account_mismatch")
+        );
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
+    }
+
+    #[test]
+    fn mailbox_write_attachment_not_found_maps_to_not_found_code() {
+        let error = anyhow!(MailboxWriteError::AttachmentNotFound {
+            account_id: String::from("gmail:operator@example.com"),
+            attachment_key: String::from("m-1:1.2"),
+        });
+
+        let report = describe_error(&error, "attachment.fetch");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("not_found"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("store.mailbox.write.attachment_not_found")
+        );
+        assert_eq!(value["error"]["operation"], json!("attachment.fetch"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(4));
+    }
+
+    #[test]
+    fn mailbox_write_invariant_violation_maps_to_internal_failure_code() {
+        let error = anyhow!(MailboxWriteError::InvariantViolation {
+            operation: "persist_successful_sync_outcome",
+            detail: String::from("summary disappeared"),
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.mailbox.write"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
+    fn mailbox_write_row_count_mismatch_maps_to_internal_failure_code() {
+        let error = anyhow!(MailboxWriteError::RowCountMismatch {
+            operation: "delete_messages",
+            expected: 1,
+            actual: 0,
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.mailbox.write"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
     fn attachment_show_not_found_maps_to_not_found_exit_code() {
         let error = anyhow!(
             crate::attachments::AttachmentServiceError::AttachmentNotFound {

@@ -2436,7 +2436,18 @@ fn insert_live_search_from_stage_in_transaction(
              stage.from_header,
              stage.recipient_headers,
              stage.snippet,
-             stage.label_names_text
+             COALESCE((
+                 SELECT group_concat(name, ' ')
+                 FROM (
+                     SELECT gl.name AS name
+                     FROM gmail_message_labels gml
+                     INNER JOIN gmail_labels gl
+                       ON gl.account_id = gm.account_id
+                      AND gl.label_id = gml.label_id
+                     WHERE gml.message_rowid = gm.message_rowid
+                     ORDER BY gl.name ASC
+                 )
+             ), '')
          FROM gmail_full_sync_stage_messages stage
          INNER JOIN gmail_messages gm
            ON gm.account_id = stage.account_id

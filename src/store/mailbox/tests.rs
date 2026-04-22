@@ -2933,7 +2933,7 @@ fn update_full_sync_checkpoint_labels_preserves_staged_messages() {
         config_report.config.store.busy_timeout_ms,
         account_id,
         &[
-            gmail_label("INBOX", "INBOX", "system"),
+            gmail_label("INBOX", "PrimaryInbox", "system"),
             gmail_label("STARRED", "STARRED", "system"),
         ],
         &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
@@ -2970,6 +2970,48 @@ fn update_full_sync_checkpoint_labels_preserves_staged_messages() {
     )
     .unwrap();
     assert!(results.is_empty());
+
+    finalize_full_sync_from_stage(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        103,
+        &full_sync_state(account_id, 103),
+    )
+    .unwrap();
+
+    let starred_results = search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SearchQuery {
+            account_id: account_id.to_owned(),
+            terms: String::from("PrimaryInbox"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(starred_results.len(), 1);
+    assert_eq!(starred_results[0].message_id, "staged-1");
+
+    let stale_label_results = search_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SearchQuery {
+            account_id: account_id.to_owned(),
+            terms: String::from("INBOX"),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: 10,
+        },
+    )
+    .unwrap();
+    assert!(stale_label_results.is_empty());
 }
 
 #[test]
