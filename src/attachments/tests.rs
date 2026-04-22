@@ -13,6 +13,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::TempDir;
 
+struct ExportTestFixture {
+    temp_dir: TempDir,
+    config_report: crate::config::ConfigReport,
+}
+
 #[test]
 fn export_filename_falls_back_when_gmail_filename_is_blank() {
     assert_eq!(export_filename("", "m-1:2"), "attachment-m-12.bin");
@@ -209,82 +214,13 @@ async fn show_returns_no_active_account_without_account_state() {
 
 #[tokio::test]
 async fn export_returns_destination_conflict_for_existing_different_file() {
-    let temp_dir = TempDir::new().unwrap();
-    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    accounts::upsert_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &accounts::UpsertAccountInput {
-            email_address: String::from("operator@example.com"),
-            history_id: String::from("100"),
-            messages_total: 1,
-            threads_total: 1,
-            access_scope: String::from("scope:a"),
-            refreshed_at_epoch_s: 100,
-        },
-    )
-    .unwrap();
-    crate::store::mailbox::upsert_messages(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &[crate::store::mailbox::GmailMessageUpsertInput {
-            account_id: String::from("gmail:operator@example.com"),
-            message_id: String::from("m-1"),
-            thread_id: String::from("t-1"),
-            history_id: String::from("101"),
-            internal_date_epoch_ms: 1_700_000_000_000,
-            snippet: String::from("Attachment fixture"),
-            subject: String::from("Fixture"),
-            from_header: String::from("Fixture <fixture@example.com>"),
-            from_address: Some(String::from("fixture@example.com")),
-            recipient_headers: String::from("operator@example.com"),
-            to_header: String::from("operator@example.com"),
-            cc_header: String::new(),
-            bcc_header: String::new(),
-            reply_to_header: String::new(),
-            size_estimate: 256,
-            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
-            label_ids: vec![String::from("INBOX")],
-            label_names_text: String::from("INBOX"),
-            attachments: vec![GmailAttachmentUpsertInput {
-                attachment_key: String::from("m-1:1.2"),
-                part_id: String::from("1.2"),
-                gmail_attachment_id: Some(String::from("att-1")),
-                filename: String::from("fixture.bin"),
-                mime_type: String::from("application/octet-stream"),
-                size_bytes: 5,
-                content_disposition: Some(String::from("attachment")),
-                content_id: None,
-                is_inline: false,
-            }],
-        }],
-        100,
-    )
-    .unwrap();
-    let vault_write = write_vault_bytes(&paths.vault_dir, b"hello".to_vec()).unwrap();
-    crate::store::mailbox::set_attachment_vault_state(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &crate::store::mailbox::AttachmentVaultStateUpdate {
-            account_id: String::from("gmail:operator@example.com"),
-            attachment_key: String::from("m-1:1.2"),
-            content_hash: vault_write.content_hash.clone(),
-            relative_path: vault_write.relative_path,
-            size_bytes: vault_write.size_bytes,
-            fetched_at_epoch_s: 101,
-        },
-    )
-    .unwrap();
-
-    let destination_path = temp_dir.path().join("exports/conflict.bin");
+    let fixture = setup_export_test_fixture(b"hello".to_vec());
+    let destination_path = fixture.temp_dir.path().join("exports/conflict.bin");
     fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
     fs::write(&destination_path, b"world").unwrap();
 
     let error = export(
-        &config_report,
+        &fixture.config_report,
         String::from("m-1:1.2"),
         Some(destination_path.clone()),
     )
@@ -300,76 +236,9 @@ async fn export_returns_destination_conflict_for_existing_different_file() {
 
 #[tokio::test]
 async fn export_removes_copied_file_when_event_persistence_fails() {
-    let temp_dir = TempDir::new().unwrap();
-    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    accounts::upsert_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &accounts::UpsertAccountInput {
-            email_address: String::from("operator@example.com"),
-            history_id: String::from("100"),
-            messages_total: 1,
-            threads_total: 1,
-            access_scope: String::from("scope:a"),
-            refreshed_at_epoch_s: 100,
-        },
-    )
-    .unwrap();
-    crate::store::mailbox::upsert_messages(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &[crate::store::mailbox::GmailMessageUpsertInput {
-            account_id: String::from("gmail:operator@example.com"),
-            message_id: String::from("m-1"),
-            thread_id: String::from("t-1"),
-            history_id: String::from("101"),
-            internal_date_epoch_ms: 1_700_000_000_000,
-            snippet: String::from("Attachment fixture"),
-            subject: String::from("Fixture"),
-            from_header: String::from("Fixture <fixture@example.com>"),
-            from_address: Some(String::from("fixture@example.com")),
-            recipient_headers: String::from("operator@example.com"),
-            to_header: String::from("operator@example.com"),
-            cc_header: String::new(),
-            bcc_header: String::new(),
-            reply_to_header: String::new(),
-            size_estimate: 256,
-            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
-            label_ids: vec![String::from("INBOX")],
-            label_names_text: String::from("INBOX"),
-            attachments: vec![GmailAttachmentUpsertInput {
-                attachment_key: String::from("m-1:1.2"),
-                part_id: String::from("1.2"),
-                gmail_attachment_id: Some(String::from("att-1")),
-                filename: String::from("fixture.bin"),
-                mime_type: String::from("application/octet-stream"),
-                size_bytes: 5,
-                content_disposition: Some(String::from("attachment")),
-                content_id: None,
-                is_inline: false,
-            }],
-        }],
-        100,
-    )
-    .unwrap();
-    let vault_write = write_vault_bytes(&paths.vault_dir, b"hello".to_vec()).unwrap();
-    crate::store::mailbox::set_attachment_vault_state(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &crate::store::mailbox::AttachmentVaultStateUpdate {
-            account_id: String::from("gmail:operator@example.com"),
-            attachment_key: String::from("m-1:1.2"),
-            content_hash: vault_write.content_hash.clone(),
-            relative_path: vault_write.relative_path,
-            size_bytes: vault_write.size_bytes,
-            fetched_at_epoch_s: 101,
-        },
-    )
-    .unwrap();
-    let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    let fixture = setup_export_test_fixture(b"hello".to_vec());
+    let connection =
+        rusqlite::Connection::open(&fixture.config_report.config.store.database_path).unwrap();
     connection
         .execute_batch(
             "
@@ -382,9 +251,9 @@ async fn export_removes_copied_file_when_event_persistence_fails() {
         )
         .unwrap();
 
-    let destination_path = temp_dir.path().join("exports/export.bin");
+    let destination_path = fixture.temp_dir.path().join("exports/export.bin");
     let error = export(
-        &config_report,
+        &fixture.config_report,
         String::from("m-1:1.2"),
         Some(destination_path.clone()),
     )
@@ -403,77 +272,10 @@ async fn export_removes_copied_file_when_event_persistence_fails() {
 
 #[tokio::test]
 async fn export_preserves_preexisting_matching_file_when_event_persistence_fails() {
-    let temp_dir = TempDir::new().unwrap();
-    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    accounts::upsert_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &accounts::UpsertAccountInput {
-            email_address: String::from("operator@example.com"),
-            history_id: String::from("100"),
-            messages_total: 1,
-            threads_total: 1,
-            access_scope: String::from("scope:a"),
-            refreshed_at_epoch_s: 100,
-        },
-    )
-    .unwrap();
-    crate::store::mailbox::upsert_messages(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &[crate::store::mailbox::GmailMessageUpsertInput {
-            account_id: String::from("gmail:operator@example.com"),
-            message_id: String::from("m-1"),
-            thread_id: String::from("t-1"),
-            history_id: String::from("101"),
-            internal_date_epoch_ms: 1_700_000_000_000,
-            snippet: String::from("Attachment fixture"),
-            subject: String::from("Fixture"),
-            from_header: String::from("Fixture <fixture@example.com>"),
-            from_address: Some(String::from("fixture@example.com")),
-            recipient_headers: String::from("operator@example.com"),
-            to_header: String::from("operator@example.com"),
-            cc_header: String::new(),
-            bcc_header: String::new(),
-            reply_to_header: String::new(),
-            size_estimate: 256,
-            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
-            label_ids: vec![String::from("INBOX")],
-            label_names_text: String::from("INBOX"),
-            attachments: vec![GmailAttachmentUpsertInput {
-                attachment_key: String::from("m-1:1.2"),
-                part_id: String::from("1.2"),
-                gmail_attachment_id: Some(String::from("att-1")),
-                filename: String::from("fixture.bin"),
-                mime_type: String::from("application/octet-stream"),
-                size_bytes: 5,
-                content_disposition: Some(String::from("attachment")),
-                content_id: None,
-                is_inline: false,
-            }],
-        }],
-        100,
-    )
-    .unwrap();
     let vault_bytes = b"hello".to_vec();
-    let vault_write = write_vault_bytes(&paths.vault_dir, vault_bytes.clone()).unwrap();
-    crate::store::mailbox::set_attachment_vault_state(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &crate::store::mailbox::AttachmentVaultStateUpdate {
-            account_id: String::from("gmail:operator@example.com"),
-            attachment_key: String::from("m-1:1.2"),
-            content_hash: vault_write.content_hash.clone(),
-            relative_path: vault_write.relative_path,
-            size_bytes: vault_write.size_bytes,
-            fetched_at_epoch_s: 101,
-        },
-    )
-    .unwrap();
-    let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    let fixture = setup_export_test_fixture(vault_bytes.clone());
+    let connection =
+        rusqlite::Connection::open(&fixture.config_report.config.store.database_path).unwrap();
     connection
         .execute_batch(
             "
@@ -486,12 +288,12 @@ async fn export_preserves_preexisting_matching_file_when_event_persistence_fails
         )
         .unwrap();
 
-    let destination_path = temp_dir.path().join("exports/preexisting.bin");
+    let destination_path = fixture.temp_dir.path().join("exports/preexisting.bin");
     fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
     fs::write(&destination_path, &vault_bytes).unwrap();
 
     let error = export(
-        &config_report,
+        &fixture.config_report,
         String::from("m-1:1.2"),
         Some(destination_path.clone()),
     )
@@ -577,5 +379,82 @@ fn detail_with_vault(
         vault_size_bytes: Some(vault_size_bytes),
         vault_fetched_at_epoch_s: Some(101),
         export_count: 0,
+    }
+}
+
+fn setup_export_test_fixture(vault_bytes: Vec<u8>) -> ExportTestFixture {
+    let temp_dir = TempDir::new().unwrap();
+    let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    crate::store::mailbox::upsert_messages(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &[crate::store::mailbox::GmailMessageUpsertInput {
+            account_id: String::from("gmail:operator@example.com"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            history_id: String::from("101"),
+            internal_date_epoch_ms: 1_700_000_000_000,
+            snippet: String::from("Attachment fixture"),
+            subject: String::from("Fixture"),
+            from_header: String::from("Fixture <fixture@example.com>"),
+            from_address: Some(String::from("fixture@example.com")),
+            recipient_headers: String::from("operator@example.com"),
+            to_header: String::from("operator@example.com"),
+            cc_header: String::new(),
+            bcc_header: String::new(),
+            reply_to_header: String::new(),
+            size_estimate: 256,
+            automation_headers: crate::store::mailbox::GmailAutomationHeaders::default(),
+            label_ids: vec![String::from("INBOX")],
+            label_names_text: String::from("INBOX"),
+            attachments: vec![GmailAttachmentUpsertInput {
+                attachment_key: String::from("m-1:1.2"),
+                part_id: String::from("1.2"),
+                gmail_attachment_id: Some(String::from("att-1")),
+                filename: String::from("fixture.bin"),
+                mime_type: String::from("application/octet-stream"),
+                size_bytes: 5,
+                content_disposition: Some(String::from("attachment")),
+                content_id: None,
+                is_inline: false,
+            }],
+        }],
+        100,
+    )
+    .unwrap();
+    let vault_write = write_vault_bytes(&paths.vault_dir, vault_bytes).unwrap();
+    crate::store::mailbox::set_attachment_vault_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &crate::store::mailbox::AttachmentVaultStateUpdate {
+            account_id: String::from("gmail:operator@example.com"),
+            attachment_key: String::from("m-1:1.2"),
+            content_hash: vault_write.content_hash,
+            relative_path: vault_write.relative_path,
+            size_bytes: vault_write.size_bytes,
+            fetched_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+
+    ExportTestFixture {
+        temp_dir,
+        config_report,
     }
 }

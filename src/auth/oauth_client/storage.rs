@@ -1,6 +1,3 @@
-use super::import::{
-    normalize_optional_string, normalize_required_adc_field, normalize_required_input_string,
-};
 use super::resolve::OAuthClientError;
 use super::types::{
     AuthorizedUserAdc, AuthorizedUserAdcFile, LegacyStoredOAuthClient, StoredInstalledOAuthClient,
@@ -43,6 +40,42 @@ pub(super) fn load_imported_client(path: &Path) -> Result<Option<StoredOAuthClie
     };
     validate_stored_oauth_client(&stored)?;
     Ok(Some(stored))
+}
+
+pub(super) fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+pub(super) fn normalize_required_option_string(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<String> {
+    normalize_optional_string(value).ok_or_else(|| OAuthClientError::MissingField(field).into())
+}
+
+pub(super) fn normalize_required_adc_field(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<String> {
+    normalize_optional_string(value).ok_or_else(|| OAuthClientError::MissingAdcField(field).into())
+}
+
+pub(super) fn normalize_required_input_string(
+    value: String,
+    field: &'static str,
+) -> Result<String> {
+    let trimmed = value.trim().to_owned();
+    if trimmed.is_empty() {
+        return Err(OAuthClientError::MissingField(field).into());
+    }
+    Ok(trimmed)
 }
 
 pub(super) fn validate_stored_oauth_client(client: &StoredOAuthClientFile) -> Result<()> {

@@ -7,9 +7,11 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use import::ImportedOAuthClient;
+#[allow(unused_imports)]
+pub use import::ImportedOAuthClientSourceKind;
 #[cfg(test)]
 pub(crate) use import::setup_guidance;
-pub use import::{ImportedOAuthClient, ImportedOAuthClientSourceKind};
 pub(crate) use import::{PreparedSetup, persist_prepared_google_desktop_client, prepare_setup};
 pub use resolve::{
     OAuthClientError, OAuthClientSource, ResolvedOAuthClient, oauth_client_source, resolve,

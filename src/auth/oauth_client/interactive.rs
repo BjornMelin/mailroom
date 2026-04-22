@@ -1,8 +1,8 @@
 use super::import::{
-    PreparedOAuthClientImport, PreparedSetup, normalize_optional_string,
-    prepare_google_desktop_client, prepare_google_desktop_client_from_adc,
-    prepare_google_desktop_client_from_values,
+    PreparedOAuthClientImport, PreparedSetup, prepare_google_desktop_client,
+    prepare_google_desktop_client_from_adc, prepare_google_desktop_client_from_values,
 };
+use super::storage::normalize_optional_string;
 use crate::config::{GmailConfig, WorkspaceConfig};
 use anyhow::{Result, anyhow};
 use dialoguer::{Input, Password, Select, theme::ColorfulTheme};

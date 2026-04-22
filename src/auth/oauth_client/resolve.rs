@@ -1,4 +1,4 @@
-use super::storage::load_imported_client;
+use super::storage::{load_imported_client, normalize_optional_string};
 use crate::config::{GmailConfig, WorkspaceConfig};
 use anyhow::Result;
 use serde::Serialize;
@@ -109,15 +109,4 @@ pub(crate) fn oauth_client_exists(
 
     let _ = load_imported_client(&oauth_client_path)?;
     Ok(true)
-}
-
-fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_owned();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
 }

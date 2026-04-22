@@ -11,8 +11,7 @@ use crate::workspace::{self, WorkspacePaths};
 use anyhow::{Context, Result};
 use file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
 use oauth_client::{
-    ImportedOAuthClient, ImportedOAuthClientSourceKind, OAuthClientSource, PreparedSetup,
-    resolve as resolve_oauth_client,
+    ImportedOAuthClient, OAuthClientSource, PreparedSetup, resolve as resolve_oauth_client,
 };
 use oauth2::{
     AuthUrl, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, Scope, TokenResponse, TokenUrl,
@@ -82,8 +81,10 @@ impl SetupReport {
         } else {
             println!("oauth_client_imported={}", self.imported_client.is_some());
             if let Some(imported_client) = &self.imported_client {
-                let source_kind: ImportedOAuthClientSourceKind = imported_client.source_kind;
-                println!("oauth_client_source_kind={}", source_kind.as_str());
+                println!(
+                    "oauth_client_source_kind={}",
+                    imported_client.source_kind.as_str()
+                );
                 match &imported_client.source_path {
                     Some(source_path) => {
                         println!("oauth_client_source_path={}", source_path.display())

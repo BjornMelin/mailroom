@@ -5,7 +5,8 @@ use super::resolve::{
     OAuthClientError, OAuthClientSource, ResolvedOAuthClient, oauth_client_source,
 };
 use super::storage::{
-    default_import_candidates, detect_adc_path, discover_import_path, parse_authorized_user_adc,
+    default_import_candidates, detect_adc_path, discover_import_path, normalize_optional_string,
+    normalize_required_input_string, normalize_required_option_string, parse_authorized_user_adc,
     save_imported_client,
 };
 use super::types::{
@@ -337,43 +338,6 @@ fn parse_google_desktop_client(path: &Path, config: &GmailConfig) -> Result<Goog
         redirect_uris: normalize_redirect_uris(installed.redirect_uris),
     })
 }
-
-pub(super) fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim().to_owned();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
-}
-
-pub(super) fn normalize_required_option_string(
-    value: Option<String>,
-    field: &'static str,
-) -> Result<String> {
-    normalize_optional_string(value).ok_or_else(|| OAuthClientError::MissingField(field).into())
-}
-
-pub(super) fn normalize_required_adc_field(
-    value: Option<String>,
-    field: &'static str,
-) -> Result<String> {
-    normalize_optional_string(value).ok_or_else(|| OAuthClientError::MissingAdcField(field).into())
-}
-
-pub(super) fn normalize_required_input_string(
-    value: String,
-    field: &'static str,
-) -> Result<String> {
-    let trimmed = value.trim().to_owned();
-    if trimmed.is_empty() {
-        return Err(OAuthClientError::MissingField(field).into());
-    }
-    Ok(trimmed)
-}
-
 fn normalize_redirect_uris(redirect_uris: Option<Vec<String>>) -> Vec<String> {
     let cleaned = redirect_uris
         .unwrap_or_default()
