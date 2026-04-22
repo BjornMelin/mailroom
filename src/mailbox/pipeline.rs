@@ -69,7 +69,7 @@ impl PipelineStats {
     }
 
     pub(crate) fn on_list_dequeued(&self) {
-        self.inner.list_queue_depth.fetch_sub(1, Ordering::Relaxed);
+        saturating_decrement(&self.inner.list_queue_depth);
     }
 
     pub(crate) fn on_write_enqueued(&self) {
@@ -81,7 +81,7 @@ impl PipelineStats {
     }
 
     pub(crate) fn on_write_dequeued(&self) {
-        self.inner.write_queue_depth.fetch_sub(1, Ordering::Relaxed);
+        saturating_decrement(&self.inner.write_queue_depth);
     }
 
     pub(crate) fn on_write_batch_committed(&self) {
@@ -202,6 +202,12 @@ fn update_max(maximum: &AtomicU64, candidate: u64) {
             Err(actual) => observed = actual,
         }
     }
+}
+
+fn saturating_decrement(depth: &AtomicUsize) {
+    let _ = depth.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(1))
+    });
 }
 
 fn average_u64(total: u64, count: usize) -> u64 {

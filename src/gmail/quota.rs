@@ -3,6 +3,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+// Mailroom keeps quota pacing local to the Gmail client instead of depending on
+// a generic limiter crate. The sync path needs Gmail-specific weighted request
+// costs, live per-run reconfiguration, and integrated retry/throttle metrics
+// that feed operator reports and adaptive pacing.
 pub(crate) const MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE: u32 = 5;
 const DEFAULT_QUOTA_BURST_UNITS: u32 = 25;
 
@@ -107,13 +111,14 @@ impl GmailQuotaPolicy {
 
             match wait_duration {
                 None => {
-                    let waited = started_at.elapsed();
                     self.metrics
                         .record_reserved_units(u64::from(requested_units));
-                    self.metrics.record_throttle_wait(waited);
                     return Ok(());
                 }
-                Some(wait_duration) => tokio::time::sleep(wait_duration).await,
+                Some(wait_duration) => {
+                    tokio::time::sleep(wait_duration).await;
+                    self.metrics.record_throttle_wait(started_at.elapsed());
+                }
             }
         }
     }

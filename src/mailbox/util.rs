@@ -64,13 +64,16 @@ pub(crate) fn is_stale_history_error(error: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn is_invalid_resume_page_token_error(error: &GmailClientError) -> bool {
-    matches!(
-        error,
-        GmailClientError::Api { path, status, body }
-            if *status == StatusCode::BAD_REQUEST
-                && path == "users/me/messages"
-                && body.contains("pageToken")
-    )
+    if let GmailClientError::Api { path, status, body } = error {
+        if *status != StatusCode::BAD_REQUEST || path != "users/me/messages" {
+            return false;
+        }
+        let body = body.to_ascii_lowercase();
+        return body.contains("pagetoken")
+            || body.contains("page token")
+            || body.contains("page_token");
+    }
+    false
 }
 
 pub(crate) fn parse_start_of_day_epoch_ms(value: &str) -> Result<i64> {

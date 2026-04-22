@@ -1,16 +1,17 @@
 use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
     FullSyncCheckpointStatus, FullSyncCheckpointUpdate, GmailAttachmentUpsertInput,
-    GmailMessageUpsertInput, IncrementalSyncCommit, MailboxWriteError, SearchQuery, SyncMode,
-    SyncPacingPressureKind, SyncPacingStateUpdate, SyncRunOutcomeInput, SyncRunRegressionKind,
-    SyncStateUpdate, SyncStatus, commit_full_sync, commit_incremental_sync,
-    finalize_full_sync_from_stage, finalize_incremental_from_stage, get_attachment_detail,
-    get_full_sync_checkpoint, get_sync_run_summary, get_sync_run_summary_for_comparability,
-    get_sync_state, inspect_mailbox, list_attachments, list_label_usage, list_sync_run_history,
-    persist_failed_sync_outcome, persist_successful_sync_outcome, prepare_full_sync_checkpoint,
-    record_attachment_export, replace_labels, replace_labels_and_report_reindex, replace_messages,
-    reset_full_sync_stage, reset_incremental_sync_stage, search::build_plain_fts5_query,
-    search_messages, set_attachment_vault_state, stage_full_sync_labels, stage_full_sync_messages,
+    GmailMessageUpsertInput, IncrementalSyncCommit, MailboxReadError, MailboxWriteError,
+    SearchQuery, SyncMode, SyncPacingPressureKind, SyncPacingStateUpdate, SyncRunComparabilityKind,
+    SyncRunOutcomeInput, SyncRunRegressionKind, SyncStateUpdate, SyncStatus, commit_full_sync,
+    commit_incremental_sync, finalize_full_sync_from_stage, finalize_incremental_from_stage,
+    get_attachment_detail, get_full_sync_checkpoint, get_sync_run_summary,
+    get_sync_run_summary_for_comparability, get_sync_state, inspect_mailbox, list_attachments,
+    list_label_usage, list_sync_run_history, persist_failed_sync_outcome,
+    persist_successful_sync_outcome, prepare_full_sync_checkpoint, record_attachment_export,
+    replace_labels, replace_labels_and_report_reindex, replace_messages, reset_full_sync_stage,
+    reset_incremental_sync_stage, search::build_plain_fts5_query, search_messages,
+    set_attachment_vault_state, stage_full_sync_labels, stage_full_sync_messages,
     stage_full_sync_page_and_update_checkpoint, stage_incremental_sync_batch,
     update_full_sync_checkpoint_labels, upsert_messages, upsert_sync_pacing_state,
     upsert_sync_state,
@@ -692,7 +693,7 @@ fn get_sync_pacing_state_rejects_invalid_pressure_kind_values() {
         "gmail:operator@example.com",
     );
 
-    assert!(result.is_err());
+    assert!(matches!(result, Err(MailboxReadError::Query(_))));
 }
 
 #[test]
@@ -3256,6 +3257,7 @@ fn sync_run_summary_tracks_separate_comparability_buckets() {
         config_report.config.store.busy_timeout_ms,
         &account.account_id,
         SyncMode::Incremental,
+        SyncRunComparabilityKind::IncrementalWorkloadTier,
         "tiny",
     )
     .unwrap()
@@ -3265,6 +3267,7 @@ fn sync_run_summary_tracks_separate_comparability_buckets() {
         config_report.config.store.busy_timeout_ms,
         &account.account_id,
         SyncMode::Incremental,
+        SyncRunComparabilityKind::IncrementalWorkloadTier,
         "large",
     )
     .unwrap()

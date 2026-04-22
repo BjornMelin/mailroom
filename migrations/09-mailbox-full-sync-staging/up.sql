@@ -50,6 +50,8 @@ CREATE TABLE gmail_full_sync_stage_message_labels (
     message_id TEXT NOT NULL,
     label_id TEXT NOT NULL,
     PRIMARY KEY (account_id, message_id, label_id),
+    FOREIGN KEY (account_id, message_id)
+        REFERENCES gmail_full_sync_stage_messages (account_id, message_id) ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
 ) STRICT;
 
@@ -70,6 +72,8 @@ CREATE TABLE gmail_full_sync_stage_attachments (
     is_inline INTEGER NOT NULL CHECK (is_inline IN (0, 1)),
     PRIMARY KEY (account_id, attachment_key),
     UNIQUE (account_id, message_id, part_id),
+    FOREIGN KEY (account_id, message_id)
+        REFERENCES gmail_full_sync_stage_messages (account_id, message_id) ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
 ) STRICT;
 

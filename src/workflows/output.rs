@@ -350,6 +350,18 @@ mod tests {
             json!("archive")
         );
         assert_eq!(json_value["data"]["sync_report"]["mode"], json!("full"));
+        assert_eq!(
+            json_value["data"]["sync_report"]["comparability_kind"],
+            json!("full_recent_days")
+        );
+        assert_eq!(
+            json_value["data"]["sync_report"]["pipeline_enabled"],
+            json!(true)
+        );
+        assert_eq!(
+            json_value["data"]["sync_report"]["effective_quota_units_per_minute"],
+            json!(12_000)
+        );
     }
 
     #[test]

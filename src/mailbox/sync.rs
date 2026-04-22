@@ -112,6 +112,8 @@ pub async fn sync_run_with_options(
         .await?;
     }
     let mut failure_bootstrap_query = initial_bootstrap_query;
+    let mut failure_fallback_from_history = false;
+    let failure_resumed_from_checkpoint = false;
     let mut incremental_failure_telemetry = IncrementalFailureTelemetry::zero_work();
     let mut failure_pipeline_report = disabled_pipeline_report();
     let sync_started_at = Instant::now();
@@ -159,6 +161,7 @@ pub async fn sync_run_with_options(
                         failure_mode = store::mailbox::SyncMode::Full;
                         failure_cursor_history_id = None;
                         failure_bootstrap_query = persisted_bootstrap_query;
+                        failure_fallback_from_history = true;
                         incremental_failure_telemetry = IncrementalFailureTelemetry::zero_work();
                         maybe_seed_pacing_from_history(
                             &store_handle,
@@ -240,11 +243,15 @@ pub async fn sync_run_with_options(
                         },
                         startup_seed_run_id: pacing.startup_seed_run_id(),
                         cursor_history_id: failure_cursor_history_id,
+                        fallback_from_history: failure_fallback_from_history,
+                        resumed_from_checkpoint: failure_resumed_from_checkpoint,
                         pages_fetched: incremental_failure_telemetry.pages_fetched,
                         messages_listed: incremental_failure_telemetry.messages_listed,
                         messages_deleted: incremental_failure_telemetry.messages_deleted,
                         pipeline_report: failure_pipeline_report,
                         pacing_report,
+                        quota_units_budget_per_minute: options.quota_units_per_minute,
+                        message_fetch_concurrency: options.message_fetch_concurrency,
                         metrics,
                         error_message: sync_error.to_string(),
                     },
@@ -263,27 +270,24 @@ pub async fn sync_history(config_report: &ConfigReport, limit: usize) -> Result<
     if limit == 0 {
         return Err(anyhow!("history limit must be greater than zero"));
     }
-    store::init(config_report)?;
-
-    let account_id = resolve_sync_history_account_id(config_report)?;
-    let database_path = config_report.config.store.database_path.clone();
-    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let account_id_for_summary = account_id.clone();
-    let account_id_for_history = account_id.clone();
-
-    let (summary, runs) = spawn_blocking(move || {
+    let config_report = config_report.clone();
+    let (account_id, summary, runs) = spawn_blocking(move || {
+        store::init(&config_report)?;
+        let account_id = resolve_sync_history_account_id(&config_report)?;
+        let database_path = config_report.config.store.database_path.clone();
+        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
         let summary = store::mailbox::get_latest_sync_run_summary_for_account(
             &database_path,
             busy_timeout_ms,
-            &account_id_for_summary,
+            &account_id,
         )?;
         let runs = store::mailbox::list_sync_run_history(
             &database_path,
             busy_timeout_ms,
-            &account_id_for_history,
+            &account_id,
             limit,
         )?;
-        Ok::<_, anyhow::Error>((summary, runs))
+        Ok::<_, anyhow::Error>((account_id, summary, runs))
     })
     .await??;
 
@@ -302,24 +306,21 @@ pub async fn sync_perf_explain(
     if limit == 0 {
         return Err(anyhow!("history limit must be greater than zero"));
     }
-    store::init(config_report)?;
-
-    let account_id = resolve_sync_history_account_id(config_report)?;
-    let database_path = config_report.config.store.database_path.clone();
-    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let account_id_for_summary = account_id.clone();
-    let account_id_for_history = account_id.clone();
-
-    let (summary, runs, baseline_run) = spawn_blocking(move || {
+    let config_report = config_report.clone();
+    let (account_id, summary, runs, baseline_run) = spawn_blocking(move || {
+        store::init(&config_report)?;
+        let account_id = resolve_sync_history_account_id(&config_report)?;
+        let database_path = config_report.config.store.database_path.clone();
+        let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
         let summary = store::mailbox::get_latest_sync_run_summary_for_account(
             &database_path,
             busy_timeout_ms,
-            &account_id_for_summary,
+            &account_id,
         )?;
         let runs = store::mailbox::list_sync_run_history(
             &database_path,
             busy_timeout_ms,
-            &account_id_for_history,
+            &account_id,
             limit,
         )?;
         let baseline_run = match summary
@@ -333,7 +334,7 @@ pub async fn sync_perf_explain(
             )?,
             None => None,
         };
-        Ok::<_, anyhow::Error>((summary, runs, baseline_run))
+        Ok::<_, anyhow::Error>((account_id, summary, runs, baseline_run))
     })
     .await??;
 
@@ -1536,7 +1537,7 @@ async fn maybe_seed_pacing_from_history(
     comparability: &store::mailbox::SyncRunComparability,
 ) -> Result<()> {
     let Some(summary) = store_handle
-        .load_sync_run_summary_for_comparability(sync_mode, &comparability.key)
+        .load_sync_run_summary_for_comparability(sync_mode, comparability.kind, &comparability.key)
         .await?
     else {
         return Ok(());
@@ -2259,6 +2260,7 @@ impl MailboxStoreHandle {
     async fn load_sync_run_summary_for_comparability(
         &self,
         sync_mode: store::mailbox::SyncMode,
+        comparability_kind: store::mailbox::SyncRunComparabilityKind,
         comparability_key: &str,
     ) -> Result<Option<store::mailbox::SyncRunSummaryRecord>> {
         let database_path = self.database_path.clone();
@@ -2271,6 +2273,7 @@ impl MailboxStoreHandle {
                 busy_timeout_ms,
                 &account_id,
                 sync_mode,
+                comparability_kind,
                 &comparability_key,
             )
         })

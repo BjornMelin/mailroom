@@ -577,6 +577,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_quota_budget_maps_to_gmail_quota_budget_validation_error() {
+        let error = anyhow!(GmailClientError::InvalidQuotaBudget {
+            units_per_minute: 0,
+            minimum_units_per_minute: 5,
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("gmail.quota_budget"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
     fn attachment_store_write_errors_map_to_storage_failure_code() {
         let error = anyhow!(crate::attachments::AttachmentServiceError::StoreWrite {
             source: anyhow!("database is locked"),

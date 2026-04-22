@@ -129,15 +129,17 @@ pub(crate) fn detect_sync_run_regression(
         return None;
     }
 
+    let retry_baseline = history
+        .iter()
+        .skip(1)
+        .filter(|row| row.status == SyncStatus::Ok)
+        .take(SYNC_RUN_RETRY_BASELINE_WINDOW)
+        .collect::<Vec<_>>();
     if (latest.quota_pressure_retry_count > 0 || latest.concurrency_pressure_retry_count > 0)
-        && history
-            .iter()
-            .skip(1)
-            .filter(|row| row.status == SyncStatus::Ok)
-            .take(SYNC_RUN_RETRY_BASELINE_WINDOW)
-            .all(|row| {
-                row.quota_pressure_retry_count == 0 && row.concurrency_pressure_retry_count == 0
-            })
+        && retry_baseline.len() == SYNC_RUN_RETRY_BASELINE_WINDOW
+        && retry_baseline.iter().all(|row| {
+            row.quota_pressure_retry_count == 0 && row.concurrency_pressure_retry_count == 0
+        })
     {
         return Some(DetectedSyncRunRegression {
             kind: SyncRunRegressionKind::RetryPressure,

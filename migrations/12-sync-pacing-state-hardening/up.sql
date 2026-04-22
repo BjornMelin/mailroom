@@ -3,9 +3,9 @@ DROP INDEX IF EXISTS gmail_sync_pacing_state_updated_at_idx;
 CREATE TABLE gmail_sync_pacing_state_next (
     account_id TEXT PRIMARY KEY,
     learned_quota_units_per_minute INTEGER NOT NULL
-        CHECK (learned_quota_units_per_minute >= 5),
+        CHECK (learned_quota_units_per_minute BETWEEN 5 AND 12000),
     learned_message_fetch_concurrency INTEGER NOT NULL
-        CHECK (learned_message_fetch_concurrency >= 1),
+        CHECK (learned_message_fetch_concurrency BETWEEN 1 AND 4),
     clean_run_streak INTEGER NOT NULL
         CHECK (clean_run_streak >= 0),
     last_pressure_kind TEXT

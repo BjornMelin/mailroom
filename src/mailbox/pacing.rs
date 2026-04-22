@@ -116,8 +116,9 @@ impl AdaptiveSyncPacing {
         let persisted_learned_quota_units_per_minute = normalized.learned_quota_units_per_minute;
         let persisted_learned_message_fetch_concurrency =
             normalized.learned_message_fetch_concurrency;
-        let starting_quota_units_per_minute =
-            persisted_learned_quota_units_per_minute.min(quota_units_cap_per_minute);
+        let starting_quota_units_per_minute = persisted_learned_quota_units_per_minute
+            .min(quota_units_cap_per_minute)
+            .max(MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE);
         let starting_message_fetch_concurrency = persisted_learned_message_fetch_concurrency
             .min(message_fetch_concurrency_cap)
             .max(1);

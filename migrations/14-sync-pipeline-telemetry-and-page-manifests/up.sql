@@ -48,6 +48,9 @@ CREATE TABLE gmail_full_sync_stage_page_messages (
     page_seq INTEGER NOT NULL,
     message_id TEXT NOT NULL,
     PRIMARY KEY (account_id, page_seq, message_id),
+    FOREIGN KEY (account_id, page_seq)
+        REFERENCES gmail_full_sync_stage_pages (account_id, page_seq)
+        ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
 ) STRICT;
 

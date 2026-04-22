@@ -838,7 +838,14 @@ fn extract_recent_days_from_bootstrap_query(query: &str) -> Option<u32> {
     if digits.is_empty() {
         return None;
     }
-    digits.parse().ok()
+    let value = digits.parse::<u32>().ok()?;
+    match suffix[digits.len()..].chars().next()? {
+        'd' => Some(value),
+        'w' => value.checked_mul(7),
+        'm' => value.checked_mul(30),
+        'y' => value.checked_mul(365),
+        _ => None,
+    }
 }
 
 fn sanitize(value: &str) -> String {

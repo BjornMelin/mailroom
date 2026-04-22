@@ -75,6 +75,7 @@ pub(crate) fn get_sync_run_summary_for_comparability(
     busy_timeout_ms: u64,
     account_id: &str,
     sync_mode: SyncMode,
+    comparability_kind: SyncRunComparabilityKind,
     comparability_key: &str,
 ) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
     if !database_path.try_exists()? {
@@ -88,6 +89,7 @@ pub(crate) fn get_sync_run_summary_for_comparability(
             &connection,
             account_id,
             sync_mode,
+            comparability_kind,
             comparability_key,
         )?,
     )

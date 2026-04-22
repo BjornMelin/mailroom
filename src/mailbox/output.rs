@@ -221,7 +221,17 @@ impl SyncHistoryReport {
                         .unwrap_or_else(|| String::from("<none>"))
                 ));
             }
-            None => lines.push(String::from("summary_sync_mode=<none>")),
+            None => lines.extend([
+                String::from("summary_sync_mode=<none>"),
+                String::from("summary_comparability_kind=<none>"),
+                String::from("summary_comparability_key=<none>"),
+                String::from("summary_comparability_label=<none>"),
+                String::from("summary_latest_run_id=<none>"),
+                String::from("summary_latest_status=<none>"),
+                String::from("summary_best_clean_quota_units_per_minute=<none>"),
+                String::from("summary_best_clean_message_fetch_concurrency=<none>"),
+                String::from("summary_regression_kind=<none>"),
+            ]),
         }
 
         lines.push(String::from(
@@ -301,7 +311,16 @@ impl SyncPerfExplainReport {
                     .unwrap_or_else(|| String::from("<none>"))
             ));
         } else {
-            lines.push(String::from("summary_latest_run_id=<none>"));
+            lines.extend([
+                String::from("summary_sync_mode=<none>"),
+                String::from("summary_comparability_kind=<none>"),
+                String::from("summary_comparability_key=<none>"),
+                String::from("summary_comparability_label=<none>"),
+                String::from("summary_latest_run_id=<none>"),
+                String::from("summary_best_clean_run_id=<none>"),
+                String::from("summary_regression_kind=<none>"),
+                String::from("summary_regression_message=<none>"),
+            ]);
         }
 
         if let Some(latest_run) = &self.latest_run {
@@ -311,7 +330,10 @@ impl SyncPerfExplainReport {
                 latest_run.comparability_label
             ));
         } else {
-            lines.push(String::from("latest_run_id=<none>"));
+            lines.extend([
+                String::from("latest_run_id=<none>"),
+                String::from("latest_comparability_label=<none>"),
+            ]);
         }
         if let Some(baseline_run) = &self.baseline_run {
             lines.push(format!("baseline_run_id={}", baseline_run.run_id));
@@ -320,7 +342,10 @@ impl SyncPerfExplainReport {
                 baseline_run.comparability_label
             ));
         } else {
-            lines.push(String::from("baseline_run_id=<none>"));
+            lines.extend([
+                String::from("baseline_run_id=<none>"),
+                String::from("baseline_comparability_label=<none>"),
+            ]);
         }
         lines.push(format!(
             "comparable_to_baseline={}",
@@ -362,6 +387,14 @@ impl SyncPerfExplainReport {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| String::from("<none>"))
             ));
+        } else {
+            lines.extend([
+                String::from("drift_messages_per_second_delta=<none>"),
+                String::from("drift_duration_ms_delta=<none>"),
+                String::from("drift_retry_count_delta=<none>"),
+                String::from("drift_quota_units_delta=<none>"),
+                String::from("drift_message_fetch_concurrency_delta=<none>"),
+            ]);
         }
 
         lines.push(String::from(

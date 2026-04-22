@@ -1,7 +1,7 @@
 CREATE TABLE gmail_full_sync_checkpoint (
     account_id TEXT PRIMARY KEY,
     bootstrap_query TEXT NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('paging', 'ready_to_finalize')),
     next_page_token TEXT,
     cursor_history_id TEXT,
     pages_fetched INTEGER NOT NULL,

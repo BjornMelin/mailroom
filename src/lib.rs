@@ -595,16 +595,21 @@ fn resolve_sync_run_options(args: &SyncRunArgs) -> mailbox::SyncRunOptions {
         .profile
         .map(sync_profile_defaults)
         .unwrap_or_else(default_sync_profile_defaults);
+    let recent_days = args.recent_days.unwrap_or(defaults.recent_days).max(1);
+    let quota_units_per_minute = args
+        .quota_units_per_minute
+        .unwrap_or(defaults.quota_units_per_minute)
+        .max(crate::gmail::MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE);
+    let message_fetch_concurrency = args
+        .message_fetch_concurrency
+        .unwrap_or(defaults.message_fetch_concurrency)
+        .max(1);
 
     mailbox::SyncRunOptions {
         force_full: args.full || defaults.force_full,
-        recent_days: args.recent_days.unwrap_or(defaults.recent_days),
-        quota_units_per_minute: args
-            .quota_units_per_minute
-            .unwrap_or(defaults.quota_units_per_minute),
-        message_fetch_concurrency: args
-            .message_fetch_concurrency
-            .unwrap_or(defaults.message_fetch_concurrency),
+        recent_days,
+        quota_units_per_minute,
+        message_fetch_concurrency,
     }
 }
 

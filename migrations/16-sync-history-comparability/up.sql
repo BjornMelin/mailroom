@@ -76,11 +76,14 @@ CREATE TABLE gmail_sync_run_summary (
     regression_run_id INTEGER,
     regression_message TEXT,
     updated_at_epoch_s INTEGER NOT NULL,
-    PRIMARY KEY (account_id, sync_mode, comparability_key),
+    PRIMARY KEY (account_id, sync_mode, comparability_kind, comparability_key),
     FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE,
-    FOREIGN KEY (latest_run_id) REFERENCES gmail_sync_run_history (run_id) ON DELETE CASCADE,
-    FOREIGN KEY (best_clean_run_id) REFERENCES gmail_sync_run_history (run_id) ON DELETE SET NULL,
-    FOREIGN KEY (regression_run_id) REFERENCES gmail_sync_run_history (run_id) ON DELETE SET NULL
+    FOREIGN KEY (latest_run_id, account_id, sync_mode)
+        REFERENCES gmail_sync_run_history (run_id, account_id, sync_mode) ON DELETE CASCADE,
+    FOREIGN KEY (best_clean_run_id, account_id, sync_mode)
+        REFERENCES gmail_sync_run_history (run_id, account_id, sync_mode) ON DELETE SET NULL,
+    FOREIGN KEY (regression_run_id, account_id, sync_mode)
+        REFERENCES gmail_sync_run_history (run_id, account_id, sync_mode) ON DELETE SET NULL
 ) STRICT;
 
 INSERT INTO gmail_sync_run_summary (

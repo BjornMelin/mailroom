@@ -54,7 +54,8 @@ CREATE TABLE gmail_sync_run_history (
     pages_per_second REAL NOT NULL,
     messages_per_second REAL NOT NULL,
     error_message TEXT,
-    FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE
+    FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE,
+    UNIQUE (run_id, account_id, sync_mode)
 ) STRICT;
 
 CREATE INDEX gmail_sync_run_history_account_finished_idx
@@ -88,9 +89,12 @@ CREATE TABLE gmail_sync_run_summary (
     updated_at_epoch_s INTEGER NOT NULL,
     PRIMARY KEY (account_id, sync_mode),
     FOREIGN KEY (account_id) REFERENCES accounts (account_id) ON DELETE CASCADE,
-    FOREIGN KEY (latest_run_id) REFERENCES gmail_sync_run_history (run_id) ON DELETE CASCADE,
-    FOREIGN KEY (best_clean_run_id) REFERENCES gmail_sync_run_history (run_id) ON DELETE SET NULL,
-    FOREIGN KEY (regression_run_id) REFERENCES gmail_sync_run_history (run_id) ON DELETE SET NULL
+    FOREIGN KEY (latest_run_id, account_id, sync_mode)
+        REFERENCES gmail_sync_run_history (run_id, account_id, sync_mode) ON DELETE CASCADE,
+    FOREIGN KEY (best_clean_run_id, account_id, sync_mode)
+        REFERENCES gmail_sync_run_history (run_id, account_id, sync_mode) ON DELETE SET NULL,
+    FOREIGN KEY (regression_run_id, account_id, sync_mode)
+        REFERENCES gmail_sync_run_history (run_id, account_id, sync_mode) ON DELETE SET NULL
 ) STRICT;
 
 CREATE INDEX gmail_sync_run_summary_updated_idx

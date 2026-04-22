@@ -66,8 +66,14 @@ pub(crate) fn recompute_sync_run_summary_in_transaction(
 
     upsert_sync_run_summary(transaction, &summary_input)?;
 
-    read_sync_run_summary_for_comparability(transaction, account_id, sync_mode, &comparability.key)?
-        .ok_or_else(|| anyhow!("sync run summary disappeared after upsert"))
+    read_sync_run_summary_for_comparability(
+        transaction,
+        account_id,
+        sync_mode,
+        comparability.kind,
+        &comparability.key,
+    )?
+    .ok_or_else(|| anyhow!("sync run summary disappeared after upsert"))
 }
 
 struct SyncRunSummaryUpsert<'a> {
@@ -113,8 +119,7 @@ fn upsert_sync_run_summary(
              updated_at_epoch_s
          )
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
-         ON CONFLICT (account_id, sync_mode, comparability_key) DO UPDATE SET
-             comparability_kind = excluded.comparability_kind,
+         ON CONFLICT (account_id, sync_mode, comparability_kind, comparability_key) DO UPDATE SET
              latest_run_id = excluded.latest_run_id,
              latest_status = excluded.latest_status,
              latest_finished_at_epoch_s = excluded.latest_finished_at_epoch_s,
@@ -239,12 +244,18 @@ fn read_sync_run_history_rows_for_summary(
          FROM gmail_sync_run_history
          WHERE account_id = ?1
            AND sync_mode = ?2
-           AND comparability_key = ?3
+           AND comparability_kind = ?3
+           AND comparability_key = ?4
          ORDER BY finished_at_epoch_s DESC, run_id DESC",
     )?;
     let rows = statement
         .query_map(
-            params![account_id, sync_mode.as_str(), &comparability.key],
+            params![
+                account_id,
+                sync_mode.as_str(),
+                comparability.kind.as_str(),
+                &comparability.key
+            ],
             row_to_sync_run_history,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -255,6 +266,7 @@ pub(crate) fn read_sync_run_summary_for_comparability(
     connection: &rusqlite::Connection,
     account_id: &str,
     sync_mode: SyncMode,
+    comparability_kind: super::SyncRunComparabilityKind,
     comparability_key: &str,
 ) -> rusqlite::Result<Option<SyncRunSummaryRecord>> {
     connection
@@ -284,8 +296,14 @@ pub(crate) fn read_sync_run_summary_for_comparability(
              FROM gmail_sync_run_summary
              WHERE account_id = ?1
                AND sync_mode = ?2
-               AND comparability_key = ?3",
-            params![account_id, sync_mode.as_str(), comparability_key],
+               AND comparability_kind = ?3
+               AND comparability_key = ?4",
+            params![
+                account_id,
+                sync_mode.as_str(),
+                comparability_kind.as_str(),
+                comparability_key
+            ],
             super::read::row_to_sync_run_summary,
         )
         .optional()

@@ -534,6 +534,7 @@ pub(crate) fn persist_successful_sync_outcome(
     sync_state: &SyncStateRecord,
     outcome: &SyncRunOutcomeInput,
 ) -> Result<(SyncStateRecord, SyncRunHistoryRecord, SyncRunSummaryRecord)> {
+    ensure_sync_outcome_matches_account(&sync_state.account_id, &outcome.account_id)?;
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
     let sync_state = upsert_sync_state_record_in_transaction(&transaction, sync_state)?;
@@ -557,6 +558,7 @@ pub(crate) fn persist_failed_sync_outcome(
     sync_state_update: &SyncStateUpdate,
     outcome: &SyncRunOutcomeInput,
 ) -> Result<(SyncStateRecord, SyncRunHistoryRecord, SyncRunSummaryRecord)> {
+    ensure_sync_outcome_matches_account(&sync_state_update.account_id, &outcome.account_id)?;
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
     let transaction = connection.transaction()?;
     let sync_state = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
@@ -572,6 +574,18 @@ pub(crate) fn persist_failed_sync_outcome(
     )?;
     transaction.commit()?;
     Ok((sync_state, history, summary))
+}
+
+fn ensure_sync_outcome_matches_account(
+    expected_account_id: &str,
+    outcome_account_id: &str,
+) -> Result<()> {
+    if expected_account_id != outcome_account_id {
+        return Err(anyhow!(
+            "sync state account_id `{expected_account_id}` does not match outcome account_id `{outcome_account_id}`"
+        ));
+    }
+    Ok(())
 }
 
 fn reset_full_sync_progress_with_connection(
@@ -980,17 +994,17 @@ fn stage_full_sync_page_chunk_and_maybe_update_checkpoint_with_connection(
     }
 
     let transaction = connection.transaction()?;
-    stage_full_sync_messages_in_transaction(
-        &transaction,
-        account_id,
-        Some(input.page_seq),
-        messages,
-    )?;
     upsert_full_sync_stage_page_in_transaction(
         &transaction,
         account_id,
         input,
         i64::try_from(messages.len()).unwrap_or(i64::MAX),
+    )?;
+    stage_full_sync_messages_in_transaction(
+        &transaction,
+        account_id,
+        Some(input.page_seq),
+        messages,
     )?;
     let record = if let Some(update) = checkpoint_update {
         upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?
