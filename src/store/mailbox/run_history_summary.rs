@@ -36,11 +36,11 @@ pub(crate) fn recompute_sync_run_summary_in_transaction(
         .iter()
         .filter(|row| row.status == SyncStatus::Failed)
         .count() as i64;
-    let recent_failure_streak = history
+    let recent_failure_streak = recent_rows
         .iter()
         .take_while(|row| row.status == SyncStatus::Failed)
         .count() as i64;
-    let recent_clean_success_streak = history
+    let recent_clean_success_streak = recent_rows
         .iter()
         .take_while(|row| is_clean_success(row))
         .count() as i64;

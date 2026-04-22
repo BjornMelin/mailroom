@@ -9,6 +9,8 @@ const DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE: u32 = 3_000;
 const QUOTA_UPSHIFT_STEP_UNITS_PER_MINUTE: u32 = 500;
 const CLEAN_STREAK_FOR_QUOTA_UPSHIFT: i64 = 2;
 const CLEAN_STREAK_FOR_CONCURRENCY_UPSHIFT: i64 = 3;
+const MAX_LEARNED_QUOTA_UNITS_PER_MINUTE: u32 = 12_000;
+const MAX_LEARNED_MESSAGE_FETCH_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NormalizedPersistedPacingState {
@@ -291,14 +293,14 @@ impl AdaptiveSyncPacing {
         } else {
             clean_run_streak = self.persisted_clean_run_streak.saturating_add(1);
             if clean_run_streak >= CLEAN_STREAK_FOR_QUOTA_UPSHIFT
-                && learned_quota_units_per_minute < DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE
+                && learned_quota_units_per_minute < MAX_LEARNED_QUOTA_UNITS_PER_MINUTE
             {
                 learned_quota_units_per_minute = (learned_quota_units_per_minute
                     + QUOTA_UPSHIFT_STEP_UNITS_PER_MINUTE)
-                    .min(DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE);
+                    .min(MAX_LEARNED_QUOTA_UNITS_PER_MINUTE);
             }
             if clean_run_streak >= CLEAN_STREAK_FOR_CONCURRENCY_UPSHIFT
-                && learned_message_fetch_concurrency < DEFAULT_MESSAGE_FETCH_CONCURRENCY
+                && learned_message_fetch_concurrency < MAX_LEARNED_MESSAGE_FETCH_CONCURRENCY
             {
                 learned_message_fetch_concurrency += 1;
             }
@@ -344,17 +346,17 @@ fn normalize_persisted_pacing_state(
 fn normalize_learned_quota_units_per_minute(raw: i64) -> u32 {
     let clamped = raw.clamp(
         i64::from(MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE),
-        i64::from(DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE),
+        i64::from(MAX_LEARNED_QUOTA_UNITS_PER_MINUTE),
     );
-    u32::try_from(clamped).unwrap_or(DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE)
+    u32::try_from(clamped).unwrap_or(MAX_LEARNED_QUOTA_UNITS_PER_MINUTE)
 }
 
 fn normalize_learned_message_fetch_concurrency(raw: i64) -> usize {
     let clamped = raw.clamp(
         1,
-        i64::try_from(DEFAULT_MESSAGE_FETCH_CONCURRENCY).unwrap_or(1),
+        i64::try_from(MAX_LEARNED_MESSAGE_FETCH_CONCURRENCY).unwrap_or(1),
     );
-    usize::try_from(clamped).unwrap_or(DEFAULT_MESSAGE_FETCH_CONCURRENCY)
+    usize::try_from(clamped).unwrap_or(MAX_LEARNED_MESSAGE_FETCH_CONCURRENCY)
 }
 
 fn pressure_kind(
@@ -554,6 +556,26 @@ mod tests {
 
         let update = pacing.finalize_success("gmail:operator@example.com", 200);
         assert_eq!(update.clean_run_streak, 2);
+        assert_eq!(update.learned_quota_units_per_minute, 12_000);
+        assert_eq!(update.learned_message_fetch_concurrency, 4);
+    }
+
+    #[test]
+    fn startup_normalization_uses_learned_state_maxima_instead_of_defaults() {
+        let pacing_state = crate::store::mailbox::SyncPacingStateRecord {
+            account_id: String::from("gmail:operator@example.com"),
+            learned_quota_units_per_minute: i64::MAX,
+            learned_message_fetch_concurrency: i64::MAX,
+            clean_run_streak: 0,
+            last_pressure_kind: None,
+            updated_at_epoch_s: 100,
+        };
+        let pacing = AdaptiveSyncPacing::new(Some(&pacing_state), 12_000, 4);
+
+        assert_eq!(pacing.starting_quota_units_per_minute(), 12_000);
+        assert_eq!(pacing.current_message_fetch_concurrency(), 4);
+
+        let update = pacing.finalize_success("gmail:operator@example.com", 200);
         assert_eq!(update.learned_quota_units_per_minute, 12_000);
         assert_eq!(update.learned_message_fetch_concurrency, 4);
     }

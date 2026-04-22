@@ -1986,7 +1986,7 @@ fn prune_sync_run_history_in_transaction(
                  SELECT
                      run_id,
                      ROW_NUMBER() OVER (
-                         PARTITION BY account_id
+                         PARTITION BY account_id, sync_mode, comparability_kind, comparability_key
                          ORDER BY finished_at_epoch_s DESC, run_id DESC
                      ) AS row_number
                  FROM gmail_sync_run_history
