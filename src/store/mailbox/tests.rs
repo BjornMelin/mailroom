@@ -2,12 +2,12 @@ use super::{
     AttachmentExportEventInput, AttachmentListQuery, AttachmentVaultStateUpdate,
     FullSyncCheckpointStatus, FullSyncCheckpointUpdate, GmailAttachmentUpsertInput,
     GmailMessageUpsertInput, IncrementalSyncCommit, MailboxReadError, MailboxWriteError,
-    SearchQuery, SyncMode, SyncPacingPressureKind, SyncPacingStateUpdate, SyncRunComparabilityKind,
-    SyncRunOutcomeInput, SyncRunRegressionKind, SyncStateUpdate, SyncStatus, commit_full_sync,
-    commit_incremental_sync, finalize_full_sync_from_stage, finalize_incremental_from_stage,
-    get_attachment_detail, get_full_sync_checkpoint, get_sync_run_summary,
-    get_sync_run_summary_for_comparability, get_sync_state, inspect_mailbox, list_attachments,
-    list_label_usage, list_sync_run_history, persist_failed_sync_outcome,
+    MailboxWriterConnection, SearchQuery, SyncMode, SyncPacingPressureKind, SyncPacingStateUpdate,
+    SyncRunComparabilityKind, SyncRunOutcomeInput, SyncRunRegressionKind, SyncStateUpdate,
+    SyncStatus, commit_full_sync, commit_incremental_sync, finalize_full_sync_from_stage,
+    finalize_incremental_from_stage, get_attachment_detail, get_full_sync_checkpoint,
+    get_sync_run_summary, get_sync_run_summary_for_comparability, get_sync_state, inspect_mailbox,
+    list_attachments, list_label_usage, list_sync_run_history, persist_failed_sync_outcome,
     persist_successful_sync_outcome, prepare_full_sync_checkpoint, record_attachment_export,
     replace_labels, replace_labels_and_report_reindex, replace_messages, reset_full_sync_stage,
     reset_incremental_sync_stage, search::build_plain_fts5_query, search_messages,
@@ -2970,6 +2970,191 @@ fn update_full_sync_checkpoint_labels_preserves_staged_messages() {
     )
     .unwrap();
     assert!(results.is_empty());
+}
+
+#[test]
+fn partial_full_sync_page_chunks_reject_checkpoint_updates() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-stage-page-partial-checkpoint-guard");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let account_id = "gmail:operator@example.com";
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    prepare_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[gmail_label("INBOX", "INBOX", "system")],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-2"),
+            cursor_history_id: Some("100"),
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 1,
+            started_at_epoch_s: 100,
+            updated_at_epoch_s: 100,
+        }),
+    )
+    .unwrap();
+
+    let mut writer = MailboxWriterConnection::open(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+    )
+    .unwrap();
+    let error = writer
+        .stage_full_sync_page_chunk_and_maybe_update_checkpoint(
+            &super::FullSyncStagePageInput {
+                page_seq: 0,
+                listed_count: 1,
+                next_page_token: Some(String::from("page-2")),
+                updated_at_epoch_s: 101,
+                page_complete: false,
+            },
+            &[mailbox_message(
+                account_id,
+                "partial-1",
+                "Partial chunk subject",
+                &["INBOX"],
+                "INBOX",
+                &["1.1"],
+            )],
+            Some(&full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+                bootstrap_query: "newer_than:90d",
+                status: FullSyncCheckpointStatus::Paging,
+                next_page_token: Some("page-3"),
+                cursor_history_id: Some("101"),
+                pages_fetched: 1,
+                messages_listed: 1,
+                messages_upserted: 1,
+                labels_synced: 1,
+                started_at_epoch_s: 100,
+                updated_at_epoch_s: 101,
+            })),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "partial full sync page chunks must not advance the checkpoint"
+    );
+}
+
+#[test]
+fn full_sync_stage_page_counts_are_idempotent_on_chunk_retry() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-stage-page-retry-idempotent");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let account_id = "gmail:operator@example.com";
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+
+    prepare_full_sync_checkpoint(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+        &[gmail_label("INBOX", "INBOX", "system")],
+        &full_sync_checkpoint_update(FullSyncCheckpointUpdateSpec {
+            bootstrap_query: "newer_than:90d",
+            status: FullSyncCheckpointStatus::Paging,
+            next_page_token: Some("page-2"),
+            cursor_history_id: Some("100"),
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 1,
+            started_at_epoch_s: 100,
+            updated_at_epoch_s: 100,
+        }),
+    )
+    .unwrap();
+
+    let mut writer = MailboxWriterConnection::open(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        account_id,
+    )
+    .unwrap();
+    let page_input = super::FullSyncStagePageInput {
+        page_seq: 0,
+        listed_count: 1,
+        next_page_token: Some(String::from("page-2")),
+        updated_at_epoch_s: 101,
+        page_complete: false,
+    };
+    let messages = vec![mailbox_message(
+        account_id,
+        "retry-1",
+        "Retry chunk subject",
+        &["INBOX"],
+        "INBOX",
+        &["1.1"],
+    )];
+
+    writer
+        .stage_full_sync_page_chunk_and_maybe_update_checkpoint(&page_input, &messages, None)
+        .unwrap();
+    writer
+        .stage_full_sync_page_chunk_and_maybe_update_checkpoint(&page_input, &messages, None)
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    let staged_message_count: i64 = connection
+        .query_row(
+            "SELECT staged_message_count
+             FROM gmail_full_sync_stage_pages
+             WHERE account_id = ?1
+               AND page_seq = ?2",
+            rusqlite::params![account_id, 0_i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let page_message_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM gmail_full_sync_stage_page_messages
+             WHERE account_id = ?1
+               AND page_seq = ?2",
+            rusqlite::params![account_id, 0_i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(staged_message_count, 1);
+    assert_eq!(page_message_rows, 1);
 }
 
 #[test]

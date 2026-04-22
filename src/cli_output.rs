@@ -5,7 +5,7 @@ use crate::automation::AutomationServiceError;
 use crate::gmail::GmailClientError;
 use crate::store::{
     automation::{AutomationStoreReadError, AutomationStoreWriteError},
-    mailbox::MailboxReadError,
+    mailbox::{MailboxReadError, MailboxWriteError},
     workflows::{WorkflowStoreReadError, WorkflowStoreWriteError},
 };
 use crate::workflows::WorkflowServiceError;
@@ -308,6 +308,26 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
         return (ErrorCode::StorageFailure, "store.mailbox.read");
     }
 
+    if let Some(mailbox_write_error) = find_cause::<MailboxWriteError>(error) {
+        return match mailbox_write_error {
+            MailboxWriteError::OpenDatabase { .. } | MailboxWriteError::Query(_) => {
+                (ErrorCode::StorageFailure, "store.mailbox.write")
+            }
+            MailboxWriteError::AccountMismatch { .. } => (
+                ErrorCode::AuthRequired,
+                "store.mailbox.write.account_mismatch",
+            ),
+            MailboxWriteError::AttachmentNotFound { .. } => (
+                ErrorCode::NotFound,
+                "store.mailbox.write.attachment_not_found",
+            ),
+            MailboxWriteError::InvariantViolation { .. }
+            | MailboxWriteError::RowCountMismatch { .. } => {
+                (ErrorCode::InternalFailure, "store.mailbox.write")
+            }
+        };
+    }
+
     if let Some(gmail_error) = find_cause::<GmailClientError>(error) {
         return match gmail_error {
             GmailClientError::InvalidQuotaBudget { .. } => {
@@ -420,7 +440,9 @@ mod tests {
         AutomationActionKind, AutomationActionSnapshot, AutomationMatchReason,
         CreateAutomationRunInput, NewAutomationRunCandidate, create_automation_run,
     };
-    use crate::store::mailbox::{GmailAttachmentUpsertInput, GmailMessageUpsertInput};
+    use crate::store::mailbox::{
+        GmailAttachmentUpsertInput, GmailMessageUpsertInput, MailboxWriteError,
+    };
     use crate::store::workflows::{WorkflowStoreReadError, WorkflowStoreWriteError};
     use crate::workflows::WorkflowServiceError;
     use crate::workspace::WorkspacePaths;
@@ -629,6 +651,19 @@ mod tests {
 
         assert_eq!(value["error"]["code"], json!("storage_failure"));
         assert_eq!(value["error"]["kind"], json!("attachment.storage"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn mailbox_write_query_errors_map_to_storage_failure_code() {
+        let error = anyhow!(MailboxWriteError::Query(rusqlite::Error::InvalidQuery));
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.mailbox.write"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
     }
 

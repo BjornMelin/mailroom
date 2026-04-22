@@ -1015,25 +1015,38 @@ fn stage_full_sync_page_chunk_and_maybe_update_checkpoint_with_connection(
     messages: &[GmailMessageUpsertInput],
     checkpoint_update: Option<&FullSyncCheckpointUpdate>,
 ) -> Result<FullSyncCheckpointRecord> {
-    if input.page_complete {
+    let checkpoint_update = if input.page_complete {
         let update = checkpoint_update.ok_or_else(|| {
             anyhow!("full sync page completion requires a checkpoint update payload")
         })?;
         ensure_checkpoint_matches_account(account_id, update)?;
-    }
+        Some(update)
+    } else {
+        ensure!(
+            checkpoint_update.is_none(),
+            "partial full sync page chunks must not advance the checkpoint"
+        );
+        None
+    };
 
     let transaction = connection.transaction()?;
-    upsert_full_sync_stage_page_in_transaction(
-        &transaction,
-        account_id,
-        input,
-        i64::try_from(messages.len()).unwrap_or(i64::MAX),
-    )?;
+    upsert_full_sync_stage_page_in_transaction(&transaction, account_id, input, 0)?;
     stage_full_sync_messages_in_transaction(
         &transaction,
         account_id,
         Some(input.page_seq),
         messages,
+    )?;
+    let staged_message_count = count_full_sync_stage_page_messages_in_transaction(
+        &transaction,
+        account_id,
+        input.page_seq,
+    )?;
+    upsert_full_sync_stage_page_in_transaction(
+        &transaction,
+        account_id,
+        input,
+        staged_message_count,
     )?;
     let record = if let Some(update) = checkpoint_update {
         upsert_full_sync_checkpoint_in_transaction(&transaction, account_id, update)?
@@ -1260,6 +1273,23 @@ fn stage_messages_in_transaction(
     Ok(())
 }
 
+fn count_full_sync_stage_page_messages_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    page_seq: i64,
+) -> Result<i64> {
+    transaction
+        .query_row(
+            "SELECT COUNT(*)
+             FROM gmail_full_sync_stage_page_messages
+             WHERE account_id = ?1
+               AND page_seq = ?2",
+            params![account_id, page_seq],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
 fn upsert_full_sync_stage_page_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     account_id: &str,
@@ -1279,7 +1309,7 @@ fn upsert_full_sync_stage_page_in_transaction(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT (account_id, page_seq) DO UPDATE SET
              listed_count = excluded.listed_count,
-             staged_message_count = gmail_full_sync_stage_pages.staged_message_count + excluded.staged_message_count,
+             staged_message_count = excluded.staged_message_count,
              next_page_token = excluded.next_page_token,
              status = excluded.status,
              updated_at_epoch_s = excluded.updated_at_epoch_s",
