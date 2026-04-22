@@ -333,6 +333,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             GmailClientError::InvalidQuotaBudget { .. } => {
                 (ErrorCode::ValidationFailed, "gmail.quota_budget")
             }
+            GmailClientError::QuotaExhausted { .. } => {
+                (ErrorCode::ValidationFailed, "gmail.quota_exhausted")
+            }
             GmailClientError::MissingCredentials | GmailClientError::MissingRefreshToken => {
                 (ErrorCode::AuthRequired, "gmail.credentials")
             }
@@ -623,6 +626,22 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("validation_failed"));
         assert_eq!(value["error"]["kind"], json!("gmail.quota_budget"));
         assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn quota_exhausted_maps_to_gmail_quota_exhausted_validation_error() {
+        let error = anyhow!(GmailClientError::QuotaExhausted {
+            requested_units: 10,
+            available_units_per_minute: 5,
+        });
+
+        let report = describe_error(&error, "thread.show");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("gmail.quota_exhausted"));
+        assert_eq!(value["error"]["operation"], json!("thread.show"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
     }
 

@@ -1215,6 +1215,7 @@ dependencies = [
  "mail-builder",
  "mime_guess",
  "oauth2",
+ "rand 0.8.5",
  "reqwest",
  "rusqlite",
  "rusqlite_migration",
