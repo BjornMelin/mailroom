@@ -148,8 +148,235 @@ impl StoreDoctorReport {
                             Some(history_id) => println!("mailbox_cursor_history_id={history_id}"),
                             None => println!("mailbox_cursor_history_id=<none>"),
                         }
+                        println!(
+                            "mailbox_sync_pipeline_enabled={}",
+                            sync_state.pipeline_enabled
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_list_queue_high_water={}",
+                            sync_state.pipeline_list_queue_high_water
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_write_queue_high_water={}",
+                            sync_state.pipeline_write_queue_high_water
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_write_batch_count={}",
+                            sync_state.pipeline_write_batch_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_wait_ms={}",
+                            sync_state.pipeline_writer_wait_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_fetch_batch_count={}",
+                            sync_state.pipeline_fetch_batch_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_fetch_batch_avg_ms={}",
+                            sync_state.pipeline_fetch_batch_avg_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_fetch_batch_max_ms={}",
+                            sync_state.pipeline_fetch_batch_max_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_tx_count={}",
+                            sync_state.pipeline_writer_tx_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_tx_avg_ms={}",
+                            sync_state.pipeline_writer_tx_avg_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_writer_tx_max_ms={}",
+                            sync_state.pipeline_writer_tx_max_ms
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_reorder_buffer_high_water={}",
+                            sync_state.pipeline_reorder_buffer_high_water
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_staged_message_count={}",
+                            sync_state.pipeline_staged_message_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_staged_delete_count={}",
+                            sync_state.pipeline_staged_delete_count
+                        );
+                        println!(
+                            "mailbox_sync_pipeline_staged_attachment_count={}",
+                            sync_state.pipeline_staged_attachment_count
+                        );
                     }
                     None => println!("mailbox_sync_status=<never-run>"),
+                }
+                match &mailbox.full_sync_checkpoint {
+                    Some(checkpoint) => {
+                        println!("mailbox_full_sync_checkpoint_status={}", checkpoint.status);
+                        println!(
+                            "mailbox_full_sync_checkpoint_bootstrap_query={}",
+                            checkpoint.bootstrap_query
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_pages_fetched={}",
+                            checkpoint.pages_fetched
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_messages_upserted={}",
+                            checkpoint.messages_upserted
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_staged_message_count={}",
+                            checkpoint.staged_message_count
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_next_page_token_present={}",
+                            checkpoint.next_page_token.is_some()
+                        );
+                        println!(
+                            "mailbox_full_sync_checkpoint_updated_at_epoch_s={}",
+                            checkpoint.updated_at_epoch_s
+                        );
+                    }
+                    None => println!("mailbox_full_sync_checkpoint_status=<none>"),
+                }
+                match &mailbox.sync_pacing_state {
+                    Some(pacing_state) => {
+                        println!(
+                            "mailbox_sync_pacing_learned_quota_units_per_minute={}",
+                            pacing_state.learned_quota_units_per_minute
+                        );
+                        println!(
+                            "mailbox_sync_pacing_learned_message_fetch_concurrency={}",
+                            pacing_state.learned_message_fetch_concurrency
+                        );
+                        println!(
+                            "mailbox_sync_pacing_clean_run_streak={}",
+                            pacing_state.clean_run_streak
+                        );
+                        match pacing_state.last_pressure_kind {
+                            Some(kind) => {
+                                println!("mailbox_sync_pacing_last_pressure_kind={kind}")
+                            }
+                            None => println!("mailbox_sync_pacing_last_pressure_kind=<none>"),
+                        }
+                        println!(
+                            "mailbox_sync_pacing_updated_at_epoch_s={}",
+                            pacing_state.updated_at_epoch_s
+                        );
+                    }
+                    None => println!("mailbox_sync_pacing_learned_quota_units_per_minute=<none>"),
+                }
+                match &mailbox.sync_run_summary {
+                    Some(summary) => {
+                        println!("mailbox_sync_run_summary_mode={}", summary.sync_mode);
+                        println!(
+                            "mailbox_sync_run_summary_comparability_kind={}",
+                            summary.comparability_kind
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_comparability_key={}",
+                            summary.comparability_key
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_comparability_label={}",
+                            summary.comparability_label
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_latest_run_id={}",
+                            summary.latest_run_id
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_latest_status={}",
+                            summary.latest_status
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_latest_finished_at_epoch_s={}",
+                            summary.latest_finished_at_epoch_s
+                        );
+                        match summary.best_clean_run_id {
+                            Some(run_id) => {
+                                println!("mailbox_sync_run_summary_best_clean_run_id={run_id}")
+                            }
+                            None => println!("mailbox_sync_run_summary_best_clean_run_id=<none>"),
+                        }
+                        match summary.best_clean_quota_units_per_minute {
+                            Some(value) => println!(
+                                "mailbox_sync_run_summary_best_clean_quota_units_per_minute={value}"
+                            ),
+                            None => println!(
+                                "mailbox_sync_run_summary_best_clean_quota_units_per_minute=<none>"
+                            ),
+                        }
+                        match summary.best_clean_message_fetch_concurrency {
+                            Some(value) => println!(
+                                "mailbox_sync_run_summary_best_clean_message_fetch_concurrency={value}"
+                            ),
+                            None => println!(
+                                "mailbox_sync_run_summary_best_clean_message_fetch_concurrency=<none>"
+                            ),
+                        }
+                        match summary.best_clean_messages_per_second {
+                            Some(value) => println!(
+                                "mailbox_sync_run_summary_best_clean_messages_per_second={value}"
+                            ),
+                            None => println!(
+                                "mailbox_sync_run_summary_best_clean_messages_per_second=<none>"
+                            ),
+                        }
+                        match summary.best_clean_duration_ms {
+                            Some(value) => {
+                                println!("mailbox_sync_run_summary_best_clean_duration_ms={value}")
+                            }
+                            None => {
+                                println!("mailbox_sync_run_summary_best_clean_duration_ms=<none>")
+                            }
+                        }
+                        println!(
+                            "mailbox_sync_run_summary_recent_success_count={}",
+                            summary.recent_success_count
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_recent_failure_count={}",
+                            summary.recent_failure_count
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_recent_failure_streak={}",
+                            summary.recent_failure_streak
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_recent_clean_success_streak={}",
+                            summary.recent_clean_success_streak
+                        );
+                        println!(
+                            "mailbox_sync_run_summary_regression_detected={}",
+                            summary.regression_detected
+                        );
+                        match summary.regression_kind {
+                            Some(kind) => {
+                                println!("mailbox_sync_run_summary_regression_kind={kind}")
+                            }
+                            None => println!("mailbox_sync_run_summary_regression_kind=<none>"),
+                        }
+                        match summary.regression_run_id {
+                            Some(run_id) => {
+                                println!("mailbox_sync_run_summary_regression_run_id={run_id}")
+                            }
+                            None => println!("mailbox_sync_run_summary_regression_run_id=<none>"),
+                        }
+                        match &summary.regression_message {
+                            Some(message) => {
+                                println!("mailbox_sync_run_summary_regression_message={message}")
+                            }
+                            None => println!("mailbox_sync_run_summary_regression_message=<none>"),
+                        }
+                        println!(
+                            "mailbox_sync_run_summary_updated_at_epoch_s={}",
+                            summary.updated_at_epoch_s
+                        );
+                    }
+                    None => println!("mailbox_sync_run_summary_latest_run_id=<none>"),
                 }
             }
             if let Some(workflows) = &self.workflows {
@@ -379,7 +606,7 @@ mod tests {
         let report = init(&config_report).unwrap();
 
         assert!(report.database_path.exists());
-        assert_eq!(report.schema_version, 8);
+        assert_eq!(report.schema_version, 16);
         assert_eq!(report.pragmas.application_id, SQLITE_APPLICATION_ID);
 
         let connection = Connection::open(&report.database_path).unwrap();
@@ -393,13 +620,27 @@ mod tests {
                        'gmail_labels',
                        'gmail_messages',
                        'gmail_message_labels',
-                       'gmail_sync_state'
+                       'gmail_sync_state',
+                       'gmail_full_sync_stage_labels',
+                       'gmail_full_sync_stage_messages',
+                       'gmail_full_sync_stage_message_labels',
+                       'gmail_full_sync_stage_attachments',
+                       'gmail_full_sync_checkpoint',
+                       'gmail_sync_pacing_state',
+                       'gmail_sync_run_history',
+                       'gmail_sync_run_summary',
+                       'gmail_incremental_sync_stage_delete_ids',
+                       'gmail_incremental_sync_stage_messages',
+                       'gmail_incremental_sync_stage_message_labels',
+                       'gmail_incremental_sync_stage_attachments',
+                       'gmail_full_sync_stage_pages',
+                       'gmail_full_sync_stage_page_messages'
                    )",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(substrate_tables, 6);
+        assert_eq!(substrate_tables, 20);
 
         fs::remove_dir_all(repo_root).unwrap();
     }
@@ -509,11 +750,11 @@ mod tests {
 
     #[test]
     fn pending_migrations_errors_when_database_is_ahead() {
-        let error = super::pending_migrations(8, 9).unwrap_err();
+        let error = super::pending_migrations(12, 13).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("database schema version 9 is newer than embedded migrations (8)")
+                .contains("database schema version 13 is newer than embedded migrations (12)")
         );
     }
 
@@ -683,6 +924,41 @@ mod tests {
 
         connection
             .execute_batch(include_str!(
+                "../../migrations/15-sync-run-history/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/14-sync-pipeline-telemetry-and-page-manifests/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/13-bounded-sync-pipeline/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/12-sync-pacing-state-hardening/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/11-sync-pacing-state/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/10-full-sync-checkpoints/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/09-mailbox-full-sync-staging/down.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
                 "../../migrations/08-automation-rules-and-bulk-actions/down.sql"
             ))
             .unwrap();
@@ -707,7 +983,7 @@ mod tests {
         drop(connection);
 
         let migration_report = init(&config_report).unwrap();
-        assert_eq!(migration_report.schema_version, 8);
+        assert_eq!(migration_report.schema_version, 16);
         assert_eq!(migration_report.pending_migrations, 0);
 
         let connection = Connection::open(&config_report.config.store.database_path).unwrap();
@@ -832,6 +1108,224 @@ mod tests {
             .unwrap();
         assert_eq!(shared_key_count, 2);
 
+        fs::remove_dir_all(repo_root).unwrap();
+    }
+
+    #[test]
+    fn migration_v16_round_trip_rebuilds_and_preserves_sync_run_summaries() {
+        let repo_root = unique_temp_dir("mailroom-store-migration-v16-sync-history");
+        let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        paths.ensure_runtime_dirs().unwrap();
+        let config_report = resolve(&paths).unwrap();
+        init(&config_report).unwrap();
+
+        let account = accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &accounts::UpsertAccountInput {
+                email_address: String::from("operator@example.com"),
+                history_id: String::from("500"),
+                messages_total: 0,
+                threads_total: 0,
+                access_scope: String::from("scope:a"),
+                refreshed_at_epoch_s: 500,
+            },
+        )
+        .unwrap();
+
+        let sync_state = mailbox::upsert_sync_state(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &mailbox::SyncStateUpdate {
+                account_id: account.account_id.clone(),
+                cursor_history_id: Some(String::from("500")),
+                bootstrap_query: String::from("in:anywhere -in:spam -in:trash newer_than:30d"),
+                last_sync_mode: mailbox::SyncMode::Incremental,
+                last_sync_status: mailbox::SyncStatus::Ok,
+                last_error: None,
+                last_sync_epoch_s: 500,
+                last_full_sync_success_epoch_s: Some(490),
+                last_incremental_sync_success_epoch_s: Some(500),
+                pipeline_enabled: false,
+                pipeline_list_queue_high_water: 0,
+                pipeline_write_queue_high_water: 0,
+                pipeline_write_batch_count: 0,
+                pipeline_writer_wait_ms: 0,
+                pipeline_fetch_batch_count: 0,
+                pipeline_fetch_batch_avg_ms: 0,
+                pipeline_fetch_batch_max_ms: 0,
+                pipeline_writer_tx_count: 0,
+                pipeline_writer_tx_avg_ms: 0,
+                pipeline_writer_tx_max_ms: 0,
+                pipeline_reorder_buffer_high_water: 0,
+                pipeline_staged_message_count: 0,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
+            },
+        )
+        .unwrap();
+
+        let make_outcome = |started_at_epoch_s: i64,
+                            finished_at_epoch_s: i64,
+                            messages_listed: i64| {
+            let comparability = mailbox::comparability_for_incremental_workload(messages_listed, 0);
+            mailbox::SyncRunOutcomeInput {
+                account_id: account.account_id.clone(),
+                sync_mode: mailbox::SyncMode::Incremental,
+                status: mailbox::SyncStatus::Ok,
+                comparability_kind: comparability.kind,
+                comparability_key: comparability.key,
+                startup_seed_run_id: None,
+                started_at_epoch_s,
+                finished_at_epoch_s,
+                bootstrap_query: String::from("in:anywhere -in:spam -in:trash newer_than:30d"),
+                cursor_history_id: Some(String::from("500")),
+                fallback_from_history: false,
+                resumed_from_checkpoint: false,
+                pages_fetched: 1,
+                messages_listed,
+                messages_upserted: messages_listed,
+                messages_deleted: 0,
+                labels_synced: 10,
+                checkpoint_reused_pages: 0,
+                checkpoint_reused_messages_upserted: 0,
+                pipeline_enabled: true,
+                pipeline_list_queue_high_water: 1,
+                pipeline_write_queue_high_water: 1,
+                pipeline_write_batch_count: 1,
+                pipeline_writer_wait_ms: 10,
+                pipeline_fetch_batch_count: 1,
+                pipeline_fetch_batch_avg_ms: 10,
+                pipeline_fetch_batch_max_ms: 10,
+                pipeline_writer_tx_count: 1,
+                pipeline_writer_tx_avg_ms: 5,
+                pipeline_writer_tx_max_ms: 5,
+                pipeline_reorder_buffer_high_water: 1,
+                pipeline_staged_message_count: messages_listed,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
+                adaptive_pacing_enabled: true,
+                quota_units_budget_per_minute: 12_000,
+                message_fetch_concurrency: 4,
+                quota_units_cap_per_minute: 12_000,
+                message_fetch_concurrency_cap: 4,
+                starting_quota_units_per_minute: 12_000,
+                starting_message_fetch_concurrency: 4,
+                effective_quota_units_per_minute: 12_000,
+                effective_message_fetch_concurrency: 4,
+                adaptive_downshift_count: 0,
+                estimated_quota_units_reserved: messages_listed * 5,
+                http_attempt_count: messages_listed,
+                retry_count: 0,
+                quota_pressure_retry_count: 0,
+                concurrency_pressure_retry_count: 0,
+                backend_retry_count: 0,
+                throttle_wait_count: 0,
+                throttle_wait_ms: 0,
+                retry_after_wait_ms: 0,
+                duration_ms: messages_listed * 10,
+                pages_per_second: 1.0,
+                messages_per_second: messages_listed as f64,
+                error_message: None,
+            }
+        };
+
+        let (_, tiny_history, _) = mailbox::persist_successful_sync_outcome(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &sync_state,
+            &make_outcome(500, 510, 10),
+        )
+        .unwrap();
+        let (_, large_history, _) = mailbox::persist_successful_sync_outcome(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &sync_state,
+            &make_outcome(520, 530, 600),
+        )
+        .unwrap();
+
+        let connection = Connection::open(&config_report.config.store.database_path).unwrap();
+        let pre_down_summary_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_down_summary_count, 2);
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/16-sync-history-comparability/down.sql"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 15_i64)
+            .unwrap();
+
+        let post_down_summary_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_down_summary_count, 1);
+        let post_down_latest_run_id: i64 = connection
+            .query_row(
+                "SELECT latest_run_id FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_down_latest_run_id, large_history.run_id);
+
+        connection
+            .execute_batch(include_str!(
+                "../../migrations/16-sync-history-comparability/up.sql"
+            ))
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 16_i64)
+            .unwrap();
+
+        let post_up_summary_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM gmail_sync_run_summary WHERE account_id = ?1 AND sync_mode = 'incremental'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_up_summary_count, 2);
+
+        let tiny_best_clean_run_id: i64 = connection
+            .query_row(
+                "SELECT best_clean_run_id
+                 FROM gmail_sync_run_summary
+                 WHERE account_id = ?1
+                   AND sync_mode = 'incremental'
+                   AND comparability_key = 'tiny'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tiny_best_clean_run_id, tiny_history.run_id);
+
+        let large_best_clean_run_id: i64 = connection
+            .query_row(
+                "SELECT best_clean_run_id
+                 FROM gmail_sync_run_summary
+                 WHERE account_id = ?1
+                   AND sync_mode = 'incremental'
+                   AND comparability_key = 'large'",
+                [&account.account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(large_best_clean_run_id, large_history.run_id);
+
+        drop(connection);
         fs::remove_dir_all(repo_root).unwrap();
     }
 

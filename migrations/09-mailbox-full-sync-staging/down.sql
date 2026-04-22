@@ -1,0 +1,11 @@
+DROP INDEX IF EXISTS gmail_full_sync_stage_attachments_account_message_idx;
+DROP TABLE IF EXISTS gmail_full_sync_stage_attachments;
+
+DROP INDEX IF EXISTS gmail_full_sync_stage_message_labels_account_message_idx;
+DROP TABLE IF EXISTS gmail_full_sync_stage_message_labels;
+
+DROP INDEX IF EXISTS gmail_full_sync_stage_messages_account_thread_idx;
+DROP TABLE IF EXISTS gmail_full_sync_stage_messages;
+
+DROP INDEX IF EXISTS gmail_full_sync_stage_labels_account_name_idx;
+DROP TABLE IF EXISTS gmail_full_sync_stage_labels;

@@ -5,7 +5,7 @@ use crate::automation::AutomationServiceError;
 use crate::gmail::GmailClientError;
 use crate::store::{
     automation::{AutomationStoreReadError, AutomationStoreWriteError},
-    mailbox::MailboxReadError,
+    mailbox::{MailboxReadError, MailboxWriteError},
     workflows::{WorkflowStoreReadError, WorkflowStoreWriteError},
 };
 use crate::workflows::WorkflowServiceError;
@@ -308,8 +308,31 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
         return (ErrorCode::StorageFailure, "store.mailbox.read");
     }
 
+    if let Some(mailbox_write_error) = find_cause::<MailboxWriteError>(error) {
+        return match mailbox_write_error {
+            MailboxWriteError::OpenDatabase { .. } | MailboxWriteError::Query(_) => {
+                (ErrorCode::StorageFailure, "store.mailbox.write")
+            }
+            MailboxWriteError::AccountMismatch { .. } => (
+                ErrorCode::AuthRequired,
+                "store.mailbox.write.account_mismatch",
+            ),
+            MailboxWriteError::AttachmentNotFound { .. } => (
+                ErrorCode::NotFound,
+                "store.mailbox.write.attachment_not_found",
+            ),
+            MailboxWriteError::InvariantViolation { .. }
+            | MailboxWriteError::RowCountMismatch { .. } => {
+                (ErrorCode::InternalFailure, "store.mailbox.write")
+            }
+        };
+    }
+
     if let Some(gmail_error) = find_cause::<GmailClientError>(error) {
         return match gmail_error {
+            GmailClientError::InvalidQuotaBudget { .. } => {
+                (ErrorCode::ValidationFailed, "gmail.quota_budget")
+            }
             GmailClientError::MissingCredentials | GmailClientError::MissingRefreshToken => {
                 (ErrorCode::AuthRequired, "gmail.credentials")
             }
@@ -417,7 +440,9 @@ mod tests {
         AutomationActionKind, AutomationActionSnapshot, AutomationMatchReason,
         CreateAutomationRunInput, NewAutomationRunCandidate, create_automation_run,
     };
-    use crate::store::mailbox::{GmailAttachmentUpsertInput, GmailMessageUpsertInput};
+    use crate::store::mailbox::{
+        GmailAttachmentUpsertInput, GmailMessageUpsertInput, MailboxWriteError,
+    };
     use crate::store::workflows::{WorkflowStoreReadError, WorkflowStoreWriteError};
     use crate::workflows::WorkflowServiceError;
     use crate::workspace::WorkspacePaths;
@@ -527,6 +552,18 @@ mod tests {
     }
 
     #[test]
+    fn sync_cli_zero_value_errors_map_to_validation_failed_code() {
+        let error = anyhow!(CliInputError::RecentDaysZero);
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("cli.validation"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
     fn automation_run_account_mismatch_maps_to_auth_required_code() {
         let error = anyhow!(AutomationServiceError::RunAccountMismatch {
             run_id: 42,
@@ -574,6 +611,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_quota_budget_maps_to_gmail_quota_budget_validation_error() {
+        let error = anyhow!(GmailClientError::InvalidQuotaBudget {
+            units_per_minute: 0,
+            minimum_units_per_minute: 5,
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("validation_failed"));
+        assert_eq!(value["error"]["kind"], json!("gmail.quota_budget"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+    }
+
+    #[test]
     fn attachment_store_write_errors_map_to_storage_failure_code() {
         let error = anyhow!(crate::attachments::AttachmentServiceError::StoreWrite {
             source: anyhow!("database is locked"),
@@ -599,6 +652,90 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("storage_failure"));
         assert_eq!(value["error"]["kind"], json!("attachment.storage"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn mailbox_write_query_errors_map_to_storage_failure_code() {
+        let error = anyhow!(MailboxWriteError::Query(rusqlite::Error::InvalidQuery));
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("storage_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.mailbox.write"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn mailbox_write_account_mismatch_maps_to_auth_required_code() {
+        let error = anyhow!(MailboxWriteError::AccountMismatch {
+            expected_account_id: String::from("gmail:expected@example.com"),
+            outcome_account_id: String::from("gmail:actual@example.com"),
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("auth_required"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("store.mailbox.write.account_mismatch")
+        );
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
+    }
+
+    #[test]
+    fn mailbox_write_attachment_not_found_maps_to_not_found_code() {
+        let error = anyhow!(MailboxWriteError::AttachmentNotFound {
+            account_id: String::from("gmail:operator@example.com"),
+            attachment_key: String::from("m-1:1.2"),
+        });
+
+        let report = describe_error(&error, "attachment.fetch");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("not_found"));
+        assert_eq!(
+            value["error"]["kind"],
+            json!("store.mailbox.write.attachment_not_found")
+        );
+        assert_eq!(value["error"]["operation"], json!("attachment.fetch"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(4));
+    }
+
+    #[test]
+    fn mailbox_write_invariant_violation_maps_to_internal_failure_code() {
+        let error = anyhow!(MailboxWriteError::InvariantViolation {
+            operation: "persist_successful_sync_outcome",
+            detail: String::from("summary disappeared"),
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.mailbox.write"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
+    fn mailbox_write_row_count_mismatch_maps_to_internal_failure_code() {
+        let error = anyhow!(MailboxWriteError::RowCountMismatch {
+            operation: "delete_messages",
+            expected: 1,
+            actual: 0,
+        });
+
+        let report = describe_error(&error, "sync.run");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("store.mailbox.write"));
+        assert_eq!(value["error"]["operation"], json!("sync.run"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
     }
 
     #[test]

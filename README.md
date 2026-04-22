@@ -8,6 +8,7 @@
 - Planned operator surfaces: CLI first, TUI second
 - Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
 - Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, attachment catalog/export foundation, and review-first automation rules
+- Hardening surface: read-only label audits, readiness verification, and operator runbooks for safe real-mailbox rollout
 - Versioned content: code, docs, examples, plans
 - Ignored runtime content: `.mailroom/` state, caches, exports, secrets, and attachment vaults
 - V1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export + review-first automation
@@ -50,6 +51,8 @@ The current binary can now resolve config, bootstrap the local store, manage Gma
 cargo run -- workspace init
 cargo run -- paths --json
 cargo run -- doctor --json
+cargo run -- audit labels --json
+cargo run -- audit verification --json
 cargo run -- config show --json
 cargo run -- auth status --json
 cargo run -- auth setup
@@ -62,6 +65,7 @@ cargo run -- store init --json
 cargo run -- store doctor --json
 cargo run -- sync run --json
 cargo run -- sync run --full --recent-days 30 --json
+cargo run -- sync run --profile deep-audit --json
 cargo run -- search "project alpha" --label INBOX --limit 10 --json
 cargo run -- attachment list --json
 cargo run -- attachment show m-1:1.2 --json
@@ -106,6 +110,30 @@ All `--json` commands now use one normalized envelope:
 - `7`: local storage failure
 - `10`: internal failure
 
+## Gmail sync hardening
+
+`mailroom sync run` is quota-aware by default. Full and incremental sync now:
+
+- use Mailroom's built-in Gmail quota limiter instead of an external generic
+  rate-limiter dependency
+- budget Gmail read calls by quota units, not raw request count
+- use `500`-message list/history pages for fewer API round trips
+- keep message payload fetch concurrency bounded by default
+- retry Gmail `429`, `5xx`, and usage-limit `403` responses with truncated backoff
+
+The named deep-audit preset is available when a deep bootstrap needs extra
+headroom:
+
+```bash
+cargo run -- sync run --profile deep-audit --json
+```
+
+Equivalent explicit flags:
+
+```bash
+cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
+```
+
 Operator input mistakes on the workflow surface now stay in the validation
 bucket. Examples:
 
@@ -131,6 +159,10 @@ Review-first automation rules and persisted bulk-action snapshots live in
 [`docs/operations/automation-rules-and-bulk-actions.md`](docs/operations/automation-rules-and-bulk-actions.md),
 with the durable design captured in
 [`docs/decisions/0006-review-first-automation-rules.md`](docs/decisions/0006-review-first-automation-rules.md).
+Read-only verification and hardening guidance live in
+[`docs/operations/verification-and-hardening.md`](docs/operations/verification-and-hardening.md),
+with the durable design captured in
+[`docs/decisions/0007-verification-audit-hardening.md`](docs/decisions/0007-verification-audit-hardening.md).
 
 Config precedence is:
 
@@ -172,18 +204,20 @@ Advanced manual overrides still work:
 - [`docs/decisions/0004-unified-thread-workflow.md`](docs/decisions/0004-unified-thread-workflow.md): thread workflow, drafts, and cleanup ownership
 - [`docs/decisions/0005-attachment-canonical-model.md`](docs/decisions/0005-attachment-canonical-model.md): attachment catalog, vault, and export ownership
 - [`docs/decisions/0006-review-first-automation-rules.md`](docs/decisions/0006-review-first-automation-rules.md): review-first automation rules and persisted bulk-action snapshots
+- [`docs/decisions/0007-verification-audit-hardening.md`](docs/decisions/0007-verification-audit-hardening.md): read-only audit ownership and real-mailbox rollout posture
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
 - [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
 - [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md): sync commands, search filters, and cursor behavior
 - [`docs/operations/attachment-catalog-and-export.md`](docs/operations/attachment-catalog-and-export.md): attachment listing, vault fetch, and export commands
 - [`docs/operations/thread-workflow-and-cleanup.md`](docs/operations/thread-workflow-and-cleanup.md): triage, draft/send, snooze, and reviewed cleanup commands
 - [`docs/operations/automation-rules-and-bulk-actions.md`](docs/operations/automation-rules-and-bulk-actions.md): rule validation, persisted run snapshots, and review-first bulk apply
+- [`docs/operations/verification-and-hardening.md`](docs/operations/verification-and-hardening.md): deep-sync audit, label canonicalization, canary tests, and first-wave ruleset rollout
 - [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
 - [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 
 ## Near-term build plan
 
-1. Improve automation ergonomics, including better candidate inspection and reusable rule presets.
-2. Harden attachment and thread review ergonomics, including better export naming and richer operator inspection.
-3. Expand unsubscribe assistance only after the review-first automation contract proves out.
-4. Build a TUI over the existing command core and SQLite workflow model.
+1. Use the verification and hardening runbook to canonicalize labels, deepen the local audit corpus, and stage the first real personal ruleset.
+2. Expand automation ergonomics only after a few low-surprise micro-batch archive/label runs land cleanly.
+3. Expand unsubscribe assistance only after the deeper sync proves out list-header coverage in the local cache.
+4. Build a TUI over the existing command core, audit surfaces, and SQLite workflow model.

@@ -114,6 +114,39 @@ report:
 - last attempted sync epoch
 - last successful full-sync epoch
 - last successful incremental-sync epoch
+- active full-bootstrap checkpoint state when a staged full sync is in progress
+- persisted adaptive sync pacing state for the active account when present
+- persisted sync-run history summary for the active account and latest sync mode
+- last recorded pipeline metrics for the active account when sync state exists
+
+Full-bootstrap resume state is stored in SQLite, alongside the staged mailbox
+rows, not in a sidecar file under `.mailroom/`. The checkpoint row records the
+bootstrap query, current `nextPageToken`, highest observed history cursor,
+progress counters, and staged row counts for the active account.
+
+Adaptive sync pacing is also stored in SQLite. The pacing row records the
+learned quota budget, learned message-fetch concurrency, clean-run streak, last
+observed pressure kind, and update time for the active account. The runtime
+sync flags still act as per-run ceilings over those learned values. Mailroom's
+native Gmail quota limiter consumes this persisted pacing state directly; there
+is no second external rate-limiter configuration surface to keep in sync.
+
+Historical sync telemetry is stored in SQLite as well. Mailroom appends one
+terminal run row per successful or failed sync attempt, prunes retained history
+to the newest 1000 rows per account, and recomputes one compact summary row per
+account, sync mode, and comparability bucket for `doctor`, `store doctor`,
+`sync history`, and `sync perf explain`.
+
+Comparability buckets keep unlike workloads from polluting each other:
+
+- full sync runs are bucketed by a normalized bootstrap query shape, using a
+  `newer_than:<days>d` tier when available
+- incremental sync runs are bucketed by workload size tiers derived from the
+  number of changed and deleted messages
+
+Comparable clean history can seed the startup quota budget and message-fetch
+concurrency for later runs, but `gmail_sync_pacing_state` remains the single
+durable owner of learned pacing and CLI flags still cap each run.
 
 ## Hardening defaults
 
@@ -154,3 +187,29 @@ The current mailbox-oriented schema adds:
 - `gmail_message_labels`
 - `gmail_sync_state`
 - `gmail_message_search`
+- `gmail_full_sync_stage_*`
+- `gmail_incremental_sync_stage_*`
+- `gmail_full_sync_checkpoint`
+- `gmail_sync_pacing_state`
+- `gmail_full_sync_stage_pages`
+- `gmail_full_sync_stage_page_messages`
+- `gmail_sync_run_history`
+- `gmail_sync_run_summary`
+
+The persisted sync state row also stores the last observed pipeline metrics:
+
+- `pipeline_enabled`
+- `pipeline_list_queue_high_water`
+- `pipeline_write_queue_high_water`
+- `pipeline_write_batch_count`
+- `pipeline_writer_wait_ms`
+- `pipeline_fetch_batch_count`
+- `pipeline_fetch_batch_avg_ms`
+- `pipeline_fetch_batch_max_ms`
+- `pipeline_writer_tx_count`
+- `pipeline_writer_tx_avg_ms`
+- `pipeline_writer_tx_max_ms`
+- `pipeline_reorder_buffer_high_water`
+- `pipeline_staged_message_count`
+- `pipeline_staged_delete_count`
+- `pipeline_staged_attachment_count`

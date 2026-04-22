@@ -2,11 +2,12 @@
 
 The current operator loop for inbox triage is:
 
-1. collect or inspect candidate messages
-2. search and shortlist
-3. classify into buckets
-4. promote selected items into draft or follow-up state
-5. execute cleanup actions only after review
+1. verify local mailbox readiness and label taxonomy first
+2. collect or inspect candidate messages
+3. search and shortlist
+4. classify into buckets
+5. promote selected items into draft or follow-up state
+6. execute cleanup actions only after review
 
 Preferred buckets:
 
@@ -18,6 +19,8 @@ Preferred buckets:
 The native CLI now supports this flow directly:
 
 ```bash
+cargo run -- audit verification --json
+cargo run -- audit labels --json
 cargo run -- sync run --json
 cargo run -- search "project alpha" --json
 cargo run -- triage set thread-123 --bucket urgent --json

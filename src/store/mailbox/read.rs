@@ -1,11 +1,14 @@
 use super::{
-    AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, MailboxDoctorReport,
-    MailboxReadError, SyncMode, SyncStateRecord, SyncStatus, ThreadMessageSnapshot,
-    is_missing_mailbox_table_error,
+    AttachmentDetailRecord, AttachmentListItem, AttachmentListQuery, FullSyncCheckpointRecord,
+    FullSyncCheckpointStatus, LabelUsageRecord, MailboxCoverageReport, MailboxDoctorReport,
+    MailboxReadError, SyncMode, SyncPacingPressureKind, SyncPacingStateRecord,
+    SyncRunComparabilityKind, SyncRunHistoryRecord, SyncRunRegressionKind, SyncRunSummaryRecord,
+    SyncStateRecord, SyncStatus, ThreadMessageSnapshot, is_missing_mailbox_table_error,
+    sync_run_comparability_label,
 };
 use crate::store::connection;
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -23,9 +26,137 @@ pub(crate) fn get_sync_state(
     read_sync_state(&connection, account_id)
 }
 
+pub(crate) fn get_full_sync_checkpoint(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_full_sync_checkpoint(&connection, account_id)
+}
+
+pub(crate) fn get_sync_pacing_state(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<SyncPacingStateRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_sync_pacing_state(&connection, account_id)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn get_sync_run_summary(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    sync_mode: SyncMode,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_sync_run_summary(&connection, account_id, sync_mode)
+}
+
+pub(crate) fn get_sync_run_summary_for_comparability(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    sync_mode: SyncMode,
+    comparability_kind: SyncRunComparabilityKind,
+    comparability_key: &str,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    Ok(
+        super::run_history_summary::read_sync_run_summary_for_comparability(
+            &connection,
+            account_id,
+            sync_mode,
+            comparability_kind,
+            comparability_key,
+        )?,
+    )
+}
+
+pub(crate) fn list_sync_run_history(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+    limit: usize,
+) -> Result<Vec<SyncRunHistoryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_sync_run_history(&connection, account_id, limit)
+}
+
+pub(crate) fn get_sync_run_history_record(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    run_id: i64,
+) -> Result<Option<SyncRunHistoryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    read_sync_run_history_record(&connection, run_id)
+}
+
+pub(crate) fn get_latest_sync_run_summary_for_account(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    latest_sync_run_summary_for_account(&connection, account_id)
+}
+
 pub(crate) fn inspect_mailbox(
     database_path: &Path,
     busy_timeout_ms: u64,
+) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
+    inspect_mailbox_with_scope(database_path, busy_timeout_ms, None)
+}
+
+pub(crate) fn inspect_mailbox_account(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
+    inspect_mailbox_with_scope(database_path, busy_timeout_ms, Some(account_id))
+}
+
+fn inspect_mailbox_with_scope(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: Option<&str>,
 ) -> Result<Option<MailboxDoctorReport>, MailboxReadError> {
     if !database_path.try_exists()? {
         return Ok(None);
@@ -33,15 +164,51 @@ pub(crate) fn inspect_mailbox(
 
     let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
         .map_err(|source| MailboxReadError::open_database(database_path, source))?;
-    let sync_state = latest_sync_state(&connection)?;
-    let message_count = count_messages(&connection, None)?;
-    let label_count = count_labels(&connection, None)?;
-    let indexed_message_count = count_indexed_messages(&connection, None)?;
+    let sync_state = match account_id {
+        Some(account_id) => read_sync_state(&connection, account_id)?,
+        None => latest_sync_state(&connection)?,
+    };
+    let full_sync_checkpoint = match account_id {
+        Some(account_id) => read_full_sync_checkpoint(&connection, account_id)?,
+        None => match sync_state.as_ref() {
+            Some(sync_state) => read_full_sync_checkpoint(&connection, &sync_state.account_id)?,
+            None => latest_full_sync_checkpoint(&connection)?,
+        },
+    };
+    let sync_pacing_state = match account_id {
+        Some(account_id) => read_sync_pacing_state(&connection, account_id)?,
+        None => match sync_state.as_ref() {
+            Some(sync_state) => read_sync_pacing_state(&connection, &sync_state.account_id)?,
+            None => latest_sync_pacing_state(&connection)?,
+        },
+    };
+    let sync_run_summary = match account_id {
+        Some(account_id) => match sync_state.as_ref() {
+            Some(sync_state) => {
+                read_sync_run_summary(&connection, account_id, sync_state.last_sync_mode)?
+            }
+            None => latest_sync_run_summary_for_account(&connection, account_id)?,
+        },
+        None => match sync_state.as_ref() {
+            Some(sync_state) => read_sync_run_summary(
+                &connection,
+                &sync_state.account_id,
+                sync_state.last_sync_mode,
+            )?,
+            None => latest_sync_run_summary(&connection)?,
+        },
+    };
+    let message_count = count_messages(&connection, account_id)?;
+    let label_count = count_labels(&connection, account_id)?;
+    let indexed_message_count = count_indexed_messages(&connection, account_id)?;
     let (attachment_count, vaulted_attachment_count, attachment_export_count) =
-        attachment_counts(&connection)?;
+        attachment_counts(&connection, account_id)?;
 
     Ok(Some(MailboxDoctorReport {
         sync_state,
+        full_sync_checkpoint,
+        sync_pacing_state,
+        sync_run_summary,
         message_count,
         label_count,
         indexed_message_count,
@@ -51,11 +218,14 @@ pub(crate) fn inspect_mailbox(
     }))
 }
 
-fn attachment_counts(connection: &Connection) -> Result<(i64, i64, i64), MailboxReadError> {
+fn attachment_counts(
+    connection: &Connection,
+    account_id: Option<&str>,
+) -> Result<(i64, i64, i64), MailboxReadError> {
     Ok((
-        count_attachments(connection, None)?,
-        count_vaulted_attachments(connection, None)?,
-        count_attachment_export_events(connection, None)?,
+        count_attachments(connection, account_id)?,
+        count_vaulted_attachments(connection, account_id)?,
+        count_attachment_export_events(connection, account_id)?,
     ))
 }
 
@@ -319,6 +489,116 @@ pub(crate) fn resolve_label_ids_by_names(
     Ok(resolved)
 }
 
+pub(crate) fn list_label_usage(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Vec<LabelUsageRecord>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(Vec::new());
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    let mut statement = match connection.prepare(
+        "SELECT
+             gl.label_id,
+             gl.name,
+             gl.label_type,
+             gl.messages_total,
+             gl.threads_total,
+             COUNT(DISTINCT gm.message_rowid) AS local_message_count,
+             COUNT(DISTINCT gm.thread_id) AS local_thread_count
+         FROM gmail_labels gl
+         LEFT JOIN gmail_message_labels gml
+           ON gml.label_id = gl.label_id
+         LEFT JOIN gmail_messages gm
+           ON gm.message_rowid = gml.message_rowid
+          AND gm.account_id = gl.account_id
+         WHERE gl.account_id = ?1
+         GROUP BY
+             gl.label_id,
+             gl.name,
+             gl.label_type,
+             gl.messages_total,
+             gl.threads_total
+         ORDER BY lower(gl.name) ASC, gl.label_id ASC",
+    ) {
+        Ok(statement) => statement,
+        Err(error) if is_missing_mailbox_table_error(&error) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let rows = statement
+        .query_map([account_id], |row| {
+            Ok(LabelUsageRecord {
+                label_id: row.get(0)?,
+                name: row.get(1)?,
+                label_type: row.get(2)?,
+                messages_total: row.get(3)?,
+                threads_total: row.get(4)?,
+                local_message_count: row.get(5)?,
+                local_thread_count: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn get_mailbox_coverage(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    account_id: &str,
+) -> Result<Option<MailboxCoverageReport>, MailboxReadError> {
+    if !database_path.try_exists()? {
+        return Ok(None);
+    }
+
+    let connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxReadError::open_database(database_path, source))?;
+    let report = connection
+        .query_row(
+            "SELECT
+                 COUNT(*) AS message_count,
+                 COUNT(DISTINCT thread_id) AS thread_count,
+                 COALESCE((
+                     SELECT COUNT(DISTINCT message_rowid)
+                     FROM gmail_message_attachments
+                     WHERE account_id = ?1
+                 ), 0) AS messages_with_attachments,
+                 COALESCE(SUM(CASE WHEN list_unsubscribe_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_list_unsubscribe,
+                 COALESCE(SUM(CASE WHEN list_id_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_list_id,
+                 COALESCE(SUM(CASE WHEN precedence_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_precedence,
+                 COALESCE(SUM(CASE WHEN auto_submitted_header IS NOT NULL THEN 1 ELSE 0 END), 0)
+                     AS messages_with_auto_submitted
+             FROM gmail_messages
+             WHERE account_id = ?1",
+            [account_id],
+            |row| {
+                Ok(MailboxCoverageReport {
+                    account_id: account_id.to_owned(),
+                    message_count: row.get(0)?,
+                    thread_count: row.get(1)?,
+                    messages_with_attachments: row.get(2)?,
+                    messages_with_list_unsubscribe: row.get(3)?,
+                    messages_with_list_id: row.get(4)?,
+                    messages_with_precedence: row.get(5)?,
+                    messages_with_auto_submitted: row.get(6)?,
+                })
+            },
+        )
+        .optional();
+
+    match report {
+        Ok(report) => Ok(report),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(super) fn read_sync_state(
     connection: &Connection,
     account_id: &str,
@@ -335,6 +615,21 @@ pub(super) fn read_sync_state(
                  last_sync_epoch_s,
                  last_full_sync_success_epoch_s,
                  last_incremental_sync_success_epoch_s,
+                 pipeline_enabled,
+                 pipeline_list_queue_high_water,
+                 pipeline_write_queue_high_water,
+                 pipeline_write_batch_count,
+                 pipeline_writer_wait_ms,
+                 pipeline_fetch_batch_count,
+                 pipeline_fetch_batch_avg_ms,
+                 pipeline_fetch_batch_max_ms,
+                 pipeline_writer_tx_count,
+                 pipeline_writer_tx_avg_ms,
+                 pipeline_writer_tx_max_ms,
+                 pipeline_reorder_buffer_high_water,
+                 pipeline_staged_message_count,
+                 pipeline_staged_delete_count,
+                 pipeline_staged_attachment_count,
                  message_count,
                  label_count,
                  indexed_message_count
@@ -347,6 +642,9 @@ pub(super) fn read_sync_state(
 
     match record {
         Ok(record) => Ok(record),
+        Err(error) if is_missing_sync_pipeline_column_error(&error) => {
+            read_sync_state_without_pipeline_columns(connection, account_id)
+        }
         Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -365,6 +663,156 @@ fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>,
                  last_sync_epoch_s,
                  last_full_sync_success_epoch_s,
                  last_incremental_sync_success_epoch_s,
+                 pipeline_enabled,
+                 pipeline_list_queue_high_water,
+                 pipeline_write_queue_high_water,
+                 pipeline_write_batch_count,
+                 pipeline_writer_wait_ms,
+                 pipeline_fetch_batch_count,
+                 pipeline_fetch_batch_avg_ms,
+                 pipeline_fetch_batch_max_ms,
+                 pipeline_writer_tx_count,
+                 pipeline_writer_tx_avg_ms,
+                 pipeline_writer_tx_max_ms,
+                 pipeline_reorder_buffer_high_water,
+                 pipeline_staged_message_count,
+                 pipeline_staged_delete_count,
+                 pipeline_staged_attachment_count,
+                 message_count,
+                 label_count,
+                 indexed_message_count
+             FROM gmail_sync_state
+             ORDER BY last_sync_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_sync_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_sync_pipeline_column_error(&error) => {
+            latest_sync_state_without_pipeline_columns(connection)
+        }
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn read_full_sync_checkpoint(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 bootstrap_query,
+                 status,
+                 next_page_token,
+                 cursor_history_id,
+                 pages_fetched,
+                 messages_listed,
+                 messages_upserted,
+                 labels_synced,
+                 staged_label_count,
+                 staged_message_count,
+                 staged_message_label_count,
+                 staged_attachment_count,
+                 started_at_epoch_s,
+                 updated_at_epoch_s
+             FROM gmail_full_sync_checkpoint
+             WHERE account_id = ?1",
+            [account_id],
+            row_to_full_sync_checkpoint,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_sync_state_without_pipeline_columns(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<SyncStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 cursor_history_id,
+                 bootstrap_query,
+                 last_sync_mode,
+                 last_sync_status,
+                 last_error,
+                 last_sync_epoch_s,
+                 last_full_sync_success_epoch_s,
+                 last_incremental_sync_success_epoch_s,
+                 0 AS pipeline_enabled,
+                 0 AS pipeline_list_queue_high_water,
+                 0 AS pipeline_write_queue_high_water,
+                 0 AS pipeline_write_batch_count,
+                 0 AS pipeline_writer_wait_ms,
+                 0 AS pipeline_fetch_batch_count,
+                 0 AS pipeline_fetch_batch_avg_ms,
+                 0 AS pipeline_fetch_batch_max_ms,
+                 0 AS pipeline_writer_tx_count,
+                 0 AS pipeline_writer_tx_avg_ms,
+                 0 AS pipeline_writer_tx_max_ms,
+                 0 AS pipeline_reorder_buffer_high_water,
+                 0 AS pipeline_staged_message_count,
+                 0 AS pipeline_staged_delete_count,
+                 0 AS pipeline_staged_attachment_count,
+                 message_count,
+                 label_count,
+                 indexed_message_count
+            FROM gmail_sync_state
+             WHERE account_id = ?1",
+            [account_id],
+            row_to_sync_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_sync_state_without_pipeline_columns(
+    connection: &Connection,
+) -> Result<Option<SyncStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 cursor_history_id,
+                 bootstrap_query,
+                 last_sync_mode,
+                 last_sync_status,
+                 last_error,
+                 last_sync_epoch_s,
+                 last_full_sync_success_epoch_s,
+                 last_incremental_sync_success_epoch_s,
+                 0 AS pipeline_enabled,
+                 0 AS pipeline_list_queue_high_water,
+                 0 AS pipeline_write_queue_high_water,
+                 0 AS pipeline_write_batch_count,
+                 0 AS pipeline_writer_wait_ms,
+                 0 AS pipeline_fetch_batch_count,
+                 0 AS pipeline_fetch_batch_avg_ms,
+                 0 AS pipeline_fetch_batch_max_ms,
+                 0 AS pipeline_writer_tx_count,
+                 0 AS pipeline_writer_tx_avg_ms,
+                 0 AS pipeline_writer_tx_max_ms,
+                 0 AS pipeline_reorder_buffer_high_water,
+                 0 AS pipeline_staged_message_count,
+                 0 AS pipeline_staged_delete_count,
+                 0 AS pipeline_staged_attachment_count,
                  message_count,
                  label_count,
                  indexed_message_count
@@ -383,6 +831,320 @@ fn latest_sync_state(connection: &Connection) -> Result<Option<SyncStateRecord>,
     }
 }
 
+fn is_missing_sync_pipeline_column_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqlInputError { msg, .. } if msg.contains("no such column: pipeline_")
+    ) || matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("no such column: pipeline_")
+    )
+}
+
+pub(super) fn read_sync_pacing_state(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<SyncPacingStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 learned_quota_units_per_minute,
+                 learned_message_fetch_concurrency,
+                 clean_run_streak,
+                 last_pressure_kind,
+                 updated_at_epoch_s
+             FROM gmail_sync_pacing_state
+             WHERE account_id = ?1",
+            [account_id],
+            row_to_sync_pacing_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_full_sync_checkpoint(
+    connection: &Connection,
+) -> Result<Option<FullSyncCheckpointRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 bootstrap_query,
+                 status,
+                 next_page_token,
+                 cursor_history_id,
+                 pages_fetched,
+                 messages_listed,
+                 messages_upserted,
+                 labels_synced,
+                 staged_label_count,
+                 staged_message_count,
+                 staged_message_label_count,
+                 staged_attachment_count,
+                 started_at_epoch_s,
+                 updated_at_epoch_s
+             FROM gmail_full_sync_checkpoint
+             ORDER BY updated_at_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_full_sync_checkpoint,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_sync_pacing_state(
+    connection: &Connection,
+) -> Result<Option<SyncPacingStateRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 learned_quota_units_per_minute,
+                 learned_message_fetch_concurrency,
+                 clean_run_streak,
+                 last_pressure_kind,
+                 updated_at_epoch_s
+             FROM gmail_sync_pacing_state
+             ORDER BY updated_at_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_sync_pacing_state,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn read_sync_run_summary(
+    connection: &Connection,
+    account_id: &str,
+    sync_mode: SyncMode,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 sync_mode,
+                 comparability_kind,
+                 comparability_key,
+                 latest_run_id,
+                 latest_status,
+                 latest_finished_at_epoch_s,
+                 best_clean_run_id,
+                 best_clean_quota_units_per_minute,
+                 best_clean_message_fetch_concurrency,
+                 best_clean_messages_per_second,
+                 best_clean_duration_ms,
+                 recent_success_count,
+                 recent_failure_count,
+                 recent_failure_streak,
+                 recent_clean_success_streak,
+                 regression_detected,
+                 regression_kind,
+                 regression_run_id,
+                 regression_message,
+                 updated_at_epoch_s
+             FROM gmail_sync_run_summary
+             WHERE account_id = ?1
+               AND sync_mode = ?2
+             ORDER BY latest_finished_at_epoch_s DESC, latest_run_id DESC
+             LIMIT 1",
+            params![account_id, sync_mode.as_str()],
+            row_to_sync_run_summary,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_sync_run_summary(
+    connection: &Connection,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 sync_mode,
+                 comparability_kind,
+                 comparability_key,
+                 latest_run_id,
+                 latest_status,
+                 latest_finished_at_epoch_s,
+                 best_clean_run_id,
+                 best_clean_quota_units_per_minute,
+                 best_clean_message_fetch_concurrency,
+                 best_clean_messages_per_second,
+                 best_clean_duration_ms,
+                 recent_success_count,
+                 recent_failure_count,
+                 recent_failure_streak,
+                 recent_clean_success_streak,
+                 regression_detected,
+                 regression_kind,
+                 regression_run_id,
+                 regression_message,
+                 updated_at_epoch_s
+             FROM gmail_sync_run_summary
+             ORDER BY updated_at_epoch_s DESC
+             LIMIT 1",
+            [],
+            row_to_sync_run_summary,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn latest_sync_run_summary_for_account(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<SyncRunSummaryRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 account_id,
+                 sync_mode,
+                 comparability_kind,
+                 comparability_key,
+                 latest_run_id,
+                 latest_status,
+                 latest_finished_at_epoch_s,
+                 best_clean_run_id,
+                 best_clean_quota_units_per_minute,
+                 best_clean_message_fetch_concurrency,
+                 best_clean_messages_per_second,
+                 best_clean_duration_ms,
+                 recent_success_count,
+                 recent_failure_count,
+                 recent_failure_streak,
+                 recent_clean_success_streak,
+                 regression_detected,
+                 regression_kind,
+                 regression_run_id,
+                 regression_message,
+                 updated_at_epoch_s
+             FROM gmail_sync_run_summary
+             WHERE account_id = ?1
+             ORDER BY latest_finished_at_epoch_s DESC, latest_run_id DESC
+             LIMIT 1",
+            [account_id],
+            row_to_sync_run_summary,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_sync_run_history(
+    connection: &Connection,
+    account_id: &str,
+    limit: usize,
+) -> Result<Vec<SyncRunHistoryRecord>, MailboxReadError> {
+    let mut statement = match connection.prepare(
+        "SELECT
+             run_id,
+             account_id,
+             sync_mode,
+             status,
+             comparability_kind,
+             comparability_key,
+             startup_seed_run_id,
+             started_at_epoch_s,
+             finished_at_epoch_s,
+             bootstrap_query,
+             cursor_history_id,
+             fallback_from_history,
+             resumed_from_checkpoint,
+             pages_fetched,
+             messages_listed,
+             messages_upserted,
+             messages_deleted,
+             labels_synced,
+             checkpoint_reused_pages,
+             checkpoint_reused_messages_upserted,
+             pipeline_enabled,
+             pipeline_list_queue_high_water,
+             pipeline_write_queue_high_water,
+             pipeline_write_batch_count,
+             pipeline_writer_wait_ms,
+             pipeline_fetch_batch_count,
+             pipeline_fetch_batch_avg_ms,
+             pipeline_fetch_batch_max_ms,
+             pipeline_writer_tx_count,
+             pipeline_writer_tx_avg_ms,
+             pipeline_writer_tx_max_ms,
+             pipeline_reorder_buffer_high_water,
+             pipeline_staged_message_count,
+             pipeline_staged_delete_count,
+             pipeline_staged_attachment_count,
+             adaptive_pacing_enabled,
+             quota_units_budget_per_minute,
+             message_fetch_concurrency,
+             quota_units_cap_per_minute,
+             message_fetch_concurrency_cap,
+             starting_quota_units_per_minute,
+             starting_message_fetch_concurrency,
+             effective_quota_units_per_minute,
+             effective_message_fetch_concurrency,
+             adaptive_downshift_count,
+             estimated_quota_units_reserved,
+             http_attempt_count,
+             retry_count,
+             quota_pressure_retry_count,
+             concurrency_pressure_retry_count,
+             backend_retry_count,
+             throttle_wait_count,
+             throttle_wait_ms,
+             retry_after_wait_ms,
+             duration_ms,
+             pages_per_second,
+             messages_per_second,
+             error_message
+         FROM gmail_sync_run_history
+         WHERE account_id = ?1
+         ORDER BY finished_at_epoch_s DESC, run_id DESC
+         LIMIT ?2",
+    ) {
+        Ok(statement) => statement,
+        Err(error) if is_missing_mailbox_table_error(&error) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = statement
+        .query_map(params![account_id, limit], row_to_sync_run_history)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn row_to_sync_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecord> {
     let last_sync_mode = decode_sync_mode(row.get(3)?, 3)?;
     let last_sync_status = decode_sync_status(row.get(4)?, 4)?;
@@ -397,9 +1159,264 @@ fn row_to_sync_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncStateRecor
         last_sync_epoch_s: row.get(6)?,
         last_full_sync_success_epoch_s: row.get(7)?,
         last_incremental_sync_success_epoch_s: row.get(8)?,
-        message_count: row.get(9)?,
-        label_count: row.get(10)?,
-        indexed_message_count: row.get(11)?,
+        pipeline_enabled: row.get::<_, i64>(9)? != 0,
+        pipeline_list_queue_high_water: row.get(10)?,
+        pipeline_write_queue_high_water: row.get(11)?,
+        pipeline_write_batch_count: row.get(12)?,
+        pipeline_writer_wait_ms: row.get(13)?,
+        pipeline_fetch_batch_count: row.get(14)?,
+        pipeline_fetch_batch_avg_ms: row.get(15)?,
+        pipeline_fetch_batch_max_ms: row.get(16)?,
+        pipeline_writer_tx_count: row.get(17)?,
+        pipeline_writer_tx_avg_ms: row.get(18)?,
+        pipeline_writer_tx_max_ms: row.get(19)?,
+        pipeline_reorder_buffer_high_water: row.get(20)?,
+        pipeline_staged_message_count: row.get(21)?,
+        pipeline_staged_delete_count: row.get(22)?,
+        pipeline_staged_attachment_count: row.get(23)?,
+        message_count: row.get(24)?,
+        label_count: row.get(25)?,
+        indexed_message_count: row.get(26)?,
+    })
+}
+
+fn row_to_full_sync_checkpoint(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<FullSyncCheckpointRecord> {
+    let status =
+        FullSyncCheckpointStatus::from_str(&row.get::<_, String>(2)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
+
+    Ok(FullSyncCheckpointRecord {
+        account_id: row.get(0)?,
+        bootstrap_query: row.get(1)?,
+        status,
+        next_page_token: row.get(3)?,
+        cursor_history_id: row.get(4)?,
+        pages_fetched: row.get(5)?,
+        messages_listed: row.get(6)?,
+        messages_upserted: row.get(7)?,
+        labels_synced: row.get(8)?,
+        staged_label_count: row.get(9)?,
+        staged_message_count: row.get(10)?,
+        staged_message_label_count: row.get(11)?,
+        staged_attachment_count: row.get(12)?,
+        started_at_epoch_s: row.get(13)?,
+        updated_at_epoch_s: row.get(14)?,
+    })
+}
+
+fn row_to_sync_pacing_state(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncPacingStateRecord> {
+    let last_pressure_kind = row
+        .get::<_, Option<String>>(4)?
+        .map(|value| {
+            SyncPacingPressureKind::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?;
+
+    Ok(SyncPacingStateRecord {
+        account_id: row.get(0)?,
+        learned_quota_units_per_minute: row.get(1)?,
+        learned_message_fetch_concurrency: row.get(2)?,
+        clean_run_streak: row.get(3)?,
+        last_pressure_kind,
+        updated_at_epoch_s: row.get(5)?,
+    })
+}
+
+pub(super) fn row_to_sync_run_history(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SyncRunHistoryRecord> {
+    let comparability_kind = SyncRunComparabilityKind::from_str(&row.get::<_, String>(4)?)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+        })?;
+    let comparability_key = row.get::<_, String>(5)?;
+    Ok(SyncRunHistoryRecord {
+        run_id: row.get(0)?,
+        account_id: row.get(1)?,
+        sync_mode: decode_sync_mode(row.get(2)?, 2)?,
+        status: decode_sync_status(row.get(3)?, 3)?,
+        comparability_kind,
+        comparability_label: sync_run_comparability_label(comparability_kind, &comparability_key),
+        comparability_key,
+        startup_seed_run_id: row.get(6)?,
+        started_at_epoch_s: row.get(7)?,
+        finished_at_epoch_s: row.get(8)?,
+        bootstrap_query: row.get(9)?,
+        cursor_history_id: row.get(10)?,
+        fallback_from_history: row.get::<_, i64>(11)? != 0,
+        resumed_from_checkpoint: row.get::<_, i64>(12)? != 0,
+        pages_fetched: row.get(13)?,
+        messages_listed: row.get(14)?,
+        messages_upserted: row.get(15)?,
+        messages_deleted: row.get(16)?,
+        labels_synced: row.get(17)?,
+        checkpoint_reused_pages: row.get(18)?,
+        checkpoint_reused_messages_upserted: row.get(19)?,
+        pipeline_enabled: row.get::<_, i64>(20)? != 0,
+        pipeline_list_queue_high_water: row.get(21)?,
+        pipeline_write_queue_high_water: row.get(22)?,
+        pipeline_write_batch_count: row.get(23)?,
+        pipeline_writer_wait_ms: row.get(24)?,
+        pipeline_fetch_batch_count: row.get(25)?,
+        pipeline_fetch_batch_avg_ms: row.get(26)?,
+        pipeline_fetch_batch_max_ms: row.get(27)?,
+        pipeline_writer_tx_count: row.get(28)?,
+        pipeline_writer_tx_avg_ms: row.get(29)?,
+        pipeline_writer_tx_max_ms: row.get(30)?,
+        pipeline_reorder_buffer_high_water: row.get(31)?,
+        pipeline_staged_message_count: row.get(32)?,
+        pipeline_staged_delete_count: row.get(33)?,
+        pipeline_staged_attachment_count: row.get(34)?,
+        adaptive_pacing_enabled: row.get::<_, i64>(35)? != 0,
+        quota_units_budget_per_minute: row.get(36)?,
+        message_fetch_concurrency: row.get(37)?,
+        quota_units_cap_per_minute: row.get(38)?,
+        message_fetch_concurrency_cap: row.get(39)?,
+        starting_quota_units_per_minute: row.get(40)?,
+        starting_message_fetch_concurrency: row.get(41)?,
+        effective_quota_units_per_minute: row.get(42)?,
+        effective_message_fetch_concurrency: row.get(43)?,
+        adaptive_downshift_count: row.get(44)?,
+        estimated_quota_units_reserved: row.get(45)?,
+        http_attempt_count: row.get(46)?,
+        retry_count: row.get(47)?,
+        quota_pressure_retry_count: row.get(48)?,
+        concurrency_pressure_retry_count: row.get(49)?,
+        backend_retry_count: row.get(50)?,
+        throttle_wait_count: row.get(51)?,
+        throttle_wait_ms: row.get(52)?,
+        retry_after_wait_ms: row.get(53)?,
+        duration_ms: row.get(54)?,
+        pages_per_second: row.get(55)?,
+        messages_per_second: row.get(56)?,
+        error_message: row.get(57)?,
+    })
+}
+
+pub(super) fn read_sync_run_history_record(
+    connection: &Connection,
+    run_id: i64,
+) -> Result<Option<SyncRunHistoryRecord>, MailboxReadError> {
+    let record = connection
+        .query_row(
+            "SELECT
+                 run_id,
+                 account_id,
+                 sync_mode,
+                 status,
+                 comparability_kind,
+                 comparability_key,
+                 startup_seed_run_id,
+                 started_at_epoch_s,
+                 finished_at_epoch_s,
+                 bootstrap_query,
+                 cursor_history_id,
+                 fallback_from_history,
+                 resumed_from_checkpoint,
+                 pages_fetched,
+                 messages_listed,
+                 messages_upserted,
+                 messages_deleted,
+                 labels_synced,
+                 checkpoint_reused_pages,
+                 checkpoint_reused_messages_upserted,
+                 pipeline_enabled,
+                 pipeline_list_queue_high_water,
+                 pipeline_write_queue_high_water,
+                 pipeline_write_batch_count,
+                 pipeline_writer_wait_ms,
+                 pipeline_fetch_batch_count,
+                 pipeline_fetch_batch_avg_ms,
+                 pipeline_fetch_batch_max_ms,
+                 pipeline_writer_tx_count,
+                 pipeline_writer_tx_avg_ms,
+                 pipeline_writer_tx_max_ms,
+                 pipeline_reorder_buffer_high_water,
+                 pipeline_staged_message_count,
+                 pipeline_staged_delete_count,
+                 pipeline_staged_attachment_count,
+                 adaptive_pacing_enabled,
+                 quota_units_budget_per_minute,
+                 message_fetch_concurrency,
+                 quota_units_cap_per_minute,
+                 message_fetch_concurrency_cap,
+                 starting_quota_units_per_minute,
+                 starting_message_fetch_concurrency,
+                 effective_quota_units_per_minute,
+                 effective_message_fetch_concurrency,
+                 adaptive_downshift_count,
+                 estimated_quota_units_reserved,
+                 http_attempt_count,
+                 retry_count,
+                 quota_pressure_retry_count,
+                 concurrency_pressure_retry_count,
+                 backend_retry_count,
+                 throttle_wait_count,
+                 throttle_wait_ms,
+                 retry_after_wait_ms,
+                 duration_ms,
+                 pages_per_second,
+                 messages_per_second,
+                 error_message
+             FROM gmail_sync_run_history
+             WHERE run_id = ?1",
+            [run_id],
+            row_to_sync_run_history,
+        )
+        .optional();
+
+    match record {
+        Ok(record) => Ok(record),
+        Err(error) if is_missing_mailbox_table_error(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn row_to_sync_run_summary(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SyncRunSummaryRecord> {
+    let comparability_kind = SyncRunComparabilityKind::from_str(&row.get::<_, String>(2)?)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
+    let comparability_key = row.get::<_, String>(3)?;
+    let regression_kind = row
+        .get::<_, Option<String>>(17)?
+        .map(|value| {
+            SyncRunRegressionKind::from_str(&value).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(17, Type::Text, Box::new(error))
+            })
+        })
+        .transpose()?;
+
+    Ok(SyncRunSummaryRecord {
+        account_id: row.get(0)?,
+        sync_mode: decode_sync_mode(row.get(1)?, 1)?,
+        comparability_kind,
+        comparability_key: comparability_key.clone(),
+        comparability_label: sync_run_comparability_label(comparability_kind, &comparability_key),
+        latest_run_id: row.get(4)?,
+        latest_status: decode_sync_status(row.get(5)?, 5)?,
+        latest_finished_at_epoch_s: row.get(6)?,
+        best_clean_run_id: row.get(7)?,
+        best_clean_quota_units_per_minute: row.get(8)?,
+        best_clean_message_fetch_concurrency: row.get(9)?,
+        best_clean_messages_per_second: row.get(10)?,
+        best_clean_duration_ms: row.get(11)?,
+        recent_success_count: row.get(12)?,
+        recent_failure_count: row.get(13)?,
+        recent_failure_streak: row.get(14)?,
+        recent_clean_success_streak: row.get(15)?,
+        regression_detected: row.get::<_, i64>(16)? != 0,
+        regression_kind,
+        regression_run_id: row.get(18)?,
+        regression_message: row.get(19)?,
+        updated_at_epoch_s: row.get(20)?,
     })
 }
 

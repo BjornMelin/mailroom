@@ -33,10 +33,48 @@ Run a normal sync:
 cargo run -- sync run --json
 ```
 
+Use the named preset when a deep resync should trade speed for safer, deeper audit coverage:
+
+```bash
+cargo run -- sync run --profile deep-audit --json
+```
+
+That preset currently expands to a lower-throughput configuration with reduced quota and concurrency:
+
+```bash
+cargo run -- sync run --full --recent-days 365 --quota-units-per-minute 9000 --message-fetch-concurrency 3 --json
+```
+
 Force a fresh bootstrap over a specific recent window:
 
 ```bash
 cargo run -- sync run --full --recent-days 30 --json
+```
+
+Run the same sync surface in benchmarking mode when you want explicit
+throughput and pipeline telemetry for tuning:
+
+```bash
+cargo run -- sync benchmark --profile deep-audit --json
+```
+
+Inspect persisted historical sync-run telemetry for the active mailbox:
+
+```bash
+cargo run -- sync history --limit 20 --json
+```
+
+Explain the latest run against the best comparable clean baseline:
+
+```bash
+cargo run -- sync perf explain --limit 20 --json
+```
+
+For real-mailbox hardening before the first production ruleset, use one deeper,
+slower, safer audit sync once:
+
+```bash
+cargo run -- sync run --profile deep-audit --json
 ```
 
 Run a local search:
@@ -69,14 +107,20 @@ The sync flow is one-shot and local-first:
 1. refresh the active account from Gmail profile data
 2. refresh the label catalog
 3. decide between full bootstrap and incremental replay
-4. fetch Gmail message payloads with bounded concurrency
-5. persist mailbox rows, attachment rows, label joins, FTS rows, and sync cursor state
+4. fetch Gmail message payloads with bounded concurrency and quota-aware pacing
+5. normalize metadata into bounded write batches
+6. persist mailbox rows, attachment rows, label joins, FTS rows, and sync cursor state through a single writer lane
 
 Default bootstrap behavior:
 
 - query: `in:anywhere -in:spam -in:trash newer_than:{N}d`
 - default `N`: `90`
+- default quota budget: `12000` Gmail quota units per minute
+- default message fetch concurrency: `4`
+- default list/history page size: `500`
 - storage: metadata, snippet, and attachment rows
+- adaptive pacing: default-on, persisted per account, and bounded by the current
+  CLI ceilings
 
 Incremental sync behavior:
 
@@ -86,6 +130,8 @@ Incremental sync behavior:
 - removes locally cached messages when Gmail reports deletion or when a changed
   message now lives in spam or trash
 - falls back to a full bootstrap when Gmail reports a stale history cursor
+- keeps the history walk serial so later-page deletes still dominate before any
+  message fetch work is staged
 
 Persisted sync state behavior:
 
@@ -93,6 +139,57 @@ Persisted sync state behavior:
 - `last_full_sync_success_epoch_s` is updated only after a successful full bootstrap
 - `last_incremental_sync_success_epoch_s` is updated only after a successful incremental replay
 - failed syncs update status and error details without overwriting the last successful timestamps
+- every terminal sync attempt also appends one historical run record in SQLite
+- Mailroom keeps a compact per-account, per-mode, per-comparability-bucket
+  summary row with the latest outcome, best clean budget, recent streak counts,
+  and automatic regression flags
+- comparable clean history can seed adaptive pacing startup targets for later
+  runs, but in-run pacing ownership still stays with the live adaptive
+  controller and current operator ceilings
+
+Full bootstrap checkpoint behavior:
+
+- full bootstraps stage labels and message pages in SQLite before the live mailbox tables are replaced
+- the active checkpoint stores the bootstrap query, current Gmail `nextPageToken`, progress counters, and staged row counts
+- if a full sync dies mid-stream and the next run uses the same bootstrap query, Mailroom resumes from the saved checkpoint instead of replaying the whole bootstrap window
+- if the requested bootstrap query changes, Mailroom discards the old checkpoint and restarts from page 1
+- if Gmail rejects a saved `pageToken`, Mailroom clears the staged checkpoint and restarts the full bootstrap safely
+- the live mailbox cache remains unchanged until the staged full sync finalizes successfully
+
+Bounded pipeline behavior:
+
+- full and incremental sync now run through a bounded pipeline: list work, fetch
+  message catalogs, normalize, then hand batches to one writer lane
+- the writer lane is the only stage that advances durable progress or touches
+  sync state
+- full sync stages page manifests and page-message membership in SQLite so a
+  large listed page can be written in bounded sub-batches while checkpoint
+  ownership still stays page-ordered
+- full-sync checkpoint progress only advances after a whole listed page is
+  durably staged in page order
+- any in-flight work that was fetched or normalized but not yet written is
+  intentionally replayed after restart
+- incremental sync now stages delete IDs and upsert batches before one final
+  atomic apply to the live mailbox tables
+
+Quota hardening behavior:
+
+- Mailroom uses a native Gmail quota limiter instead of a generic external
+  rate-limiter crate so the sync path can keep Gmail-specific weighted costs,
+  adaptive reconfiguration, and integrated pacing telemetry in one place
+- Gmail read calls are budgeted by documented quota units instead of raw request count
+- `users.messages.list` and `users.messages.get` are paced under one shared limiter
+- GET retries respect `Retry-After` when present
+- Gmail usage-limit `403` responses (`rateLimitExceeded`, `userRateLimitExceeded`) are retried like `429`
+- adaptive pacing downshifts quota ceilings on quota-pressure retries and steps
+  message-fetch concurrency down on Gmail concurrent-request pressure
+- adaptive pacing only upshifts learned pacing targets after later clean successful
+  runs; one-off lower CLI ceilings do not permanently ratchet learned state down
+- persisted numeric pacing values are clamped to supported bounds on load, but
+  invalid enum state such as an unknown `last_pressure_kind` still aborts sync
+  startup until the local pacing row is repaired
+- sync reports now include estimated reserved quota units, pressure-classified retry
+  counts, `Retry-After` wait totals, and both the capped and effective fetch pacing
 
 ## Search behavior
 
@@ -137,6 +234,108 @@ Relevant sync fields in JSON output include:
 - `last_full_sync_success_epoch_s`
 - `last_incremental_sync_success_epoch_s`
 - `cursor_history_id`
+- `full_sync_checkpoint`
+- `sync_pacing_state`
+- `sync_run_summary`
+- `pipeline_enabled`
+- `pipeline_list_queue_high_water`
+- `pipeline_write_queue_high_water`
+- `pipeline_write_batch_count`
+- `pipeline_writer_wait_ms`
+- `pipeline_fetch_batch_count`
+- `pipeline_fetch_batch_avg_ms`
+- `pipeline_fetch_batch_max_ms`
+- `pipeline_writer_tx_count`
+- `pipeline_writer_tx_avg_ms`
+- `pipeline_writer_tx_max_ms`
+- `pipeline_reorder_buffer_high_water`
+- `pipeline_staged_message_count`
+- `pipeline_staged_delete_count`
+- `pipeline_staged_attachment_count`
+
+Relevant `sync run` output fields now also include:
+
+- `run_id`
+- `comparability_kind`
+- `comparability_key`
+- `comparability_label`
+- `startup_seed_run_id`
+- `resumed_from_checkpoint`
+- `checkpoint_reused_pages`
+- `checkpoint_reused_messages_upserted`
+- `pipeline_enabled`
+- `pipeline_list_queue_high_water`
+- `pipeline_write_queue_high_water`
+- `pipeline_write_batch_count`
+- `pipeline_writer_wait_ms`
+- `pipeline_fetch_batch_count`
+- `pipeline_fetch_batch_avg_ms`
+- `pipeline_fetch_batch_max_ms`
+- `pipeline_writer_tx_count`
+- `pipeline_writer_tx_avg_ms`
+- `pipeline_writer_tx_max_ms`
+- `pipeline_reorder_buffer_high_water`
+- `pipeline_staged_message_count`
+- `pipeline_staged_delete_count`
+- `pipeline_staged_attachment_count`
+- `adaptive_pacing_enabled`
+- `quota_units_cap_per_minute`
+- `message_fetch_concurrency_cap`
+- `starting_quota_units_per_minute`
+- `starting_message_fetch_concurrency`
+- `effective_quota_units_per_minute`
+- `effective_message_fetch_concurrency`
+- `adaptive_downshift_count`
+- `quota_pressure_retry_count`
+- `concurrency_pressure_retry_count`
+- `backend_retry_count`
+- `retry_after_wait_ms`
+- `duration_ms`
+- `pages_per_second`
+- `messages_per_second`
+- `regression_detected`
+- `regression_kind`
+
+Relevant `sync history` output fields include:
+
+- `summary.latest_run_id`
+- `summary.latest_status`
+- `summary.comparability_kind`
+- `summary.comparability_key`
+- `summary.comparability_label`
+- `summary.best_clean_quota_units_per_minute`
+- `summary.best_clean_message_fetch_concurrency`
+- `summary.best_clean_messages_per_second`
+- `summary.recent_failure_streak`
+- `summary.recent_clean_success_streak`
+- `summary.regression_detected`
+- `summary.regression_kind`
+- `runs[*].run_id`
+- `runs[*].sync_mode`
+- `runs[*].comparability_key`
+- `runs[*].status`
+- `runs[*].messages_listed`
+- `runs[*].messages_per_second`
+
+Relevant `sync perf explain` output fields include:
+
+- `latest_run.run_id`
+- `latest_run.comparability_label`
+- `baseline_run.run_id`
+- `baseline_run.comparability_label`
+- `comparable_to_baseline`
+- `drift.messages_per_second_delta`
+- `drift.duration_ms_delta`
+- `drift.retry_count_delta`
+- `drift.effective_quota_units_per_minute_delta`
+- `drift.effective_message_fetch_concurrency_delta`
+- `regression_detected`
+- `regression_kind`
+
+`sync perf explain` intentionally suppresses drift output for incremental runs
+when the workload is too small or too skewed to compare meaningfully against the
+saved clean baseline. In those cases `comparable_to_baseline` is `false` and
+`drift` is omitted instead of overstating a regression on tiny runs.
 
 ## Safety boundaries
 
@@ -145,3 +344,7 @@ Relevant sync fields in JSON output include:
 - Mailroom mutates mailbox state only through the explicit thread workflow
   cleanup and draft/send commands, not through sync/search itself
 - repo-local `.mailroom/` remains the only runtime storage location by default
+
+If the goal is first-time real-mailbox rollout rather than daily operations,
+continue with [`verification-and-hardening.md`](verification-and-hardening.md)
+after sync health is green.

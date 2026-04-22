@@ -1,3 +1,7 @@
+use super::quota::{
+    GmailQuotaMetricsSnapshot, GmailQuotaPolicy, GmailRequestCost, GmailRetryClassification,
+    MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE,
+};
 use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
 use crate::auth::oauth_client::resolve as resolve_oauth_client;
 use crate::config::GmailConfig;
@@ -9,13 +13,15 @@ use reqwest::{Method, StatusCode};
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::time::sleep;
 
 const TOKEN_REFRESH_LEEWAY_SECS: u64 = 60;
 const GMAIL_MAX_RETRY_ATTEMPTS: usize = 4;
-const GMAIL_INITIAL_RETRY_DELAY_MS: u64 = 500;
+const GMAIL_INITIAL_RETRY_DELAY_MS: u64 = 1_000;
+const GMAIL_MAX_RETRY_DELAY_MS: u64 = 32_000;
+const GMAIL_RETRY_JITTER_MS: u64 = 250;
 const MESSAGE_CATALOG_FULL_FIELDS: &str =
     "id,threadId,labelIds,snippet,historyId,internalDate,sizeEstimate,payload";
 const MESSAGE_CATALOG_FIELDS: &str = concat!(
@@ -189,6 +195,13 @@ pub(crate) struct GmailThreadMutationRef {
 
 #[derive(Debug, Error)]
 pub(crate) enum GmailClientError {
+    #[error(
+        "gmail quota budget must be at least {minimum_units_per_minute} units per minute; got {units_per_minute}"
+    )]
+    InvalidQuotaBudget {
+        units_per_minute: u32,
+        minimum_units_per_minute: u32,
+    },
     #[error("mailroom is not authenticated; run `mailroom auth login` first")]
     MissingCredentials,
     #[error("stored Gmail credentials do not include a refresh token")]
@@ -358,6 +371,24 @@ struct GmailDraftMessageResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct GoogleApiErrorEnvelope {
+    error: Option<GoogleApiErrorBody>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleApiErrorBody {
+    message: Option<String>,
+    #[serde(default)]
+    errors: Vec<GoogleApiErrorDetail>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleApiErrorDetail {
+    message: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GmailThreadMutationResponse {
     id: String,
     #[serde(rename = "historyId")]
@@ -397,6 +428,7 @@ pub(crate) struct GmailClient {
     workspace: crate::config::WorkspaceConfig,
     http: reqwest::Client,
     credential_store: FileCredentialStore,
+    request_policy: Option<GmailQuotaPolicy>,
 }
 
 impl GmailClient {
@@ -412,7 +444,68 @@ impl GmailClient {
             workspace,
             http,
             credential_store,
+            request_policy: None,
         })
+    }
+
+    pub(crate) fn with_quota_budget(mut self, units_per_minute: u32) -> GmailResult<Self> {
+        self.request_policy = Some(GmailQuotaPolicy::new(units_per_minute).ok_or(
+            GmailClientError::InvalidQuotaBudget {
+                units_per_minute,
+                minimum_units_per_minute: MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE,
+            },
+        )?);
+        Ok(self)
+    }
+
+    pub(crate) fn request_metrics_snapshot(&self) -> Option<GmailQuotaMetricsSnapshot> {
+        self.request_policy.as_ref().map(GmailQuotaPolicy::snapshot)
+    }
+
+    pub(crate) fn update_quota_budget(&self, units_per_minute: u32) -> GmailResult<()> {
+        let Some(policy) = &self.request_policy else {
+            return Ok(());
+        };
+
+        policy
+            .reconfigure(units_per_minute)
+            .ok_or(GmailClientError::InvalidQuotaBudget {
+                units_per_minute,
+                minimum_units_per_minute: MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE,
+            })?;
+        Ok(())
+    }
+
+    async fn acquire_request_budget(&self, request_cost: GmailRequestCost) -> GmailResult<()> {
+        if let Some(policy) = &self.request_policy {
+            policy
+                .acquire(request_cost)
+                .await
+                .map_err(|requested_units| GmailClientError::InvalidQuotaBudget {
+                    units_per_minute: policy.units_per_minute(),
+                    minimum_units_per_minute: requested_units,
+                })?;
+        }
+
+        Ok(())
+    }
+
+    fn record_http_attempt(&self) {
+        if let Some(policy) = &self.request_policy {
+            policy.record_http_attempt();
+        }
+    }
+
+    fn record_retry(&self, classification: GmailRetryClassification) {
+        if let Some(policy) = &self.request_policy {
+            policy.record_retry(classification);
+        }
+    }
+
+    fn record_retry_after_wait(&self, waited: Duration) {
+        if let Some(policy) = &self.request_policy {
+            policy.record_retry_after_wait(waited);
+        }
     }
 
     pub(crate) async fn get_profile_with_access_scope(
@@ -431,6 +524,7 @@ impl GmailClient {
                 &query,
                 credentials.access_token.expose_secret(),
                 None,
+                GmailRequestCost::ProfileGet,
             )
             .await
         {
@@ -445,6 +539,7 @@ impl GmailClient {
                         &query,
                         refreshed.access_token.expose_secret(),
                         None,
+                        GmailRequestCost::ProfileGet,
                     )
                     .await?;
                 Ok((profile, access_scope))
@@ -460,7 +555,9 @@ impl GmailClient {
                 "labels(id,name,type,messageListVisibility,labelListVisibility,messagesTotal,messagesUnread,threadsTotal,threadsUnread)",
             ),
         )];
-        let response: GmailLabelsResponse = self.get_json("users/me/labels", &query).await?;
+        let response: GmailLabelsResponse = self
+            .get_json("users/me/labels", &query, GmailRequestCost::LabelRead)
+            .await?;
         Ok(response.labels)
     }
 
@@ -484,8 +581,9 @@ impl GmailClient {
             params.push(("pageToken", page_token.to_owned()));
         }
 
-        let response: GmailMessagesListResponse =
-            self.get_json("users/me/messages", &params).await?;
+        let response: GmailMessagesListResponse = self
+            .get_json("users/me/messages", &params, GmailRequestCost::MessageList)
+            .await?;
         Ok(GmailMessageListPage {
             messages: response.messages.unwrap_or_default(),
             next_page_token: response.next_page_token,
@@ -505,6 +603,7 @@ impl GmailClient {
                     ("format", String::from("full")),
                     ("fields", String::from(MESSAGE_CATALOG_FIELDS)),
                 ],
+                GmailRequestCost::MessageGet,
             )
             .await?;
         if response
@@ -519,6 +618,7 @@ impl GmailClient {
                         ("format", String::from("full")),
                         ("fields", String::from(MESSAGE_CATALOG_FULL_FIELDS)),
                     ],
+                    GmailRequestCost::MessageGet,
                 )
                 .await?;
             return full_response.into_message_catalog();
@@ -548,6 +648,7 @@ impl GmailClient {
                 .get_json(
                     &format!("users/me/messages/{message_id}/attachments/{gmail_attachment_id}"),
                     &[],
+                    GmailRequestCost::AttachmentGet,
                 )
                 .await?;
             let encoded = response
@@ -569,6 +670,7 @@ impl GmailClient {
                     ("format", String::from("full")),
                     ("fields", String::from("id,payload")),
                 ],
+                GmailRequestCost::MessageGet,
             )
             .await?;
         let payload = response
@@ -619,7 +721,9 @@ impl GmailClient {
             params.push(("pageToken", page_token.to_owned()));
         }
 
-        let response: GmailHistoryResponse = self.get_json("users/me/history", &params).await?;
+        let response: GmailHistoryResponse = self
+            .get_json("users/me/history", &params, GmailRequestCost::HistoryList)
+            .await?;
         Ok(response.into_history_page())
     }
 
@@ -647,6 +751,7 @@ impl GmailClient {
                     ("metadataHeaders[]", String::from("Message-ID")),
                     ("metadataHeaders[]", String::from("References")),
                 ],
+                GmailRequestCost::ThreadGet,
             )
             .await?;
         response.into_thread_context()
@@ -658,7 +763,9 @@ impl GmailClient {
         thread_id: Option<&str>,
     ) -> GmailResult<GmailDraftRef> {
         let body = draft_request_body(raw_message, thread_id);
-        let response: GmailDraftResponse = self.post_json("users/me/drafts", &[], body).await?;
+        let response: GmailDraftResponse = self
+            .post_json("users/me/drafts", &[], body, GmailRequestCost::DraftWrite)
+            .await?;
         Ok(response.into_draft_ref())
     }
 
@@ -670,7 +777,12 @@ impl GmailClient {
     ) -> GmailResult<GmailDraftRef> {
         let body = draft_request_body(raw_message, thread_id);
         let response: GmailDraftResponse = self
-            .put_json(&format!("users/me/drafts/{draft_id}"), &[], body)
+            .put_json(
+                &format!("users/me/drafts/{draft_id}"),
+                &[],
+                body,
+                GmailRequestCost::DraftWrite,
+            )
             .await?;
         Ok(response.into_draft_ref())
     }
@@ -683,6 +795,7 @@ impl GmailClient {
                 json!({
                     "id": draft_id,
                 }),
+                GmailRequestCost::DraftWrite,
             )
             .await?;
         Ok(GmailSentMessageRef {
@@ -693,8 +806,13 @@ impl GmailClient {
     }
 
     pub(crate) async fn delete_draft(&self, draft_id: &str) -> GmailResult<()> {
-        self.execute_empty(Method::DELETE, &format!("users/me/drafts/{draft_id}"), &[])
-            .await
+        self.execute_empty(
+            Method::DELETE,
+            &format!("users/me/drafts/{draft_id}"),
+            &[],
+            GmailRequestCost::DraftDelete,
+        )
+        .await
     }
 
     pub(crate) async fn modify_thread_labels(
@@ -711,6 +829,7 @@ impl GmailClient {
                     "addLabelIds": add_label_ids,
                     "removeLabelIds": remove_label_ids,
                 }),
+                GmailRequestCost::ThreadModify,
             )
             .await?;
         Ok(response.into_mutation_ref())
@@ -725,6 +844,7 @@ impl GmailClient {
                 &format!("users/me/threads/{thread_id}/trash"),
                 &[],
                 json!({}),
+                GmailRequestCost::ThreadModify,
             )
             .await?;
         Ok(response.into_mutation_ref())
@@ -773,11 +893,17 @@ impl GmailClient {
             })
     }
 
-    async fn get_json<T>(&self, path: &str, query: &[(&str, String)]) -> GmailResult<T>
+    async fn get_json<T>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        request_cost: GmailRequestCost,
+    ) -> GmailResult<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        self.execute_json(Method::GET, path, query, None).await
+        self.execute_json(Method::GET, path, query, None, request_cost)
+            .await
     }
 
     async fn post_json<T>(
@@ -785,11 +911,12 @@ impl GmailClient {
         path: &str,
         query: &[(&str, String)],
         body: serde_json::Value,
+        request_cost: GmailRequestCost,
     ) -> GmailResult<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        self.execute_json(Method::POST, path, query, Some(body))
+        self.execute_json(Method::POST, path, query, Some(body), request_cost)
             .await
     }
 
@@ -798,11 +925,12 @@ impl GmailClient {
         path: &str,
         query: &[(&str, String)],
         body: serde_json::Value,
+        request_cost: GmailRequestCost,
     ) -> GmailResult<T>
     where
         T: serde::de::DeserializeOwned,
     {
-        self.execute_json(Method::PUT, path, query, Some(body))
+        self.execute_json(Method::PUT, path, query, Some(body), request_cost)
             .await
     }
 
@@ -812,6 +940,7 @@ impl GmailClient {
         path: &str,
         query: &[(&str, String)],
         body: Option<serde_json::Value>,
+        request_cost: GmailRequestCost,
     ) -> GmailResult<T>
     where
         T: serde::de::DeserializeOwned,
@@ -824,6 +953,7 @@ impl GmailClient {
                 query,
                 credentials.access_token.expose_secret(),
                 body.as_ref(),
+                request_cost,
             )
             .await
         {
@@ -836,6 +966,7 @@ impl GmailClient {
                     query,
                     refreshed.access_token.expose_secret(),
                     body.as_ref(),
+                    request_cost,
                 )
                 .await
             }
@@ -848,6 +979,7 @@ impl GmailClient {
         method: Method,
         path: &str,
         query: &[(&str, String)],
+        request_cost: GmailRequestCost,
     ) -> GmailResult<()> {
         let credentials = self.active_credentials().await?;
         match self
@@ -856,14 +988,21 @@ impl GmailClient {
                 path,
                 query,
                 credentials.access_token.expose_secret(),
+                request_cost,
             )
             .await
         {
             Ok(()) => Ok(()),
             Err(error) if matches_unauthorized(&error) => {
                 let refreshed = self.refresh_credentials(&credentials).await?;
-                self.request_empty(method, path, query, refreshed.access_token.expose_secret())
-                    .await
+                self.request_empty(
+                    method,
+                    path,
+                    query,
+                    refreshed.access_token.expose_secret(),
+                    request_cost,
+                )
+                .await
             }
             Err(error) => Err(error),
         }
@@ -950,12 +1089,13 @@ impl GmailClient {
         query: &[(&str, String)],
         access_token: &str,
         body: Option<&serde_json::Value>,
+        request_cost: GmailRequestCost,
     ) -> GmailResult<T>
     where
         T: serde::de::DeserializeOwned,
     {
         let response = self
-            .send_request(method, path, query, access_token, body)
+            .send_request(method, path, query, access_token, body, request_cost)
             .await?;
         response
             .json()
@@ -972,8 +1112,9 @@ impl GmailClient {
         path: &str,
         query: &[(&str, String)],
         access_token: &str,
+        request_cost: GmailRequestCost,
     ) -> GmailResult<()> {
-        self.send_request(method, path, query, access_token, None)
+        self.send_request(method, path, query, access_token, None, request_cost)
             .await?;
         Ok(())
     }
@@ -985,6 +1126,7 @@ impl GmailClient {
         query: &[(&str, String)],
         access_token: &str,
         body: Option<&serde_json::Value>,
+        request_cost: GmailRequestCost,
     ) -> GmailResult<reqwest::Response> {
         let url = format!(
             "{}/{}",
@@ -997,6 +1139,8 @@ impl GmailClient {
 
         loop {
             attempt += 1;
+            self.acquire_request_budget(request_cost).await?;
+            self.record_http_attempt();
             let mut request = self
                 .http
                 .request(method.clone(), &url)
@@ -1011,14 +1155,22 @@ impl GmailClient {
                 Ok(response) if response.status().is_success() => return Ok(response),
                 Ok(response) => {
                     let status = response.status();
-                    let retry_delay = retry_delay_duration(response.headers(), retry_delay_ms);
+                    let retry_after = retry_after_delay(response.headers());
                     let body = response.text().await.unwrap_or_default();
-                    if retryable_request
-                        && is_retryable_status(status)
+                    let retry_classification = retryable_request
+                        .then(|| classify_retryable_api_response(status, &body))
+                        .flatten();
+                    if let Some(retry_classification) = retry_classification
                         && attempt < GMAIL_MAX_RETRY_ATTEMPTS
                     {
+                        let retry_delay = retry_after
+                            .unwrap_or_else(|| jittered_retry_delay(retry_delay_ms, attempt));
+                        self.record_retry(retry_classification);
+                        if retry_after.is_some() {
+                            self.record_retry_after_wait(retry_delay);
+                        }
                         sleep(retry_delay).await;
-                        retry_delay_ms = duration_to_retry_delay_ms(retry_delay).saturating_mul(2);
+                        retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
                         continue;
                     }
 
@@ -1033,8 +1185,14 @@ impl GmailClient {
                         && is_retryable_transport_error(&error)
                         && attempt < GMAIL_MAX_RETRY_ATTEMPTS
                     {
-                        sleep(Duration::from_millis(retry_delay_ms)).await;
-                        retry_delay_ms *= 2;
+                        self.record_retry(GmailRetryClassification::Backend);
+                        sleep(retry_delay_duration(
+                            &HeaderMap::new(),
+                            retry_delay_ms,
+                            attempt,
+                        ))
+                        .await;
+                        retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
                         continue;
                     }
 
@@ -1211,6 +1369,25 @@ fn matches_missing_message_error(error: &GmailClientError, message_id: &str) -> 
     )
 }
 
+fn classify_retryable_api_response(
+    status: StatusCode,
+    body: &str,
+) -> Option<GmailRetryClassification> {
+    if is_retryable_status(status) {
+        return Some(if matches_concurrent_request_limit(body) {
+            GmailRetryClassification::ConcurrencyPressure
+        } else if status == StatusCode::TOO_MANY_REQUESTS {
+            GmailRetryClassification::QuotaPressure
+        } else {
+            GmailRetryClassification::Backend
+        });
+    }
+
+    (status == StatusCode::FORBIDDEN)
+        .then(|| classify_forbidden_retry(body))
+        .flatten()
+}
+
 fn is_retryable_status(status: StatusCode) -> bool {
     matches!(
         status,
@@ -1226,8 +1403,54 @@ fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_timeout()
 }
 
-fn retry_delay_duration(headers: &HeaderMap, default_delay_ms: u64) -> Duration {
-    retry_after_delay(headers).unwrap_or_else(|| Duration::from_millis(default_delay_ms))
+fn classify_forbidden_retry(body: &str) -> Option<GmailRetryClassification> {
+    serde_json::from_str::<GoogleApiErrorEnvelope>(body)
+        .ok()
+        .and_then(|payload| payload.error)
+        .and_then(|error| {
+            error
+                .errors
+                .into_iter()
+                .find_map(|detail| match detail.reason.as_deref() {
+                    Some("rateLimitExceeded" | "userRateLimitExceeded") => {
+                        Some(GmailRetryClassification::QuotaPressure)
+                    }
+                    _ => None,
+                })
+        })
+}
+
+fn matches_concurrent_request_limit(body: &str) -> bool {
+    if let Ok(payload) = serde_json::from_str::<GoogleApiErrorEnvelope>(body)
+        && let Some(error) = payload.error
+    {
+        if error
+            .message
+            .as_deref()
+            .is_some_and(is_concurrent_request_limit_message)
+        {
+            return true;
+        }
+
+        return error.errors.into_iter().any(|detail| {
+            detail
+                .message
+                .as_deref()
+                .is_some_and(is_concurrent_request_limit_message)
+        });
+    }
+
+    is_concurrent_request_limit_message(body)
+}
+
+fn is_concurrent_request_limit_message(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("too many concurrent requests for user")
+}
+
+fn retry_delay_duration(headers: &HeaderMap, default_delay_ms: u64, attempt: usize) -> Duration {
+    retry_after_delay(headers).unwrap_or_else(|| jittered_retry_delay(default_delay_ms, attempt))
 }
 
 fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
@@ -1245,8 +1468,19 @@ fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
     }
 }
 
-fn duration_to_retry_delay_ms(duration: Duration) -> u64 {
-    duration.as_millis().min(u128::from(u64::MAX)) as u64
+fn next_retry_delay_ms(current_delay_ms: u64) -> u64 {
+    current_delay_ms
+        .saturating_mul(2)
+        .clamp(GMAIL_INITIAL_RETRY_DELAY_MS, GMAIL_MAX_RETRY_DELAY_MS)
+}
+
+fn jittered_retry_delay(default_delay_ms: u64, attempt: usize) -> Duration {
+    let jitter_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_millis() as u64)
+        .unwrap_or((attempt as u64).saturating_mul(17))
+        % GMAIL_RETRY_JITTER_MS.max(1);
+    Duration::from_millis(default_delay_ms.saturating_add(jitter_ms))
 }
 
 fn header_value(headers: &[GmailHeader], name: &str) -> Option<String> {
@@ -1534,13 +1768,15 @@ fn build_gmail_http_client(config: &GmailConfig) -> GmailResult<reqwest::Client>
 mod tests {
     use super::{
         GmailClient, GmailClientError, GmailMessagePayload, GmailProfile, MESSAGE_CATALOG_FIELDS,
-        MESSAGE_CATALOG_FULL_FIELDS, duration_to_retry_delay_ms, extract_email_address,
-        payload_projection_truncated, request_supports_automatic_retry, retry_after_delay,
+        MESSAGE_CATALOG_FULL_FIELDS, classify_retryable_api_response, extract_email_address,
+        next_retry_delay_ms, payload_projection_truncated, request_supports_automatic_retry,
+        retry_after_delay,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
     use crate::config::{GmailConfig, WorkspaceConfig};
-    use reqwest::Method;
+    use crate::gmail::quota::GmailRetryClassification;
     use reqwest::header::HeaderMap;
+    use reqwest::{Method, StatusCode};
     use secrecy::{ExposeSecret, SecretString};
     use serde_json::json;
     use std::time::{Duration, SystemTime};
@@ -1714,8 +1950,10 @@ mod tests {
     }
 
     #[test]
-    fn duration_to_retry_delay_ms_scales_seconds_to_millis() {
-        assert_eq!(duration_to_retry_delay_ms(Duration::from_secs(7)), 7_000);
+    fn next_retry_delay_ms_doubles_and_caps_backoff() {
+        assert_eq!(next_retry_delay_ms(1_000), 2_000);
+        assert_eq!(next_retry_delay_ms(16_000), 32_000);
+        assert_eq!(next_retry_delay_ms(32_000), 32_000);
     }
 
     #[test]
@@ -1723,6 +1961,57 @@ mod tests {
         assert!(request_supports_automatic_retry(&Method::GET));
         assert!(!request_supports_automatic_retry(&Method::POST));
         assert!(!request_supports_automatic_retry(&Method::PUT));
+    }
+
+    #[test]
+    fn gmail_usage_limit_forbidden_errors_are_classified_as_quota_pressure() {
+        let body = serde_json::to_string(&json!({
+            "error": {
+                "errors": [
+                    {
+                        "domain": "usageLimits",
+                        "reason": "userRateLimitExceeded",
+                        "message": "quota exhausted"
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            classify_retryable_api_response(StatusCode::FORBIDDEN, &body),
+            Some(GmailRetryClassification::QuotaPressure)
+        );
+    }
+
+    #[test]
+    fn gmail_concurrent_request_429_errors_are_classified_as_concurrency_pressure() {
+        let body = serde_json::to_string(&json!({
+            "error": {
+                "message": "Too many concurrent requests for user",
+                "errors": [
+                    {
+                        "domain": "usageLimits",
+                        "reason": "rateLimitExceeded",
+                        "message": "Too many concurrent requests for user"
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            classify_retryable_api_response(StatusCode::TOO_MANY_REQUESTS, &body),
+            Some(GmailRetryClassification::ConcurrencyPressure)
+        );
+    }
+
+    #[test]
+    fn gmail_backend_5xx_errors_are_classified_as_backend_pressure() {
+        assert_eq!(
+            classify_retryable_api_response(StatusCode::BAD_GATEWAY, "upstream failure"),
+            Some(GmailRetryClassification::Backend)
+        );
     }
 
     #[tokio::test]
@@ -1752,6 +2041,77 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_millis(800), client.list_labels()).await;
 
         assert!(result.is_err(), "client retried before Retry-After elapsed");
+    }
+
+    #[tokio::test]
+    async fn list_labels_retries_gmail_user_rate_limit_forbidden_errors() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {
+                    "errors": [
+                        {
+                            "domain": "usageLimits",
+                            "reason": "userRateLimitExceeded",
+                            "message": "quota exhausted"
+                        }
+                    ]
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "labels": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir)
+            .with_quota_budget(12_000)
+            .unwrap();
+
+        let labels = client.list_labels().await.unwrap();
+        assert!(labels.is_empty());
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_labels_does_not_retry_non_quota_forbidden_errors() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/labels"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {
+                    "errors": [
+                        {
+                            "domain": "global",
+                            "reason": "insufficientPermissions",
+                            "message": "forbidden"
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let client = test_client(&mock_server, &temp_dir);
+
+        let error = client.list_labels().await.unwrap_err();
+        assert!(matches!(
+            error,
+            GmailClientError::Api { status, .. } if status == StatusCode::FORBIDDEN
+        ));
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
     }
 
     #[tokio::test]

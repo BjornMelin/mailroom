@@ -350,6 +350,18 @@ mod tests {
             json!("archive")
         );
         assert_eq!(json_value["data"]["sync_report"]["mode"], json!("full"));
+        assert_eq!(
+            json_value["data"]["sync_report"]["comparability_kind"],
+            json!("full_recent_days")
+        );
+        assert_eq!(
+            json_value["data"]["sync_report"]["pipeline_enabled"],
+            json!(true)
+        );
+        assert_eq!(
+            json_value["data"]["sync_report"]["effective_quota_units_per_minute"],
+            json!(12_000)
+        );
     }
 
     #[test]
@@ -443,8 +455,14 @@ mod tests {
                 remove_label_names: vec![],
             }),
             sync_report: Some(SyncRunReport {
+                run_id: 0,
                 mode: SyncMode::Full,
+                comparability_kind: crate::store::mailbox::SyncRunComparabilityKind::FullRecentDays,
+                comparability_key: String::from("7"),
+                comparability_label: String::from("full recent_days=7"),
+                startup_seed_run_id: None,
                 fallback_from_history: false,
+                resumed_from_checkpoint: false,
                 bootstrap_query: String::from("newer_than:7d"),
                 cursor_history_id: String::from("cursor-1"),
                 pages_fetched: 1,
@@ -452,9 +470,50 @@ mod tests {
                 messages_upserted: 1,
                 messages_deleted: 0,
                 labels_synced: 3,
+                checkpoint_reused_pages: 0,
+                checkpoint_reused_messages_upserted: 0,
+                pipeline_enabled: true,
+                pipeline_list_queue_high_water: 1,
+                pipeline_write_queue_high_water: 1,
+                pipeline_write_batch_count: 1,
+                pipeline_writer_wait_ms: 0,
+                pipeline_fetch_batch_count: 1,
+                pipeline_fetch_batch_avg_ms: 10,
+                pipeline_fetch_batch_max_ms: 10,
+                pipeline_writer_tx_count: 1,
+                pipeline_writer_tx_avg_ms: 5,
+                pipeline_writer_tx_max_ms: 5,
+                pipeline_reorder_buffer_high_water: 1,
+                pipeline_staged_message_count: 1,
+                pipeline_staged_delete_count: 0,
+                pipeline_staged_attachment_count: 0,
                 store_message_count: 4,
                 store_label_count: 5,
                 store_indexed_message_count: 6,
+                adaptive_pacing_enabled: true,
+                quota_units_budget_per_minute: 12_000,
+                message_fetch_concurrency: 4,
+                quota_units_cap_per_minute: 12_000,
+                message_fetch_concurrency_cap: 4,
+                starting_quota_units_per_minute: 12_000,
+                starting_message_fetch_concurrency: 4,
+                effective_quota_units_per_minute: 12_000,
+                effective_message_fetch_concurrency: 4,
+                adaptive_downshift_count: 0,
+                estimated_quota_units_reserved: 15,
+                http_attempt_count: 3,
+                retry_count: 0,
+                quota_pressure_retry_count: 0,
+                concurrency_pressure_retry_count: 0,
+                backend_retry_count: 0,
+                throttle_wait_count: 0,
+                throttle_wait_ms: 0,
+                retry_after_wait_ms: 0,
+                duration_ms: 100,
+                pages_per_second: 10.0,
+                messages_per_second: 20.0,
+                regression_detected: false,
+                regression_kind: None,
             }),
         }
     }

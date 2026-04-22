@@ -10,6 +10,7 @@ Local contract for `mailroom`.
 - reply and draft queue workflows
 - attachment discovery and controlled export
 - mailbox cleanup workflows after review
+- read-only verification, audit, and ruleset hardening before bulk apply
 - durable docs and operational discipline for email management
 
 ## Architecture defaults
@@ -34,6 +35,7 @@ Local contract for `mailroom`.
 - Prefer repo-local paths over hidden global machine state when reasonable.
 - Add new dependencies only when they earn their keep for the current milestone.
 - Preserve structured output for agent and shell workflows.
+- Prefer read-only audit and verification commands before broad mailbox mutations or high-volume automation apply runs.
 - If a plugin-assisted Codex workflow exists for an operation, document it alongside native commands rather than pretending the repo already implements it.
 
 ## Error handling
