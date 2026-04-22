@@ -30,23 +30,33 @@ fn export_filename_falls_back_when_sanitized_filename_is_empty() {
 
 #[test]
 fn default_export_path_uses_thread_and_message_partitions() {
-    let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
+    let repo_root = PathBuf::from("mailroom-test-root");
+    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
     let path = default_export_path(&paths, "thread-1", "message-1", "m-1:1.2", "note.pdf");
 
     assert_eq!(
         path,
-        PathBuf::from("/tmp/mailroom/.mailroom/exports/thread-1/message-1--m-11.2--note.pdf")
+        repo_root
+            .join(".mailroom")
+            .join("exports")
+            .join("thread-1")
+            .join("message-1--m-11.2--note.pdf")
     );
 }
 
 #[test]
 fn default_export_path_falls_back_when_partition_ids_sanitize_to_empty() {
-    let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
+    let repo_root = PathBuf::from("mailroom-test-root");
+    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
     let path = default_export_path(&paths, "///", "\\\\", "///", "note.pdf");
 
     assert_eq!(
         path,
-        PathBuf::from("/tmp/mailroom/.mailroom/exports/thread/message--attachment--note.pdf")
+        repo_root
+            .join(".mailroom")
+            .join("exports")
+            .join("thread")
+            .join("message--attachment--note.pdf")
     );
 }
 
@@ -64,7 +74,11 @@ fn resolve_vault_relative_path_rejects_parent_traversal() {
     let paths = WorkspacePaths::from_repo_root(PathBuf::from("/tmp/mailroom"));
     let error = resolve_vault_relative_path(&paths, "../escape.bin").unwrap_err();
 
-    assert!(error.to_string().contains("invalid"));
+    assert!(matches!(
+        error.downcast_ref::<AttachmentServiceError>(),
+        Some(AttachmentServiceError::InvalidVaultPath { relative_path })
+            if relative_path == "../escape.bin"
+    ));
 }
 
 #[test]

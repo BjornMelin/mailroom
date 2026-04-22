@@ -198,7 +198,14 @@ pub(super) fn normalize_candidate_paths(mut candidates: Vec<PathBuf>) -> Vec<Pat
 pub(super) fn collect_candidate_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(Vec::new());
+        }
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -230,12 +237,14 @@ pub(super) fn detect_adc_path() -> Option<PathBuf> {
     detect_adc_path_from_env(
         std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("APPDATA").map(PathBuf::from),
     )
 }
 
 pub(super) fn detect_adc_path_from_env(
     adc_env_path: Option<PathBuf>,
     home_dir: Option<PathBuf>,
+    appdata_dir: Option<PathBuf>,
 ) -> Option<PathBuf> {
     if let Some(adc_path) = adc_env_path
         && adc_path.exists()
@@ -243,10 +252,18 @@ pub(super) fn detect_adc_path_from_env(
         return Some(adc_path);
     }
 
-    let home_dir = home_dir?;
-    let well_known = home_dir.join(".config/gcloud/application_default_credentials.json");
-    if well_known.exists() {
-        return Some(well_known);
+    if let Some(home_dir) = home_dir {
+        let well_known = home_dir.join(".config/gcloud/application_default_credentials.json");
+        if well_known.exists() {
+            return Some(well_known);
+        }
+    }
+
+    if let Some(appdata_dir) = appdata_dir {
+        let well_known = appdata_dir.join("gcloud/application_default_credentials.json");
+        if well_known.exists() {
+            return Some(well_known);
+        }
     }
 
     None
@@ -296,13 +313,6 @@ fn set_owner_only_file_permissions(_path: &Path) -> Result<()> {
 }
 
 fn persist_tmp_file(tmp_path: &Path, destination: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        if destination.exists() {
-            fs::remove_file(destination)?;
-        }
-    }
-
     fs::rename(tmp_path, destination)?;
     Ok(())
 }

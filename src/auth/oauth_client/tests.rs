@@ -172,7 +172,21 @@ fn detect_adc_path_ignores_missing_env_path_and_falls_back_to_well_known_adc() {
     fs::create_dir_all(well_known_adc.parent().unwrap()).unwrap();
     fs::write(&well_known_adc, "{}").unwrap();
 
-    let detected = detect_adc_path_from_env(Some(missing_env_path), Some(temp_dir.path().into()));
+    let detected =
+        detect_adc_path_from_env(Some(missing_env_path), Some(temp_dir.path().into()), None);
+
+    assert_eq!(detected, Some(well_known_adc));
+}
+
+#[test]
+fn detect_adc_path_falls_back_to_windows_well_known_adc() {
+    let temp_dir = TempDir::new().unwrap();
+    let appdata_dir = temp_dir.path().join("AppData/Roaming");
+    let well_known_adc = appdata_dir.join("gcloud/application_default_credentials.json");
+    fs::create_dir_all(well_known_adc.parent().unwrap()).unwrap();
+    fs::write(&well_known_adc, "{}").unwrap();
+
+    let detected = detect_adc_path_from_env(None, None, Some(appdata_dir));
 
     assert_eq!(detected, Some(well_known_adc));
 }
