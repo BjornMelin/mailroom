@@ -349,6 +349,17 @@ pub(crate) struct RetireDraftStateInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RestoreDraftStateInput {
+    pub(crate) account_id: String,
+    pub(crate) thread_id: String,
+    pub(crate) current_draft_revision_id: Option<i64>,
+    pub(crate) gmail_draft_id: Option<String>,
+    pub(crate) gmail_draft_message_id: Option<String>,
+    pub(crate) gmail_draft_thread_id: Option<String>,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AttachmentInput {
     pub(crate) path: String,
     pub(crate) file_name: String,

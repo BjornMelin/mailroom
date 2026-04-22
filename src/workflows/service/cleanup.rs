@@ -95,6 +95,7 @@ pub(crate) async fn cleanup_tracked_thread_for_automation(
         None
     };
 
+    gmail_client.get_profile_with_access_scope().await?;
     execute_cleanup_after_auth(
         config_report,
         gmail_client,

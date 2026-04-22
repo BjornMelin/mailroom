@@ -13,6 +13,16 @@ pub(super) struct RemoteDraftUpsert {
     pub(super) created_new: bool,
 }
 
+struct RestoreDraftStateRequest {
+    account_id: String,
+    thread_id: String,
+    current_draft_revision_id: Option<i64>,
+    gmail_draft_id: Option<String>,
+    gmail_draft_message_id: Option<String>,
+    gmail_draft_thread_id: Option<String>,
+    expected_workflow_version: i64,
+}
+
 pub(super) fn matches_missing_draft_error(error: &GmailClientError, draft_id: &str) -> bool {
     let expected_path = format!("users/me/drafts/{draft_id}");
     matches!(
@@ -304,7 +314,10 @@ pub(super) async fn retire_local_draft_then_delete_remote(
     workflow: store::workflows::WorkflowRecord,
     operation: &'static str,
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    let original_draft_revision_id = workflow.current_draft_revision_id;
     let gmail_draft_id = workflow.gmail_draft_id.clone();
+    let gmail_draft_message_id = workflow.gmail_draft_message_id.clone();
+    let gmail_draft_thread_id = workflow.gmail_draft_thread_id.clone();
     let retired_workflow = retire_local_draft_state(
         config_report,
         &workflow.account_id,
@@ -312,6 +325,66 @@ pub(super) async fn retire_local_draft_then_delete_remote(
         operation,
     )
     .await?;
-    delete_remote_draft_if_present(gmail_client, gmail_draft_id.as_deref()).await?;
+    if let Err(source) =
+        delete_remote_draft_if_present(gmail_client, gmail_draft_id.as_deref()).await
+    {
+        let source_message = source.to_string();
+        restore_local_draft_state(
+            config_report,
+            RestoreDraftStateRequest {
+                account_id: workflow.account_id.clone(),
+                thread_id: workflow.thread_id.clone(),
+                current_draft_revision_id: original_draft_revision_id,
+                gmail_draft_id: gmail_draft_id.clone(),
+                gmail_draft_message_id,
+                gmail_draft_thread_id,
+                expected_workflow_version: retired_workflow.workflow_version,
+            },
+            "draft.restore_local_state",
+        )
+        .await
+        .map_err(
+            |restore_error| WorkflowServiceError::RemoteDraftStateReconcile {
+                thread_id: workflow.thread_id.clone(),
+                draft_id: gmail_draft_id
+                    .clone()
+                    .unwrap_or_else(|| String::from("<missing>")),
+                source: anyhow::Error::new(restore_error)
+                    .context(format!("remote draft delete failed: {source_message}")),
+            },
+        )?;
+        return Err(source);
+    }
     Ok(retired_workflow)
+}
+
+async fn restore_local_draft_state(
+    config_report: &ConfigReport,
+    request: RestoreDraftStateRequest,
+    operation: &'static str,
+) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+
+    join_blocking(
+        spawn_blocking(move || {
+            store::workflows::restore_draft_state_with_expected_version(
+                &database_path,
+                busy_timeout_ms,
+                &store::workflows::RestoreDraftStateInput {
+                    account_id: request.account_id,
+                    thread_id: request.thread_id,
+                    current_draft_revision_id: request.current_draft_revision_id,
+                    gmail_draft_id: request.gmail_draft_id,
+                    gmail_draft_message_id: request.gmail_draft_message_id,
+                    gmail_draft_thread_id: request.gmail_draft_thread_id,
+                    updated_at_epoch_s,
+                },
+                Some(request.expected_workflow_version),
+            )
+        }),
+        operation,
+    )
+    .await
 }

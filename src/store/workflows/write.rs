@@ -1,9 +1,9 @@
 use super::read::load_workflow;
 use super::{
     ApplyCleanupInput, AttachmentInput, CleanupAction, DraftRevisionRecord, MarkSentInput,
-    PromoteWorkflowInput, RemoteDraftStateInput, RetireDraftStateInput, SetTriageStateInput,
-    SnoozeWorkflowInput, TriageBucket, UpsertDraftRevisionInput, WorkflowMessageSnapshot,
-    WorkflowRecord, WorkflowStage, WorkflowStoreWriteError,
+    PromoteWorkflowInput, RemoteDraftStateInput, RestoreDraftStateInput, RetireDraftStateInput,
+    SetTriageStateInput, SnoozeWorkflowInput, TriageBucket, UpsertDraftRevisionInput,
+    WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage, WorkflowStoreWriteError,
 };
 use crate::store::connection;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -375,6 +375,33 @@ pub(crate) fn retire_draft_state(
     let expected_workflow_version = Some(workflow.workflow_version);
 
     clear_draft_state(&mut workflow);
+    workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
+    workflow.updated_at_epoch_s = input.updated_at_epoch_s;
+
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
+    transaction.commit()?;
+    Ok(workflow)
+}
+
+pub(crate) fn restore_draft_state_with_expected_version(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    input: &RestoreDraftStateInput,
+    expected_workflow_version: Option<i64>,
+) -> Result<WorkflowRecord, WorkflowStoreWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction()?;
+    let mut workflow = load_workflow(&transaction, &input.account_id, &input.thread_id)?
+        .ok_or_else(|| WorkflowStoreWriteError::MissingWorkflow {
+            thread_id: input.thread_id.clone(),
+        })?;
+    let expected_workflow_version = expected_workflow_version.or(Some(workflow.workflow_version));
+
+    workflow.current_draft_revision_id = input.current_draft_revision_id;
+    workflow.gmail_draft_id = input.gmail_draft_id.clone();
+    workflow.gmail_draft_message_id = input.gmail_draft_message_id.clone();
+    workflow.gmail_draft_thread_id = input.gmail_draft_thread_id.clone();
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
