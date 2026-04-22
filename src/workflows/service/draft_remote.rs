@@ -314,6 +314,9 @@ pub(super) async fn retire_local_draft_then_delete_remote(
     workflow: store::workflows::WorkflowRecord,
     operation: &'static str,
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    const RESTORE_DRAFT_STATE_MAX_ATTEMPTS: usize = 5;
+    const RESTORE_DRAFT_STATE_RETRY_DELAY_MS: u64 = 50;
+
     let original_draft_revision_id = workflow.current_draft_revision_id;
     let gmail_draft_id = workflow.gmail_draft_id.clone();
     let gmail_draft_message_id = workflow.gmail_draft_message_id.clone();
@@ -329,30 +332,57 @@ pub(super) async fn retire_local_draft_then_delete_remote(
         delete_remote_draft_if_present(gmail_client, gmail_draft_id.as_deref()).await
     {
         let source_message = source.to_string();
-        restore_local_draft_state(
-            config_report,
-            RestoreDraftStateRequest {
-                account_id: workflow.account_id.clone(),
-                thread_id: workflow.thread_id.clone(),
-                current_draft_revision_id: original_draft_revision_id,
-                gmail_draft_id: gmail_draft_id.clone(),
-                gmail_draft_message_id,
-                gmail_draft_thread_id,
-                expected_workflow_version: retired_workflow.workflow_version,
-            },
-            "draft.restore_local_state",
-        )
-        .await
-        .map_err(
-            |restore_error| WorkflowServiceError::RemoteDraftStateReconcile {
+        let request = RestoreDraftStateRequest {
+            account_id: workflow.account_id.clone(),
+            thread_id: workflow.thread_id.clone(),
+            current_draft_revision_id: original_draft_revision_id,
+            gmail_draft_id: gmail_draft_id.clone(),
+            gmail_draft_message_id,
+            gmail_draft_thread_id,
+            expected_workflow_version: retired_workflow.workflow_version,
+        };
+        let mut restore_error = None;
+        for attempt in 0..RESTORE_DRAFT_STATE_MAX_ATTEMPTS {
+            match restore_local_draft_state(
+                config_report,
+                RestoreDraftStateRequest {
+                    account_id: request.account_id.clone(),
+                    thread_id: request.thread_id.clone(),
+                    current_draft_revision_id: request.current_draft_revision_id,
+                    gmail_draft_id: request.gmail_draft_id.clone(),
+                    gmail_draft_message_id: request.gmail_draft_message_id.clone(),
+                    gmail_draft_thread_id: request.gmail_draft_thread_id.clone(),
+                    expected_workflow_version: request.expected_workflow_version,
+                },
+                "draft.restore_local_state",
+            )
+            .await
+            {
+                Ok(_) => {
+                    restore_error = None;
+                    break;
+                }
+                Err(error) => {
+                    restore_error = Some(error);
+                    if attempt + 1 < RESTORE_DRAFT_STATE_MAX_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            RESTORE_DRAFT_STATE_RETRY_DELAY_MS,
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        if let Some(restore_error) = restore_error {
+            return Err(WorkflowServiceError::RemoteDraftStateReconcile {
                 thread_id: workflow.thread_id.clone(),
                 draft_id: gmail_draft_id
                     .clone()
                     .unwrap_or_else(|| String::from("<missing>")),
                 source: anyhow::Error::new(restore_error)
                     .context(format!("remote draft delete failed: {source_message}")),
-            },
-        )?;
+            });
+        }
         return Err(source);
     }
     Ok(retired_workflow)

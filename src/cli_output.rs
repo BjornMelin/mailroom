@@ -221,6 +221,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowServiceError::NoActiveAccount => {
                 return (ErrorCode::AuthRequired, "workflow.account.required");
             }
+            WorkflowServiceError::AuthenticatedAccountMismatch { .. } => {
+                return (ErrorCode::AuthRequired, "workflow.account.mismatch");
+            }
             WorkflowServiceError::ReplyRecipientUndetermined
             | WorkflowServiceError::ReplyDraftWithoutRecipients
             | WorkflowServiceError::DraftWithoutToRecipients
@@ -855,6 +858,22 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("storage_failure"));
         assert_eq!(value["error"]["kind"], json!("workflow.draft.reconcile"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn workflow_account_mismatch_maps_to_auth_required_code() {
+        let error = anyhow!(WorkflowServiceError::AuthenticatedAccountMismatch {
+            thread_id: String::from("thread-1"),
+            expected_account_id: String::from("gmail:other@example.com"),
+            actual_account_id: String::from("gmail:operator@example.com"),
+        });
+
+        let report = describe_error(&error, "workflow.cleanup");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("auth_required"));
+        assert_eq!(value["error"]["kind"], json!("workflow.account.mismatch"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
     }
 
     #[test]

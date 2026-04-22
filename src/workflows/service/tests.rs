@@ -1191,6 +1191,83 @@ async fn show_workflow_prefers_thread_owned_account_over_active_account() {
 }
 
 #[tokio::test]
+async fn cleanup_archive_rejects_cross_account_thread_mutation() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server).await;
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    init(&config_report).unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("other@example.com"),
+            history_id: String::from("99"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 99,
+        },
+    )
+    .unwrap();
+    accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("operator@example.com"),
+            history_id: String::from("100"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 100,
+        },
+    )
+    .unwrap();
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &crate::store::workflows::SetTriageStateInput {
+            account_id: String::from("gmail:other@example.com"),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::NeedsReplySoon,
+            note: None,
+            snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                message_id: String::from("m-1"),
+                internal_date_epoch_ms: 100,
+                subject: String::from("Project"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Project status"),
+            },
+            updated_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+
+    let error = cleanup_archive(&config_report, String::from("thread-1"), true)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "thread thread-1 belongs to gmail:other@example.com, but the authenticated Gmail account is gmail:operator@example.com; switch accounts before mutating this workflow"
+    );
+
+    let detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        "gmail:other@example.com",
+        "thread-1",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        detail.workflow.current_stage,
+        crate::store::workflows::WorkflowStage::Triage
+    );
+    assert_eq!(detail.workflow.last_cleanup_action, None);
+}
+
+#[tokio::test]
 async fn cleanup_archive_deletes_remote_draft_and_treats_sync_as_best_effort() {
     let mock_server = MockServer::start().await;
     mount_profile(&mock_server).await;
@@ -1428,7 +1505,7 @@ async fn promote_workflow_closed_requires_gmail_auth_before_persisting_close() {
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "mailroom is not authenticated; run `mailroom auth login` first"
+        "failed to refresh the active Gmail account"
     );
 
     let detail = get_workflow_detail(
@@ -1793,7 +1870,7 @@ async fn cleanup_label_validates_before_deleting_remote_draft() {
 
     assert_eq!(
         error.to_string(),
-        "one or more add-label names were not found locally; run `mailroom sync run` first"
+        "failed to refresh the active Gmail account"
     );
 
     let detail = get_workflow_detail(
@@ -2182,7 +2259,7 @@ async fn cleanup_archive_requires_gmail_auth_before_persisting_cleanup() {
         .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "mailroom is not authenticated; run `mailroom auth login` first"
+        "failed to refresh the active Gmail account"
     );
 
     let detail = get_workflow_detail(

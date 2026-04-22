@@ -49,6 +49,14 @@ pub(crate) enum WorkflowServiceError {
     #[error("no active Gmail account found; run `mailroom auth login` first")]
     NoActiveAccount,
     #[error(
+        "thread {thread_id} belongs to {expected_account_id}, but the authenticated Gmail account is {actual_account_id}; switch accounts before mutating this workflow"
+    )]
+    AuthenticatedAccountMismatch {
+        thread_id: String,
+        expected_account_id: String,
+        actual_account_id: String,
+    },
+    #[error(
         "no locally synced message found for thread {thread_id}; run `mailroom sync run` first"
     )]
     LocalSnapshotMissing { thread_id: String },

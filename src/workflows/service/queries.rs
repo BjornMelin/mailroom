@@ -210,6 +210,41 @@ pub(super) async fn resolve_workflow_account_id(
     .await
 }
 
+pub(super) async fn resolve_mutating_workflow_account_id(
+    config_report: &ConfigReport,
+    thread_id: &str,
+) -> WorkflowResult<String> {
+    let active_account = resolve_active_account(config_report).await?;
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let thread_id_owned = thread_id.to_owned();
+    let thread_id_for_lookup = thread_id_owned.clone();
+    let active_account_id = active_account.account_id.clone();
+    let thread_account_id = join_blocking(
+        spawn_blocking(move || {
+            store::workflows::lookup_workflow_account_id(
+                &database_path,
+                busy_timeout_ms,
+                Some(&thread_id_for_lookup),
+            )
+        }),
+        "workflow.account.lookup_mutation",
+    )
+    .await?;
+
+    if let Some(thread_account_id) = thread_account_id
+        && thread_account_id != active_account_id
+    {
+        return Err(WorkflowServiceError::AuthenticatedAccountMismatch {
+            thread_id: thread_id_owned,
+            expected_account_id: thread_account_id,
+            actual_account_id: active_account_id,
+        });
+    }
+
+    Ok(active_account.account_id)
+}
+
 pub(super) fn resolve_workflow_account_id_blocking(
     database_path: &Path,
     busy_timeout_ms: u64,
@@ -261,7 +296,7 @@ pub async fn set_triage(
     note: Option<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
+    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -293,7 +328,7 @@ pub async fn promote_workflow(
     to_stage: store::workflows::WorkflowStage,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
+    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -357,7 +392,7 @@ pub async fn snooze_workflow(
     use super::message_build::parse_day_to_epoch_s;
 
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
+    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let snoozed_until_epoch_s = until.as_deref().map(parse_day_to_epoch_s).transpose()?;
     let database_path = config_report.config.store.database_path.clone();

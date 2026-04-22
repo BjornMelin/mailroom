@@ -1,6 +1,6 @@
 use super::draft_remote::retire_local_draft_then_delete_remote;
 use super::queries::{
-    best_effort_sync_report, load_workflow_detail_if_present, resolve_workflow_account_id,
+    best_effort_sync_report, load_workflow_detail_if_present, resolve_mutating_workflow_account_id,
     workflow_detail,
 };
 use crate::config::ConfigReport;
@@ -118,7 +118,7 @@ async fn cleanup_impl(
     remove_label_names: Vec<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
+    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
     let detail = workflow_detail(config_report, &account_id, &thread_id).await?;
     let cleanup_preview = CleanupPreview {
         action,
