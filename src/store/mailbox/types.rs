@@ -745,6 +745,13 @@ impl MailboxReadError {
 #[derive(Debug, Error)]
 pub(crate) enum MailboxWriteError {
     #[error(
+        "mailbox write account_id `{expected_account_id}` does not match outcome account_id `{outcome_account_id}`"
+    )]
+    AccountMismatch {
+        expected_account_id: String,
+        outcome_account_id: String,
+    },
+    #[error(
         "attachment `{attachment_key}` for account `{account_id}` was not found while persisting vault state"
     )]
     AttachmentNotFound {
@@ -759,6 +766,11 @@ pub(crate) enum MailboxWriteError {
     },
     #[error(transparent)]
     Query(#[from] rusqlite::Error),
+    #[error("mailbox write invariant violated during `{operation}`: {detail}")]
+    InvariantViolation {
+        operation: &'static str,
+        detail: String,
+    },
     #[error(
         "mailbox write operation `{operation}` unexpectedly touched {actual} rows (expected {expected})"
     )]

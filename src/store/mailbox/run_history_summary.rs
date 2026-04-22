@@ -4,9 +4,9 @@ use super::run_history_policy::{
     detect_sync_run_regression, is_clean_success,
 };
 use super::{
-    SyncMode, SyncRunComparability, SyncRunHistoryRecord, SyncRunSummaryRecord, SyncStatus,
+    MailboxWriteError, SyncMode, SyncRunComparability, SyncRunHistoryRecord, SyncRunSummaryRecord,
+    SyncStatus,
 };
-use anyhow::{Result, anyhow, ensure};
 use rusqlite::{OptionalExtension, params};
 
 pub(crate) fn recompute_sync_run_summary_in_transaction(
@@ -15,13 +15,15 @@ pub(crate) fn recompute_sync_run_summary_in_transaction(
     sync_mode: SyncMode,
     comparability: &SyncRunComparability,
     updated_at_epoch_s: i64,
-) -> Result<SyncRunSummaryRecord> {
+) -> Result<SyncRunSummaryRecord, MailboxWriteError> {
     let history =
         read_sync_run_history_rows_for_summary(transaction, account_id, sync_mode, comparability)?;
-    ensure!(
-        !history.is_empty(),
-        "sync run summary requires at least one history row"
-    );
+    if history.is_empty() {
+        return Err(MailboxWriteError::InvariantViolation {
+            operation: "recompute_sync_run_summary",
+            detail: String::from("sync run summary requires at least one history row"),
+        });
+    }
 
     let latest = &history[0];
     let recent_window = history.len().min(SYNC_RUN_SUMMARY_RECENT_WINDOW);
@@ -73,7 +75,10 @@ pub(crate) fn recompute_sync_run_summary_in_transaction(
         comparability.kind,
         &comparability.key,
     )?
-    .ok_or_else(|| anyhow!("sync run summary disappeared after upsert"))
+    .ok_or_else(|| MailboxWriteError::InvariantViolation {
+        operation: "recompute_sync_run_summary",
+        detail: String::from("sync run summary disappeared after upsert"),
+    })
 }
 
 struct SyncRunSummaryUpsert<'a> {
@@ -93,7 +98,7 @@ struct SyncRunSummaryUpsert<'a> {
 fn upsert_sync_run_summary(
     transaction: &rusqlite::Transaction<'_>,
     input: &SyncRunSummaryUpsert<'_>,
-) -> Result<()> {
+) -> Result<(), MailboxWriteError> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO gmail_sync_run_summary (
              account_id,
@@ -180,7 +185,7 @@ fn read_sync_run_history_rows_for_summary(
     account_id: &str,
     sync_mode: SyncMode,
     comparability: &SyncRunComparability,
-) -> Result<Vec<SyncRunHistoryRecord>> {
+) -> Result<Vec<SyncRunHistoryRecord>, MailboxWriteError> {
     let mut statement = connection.prepare_cached(
         "SELECT
              run_id,
@@ -313,9 +318,14 @@ pub(crate) fn read_sync_run_summary_for_comparability(
 pub(crate) fn read_best_clean_run_for_summary(
     connection: &rusqlite::Connection,
     summary: &SyncRunSummaryRecord,
-) -> Result<Option<SyncRunHistoryRecord>> {
+) -> Result<Option<SyncRunHistoryRecord>, MailboxWriteError> {
     let Some(run_id) = summary.best_clean_run_id else {
         return Ok(None);
     };
-    read_sync_run_history_record(connection, run_id).map_err(Into::into)
+    read_sync_run_history_record(connection, run_id).map_err(|error| {
+        MailboxWriteError::InvariantViolation {
+            operation: "read_best_clean_run_for_summary",
+            detail: error.to_string(),
+        }
+    })
 }

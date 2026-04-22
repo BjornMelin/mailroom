@@ -24,6 +24,16 @@ const DELETE_BATCH_SIZE: usize = 400;
 const FULL_SYNC_STAGE_PAGE_STATUS_PARTIAL: &str = "partial";
 const FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE: &str = "complete";
 
+fn mailbox_write_invariant(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> MailboxWriteError {
+    MailboxWriteError::InvariantViolation {
+        operation,
+        detail: error.to_string(),
+    }
+}
+
 pub(crate) struct MailboxWriterConnection {
     connection: Connection,
     account_id: String,
@@ -533,13 +543,20 @@ pub(crate) fn persist_successful_sync_outcome(
     busy_timeout_ms: u64,
     sync_state: &SyncStateRecord,
     outcome: &SyncRunOutcomeInput,
-) -> Result<(SyncStateRecord, SyncRunHistoryRecord, SyncRunSummaryRecord)> {
+) -> std::result::Result<
+    (SyncStateRecord, SyncRunHistoryRecord, SyncRunSummaryRecord),
+    MailboxWriteError,
+> {
     ensure_sync_outcome_matches_account(&sync_state.account_id, &outcome.account_id)?;
-    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
-    let transaction = connection.transaction()?;
-    let sync_state = upsert_sync_state_record_in_transaction(&transaction, sync_state)?;
-    let history = insert_sync_run_history_in_transaction(&transaction, outcome)?;
-    prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)?;
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction().map_err(MailboxWriteError::from)?;
+    let sync_state = upsert_sync_state_record_in_transaction(&transaction, sync_state)
+        .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
+    let history = insert_sync_run_history_in_transaction(&transaction, outcome)
+        .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
+    prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)
+        .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
     let comparability = comparability_for_outcome(outcome);
     let summary = recompute_sync_run_summary_in_transaction(
         &transaction,
@@ -548,7 +565,7 @@ pub(crate) fn persist_successful_sync_outcome(
         &comparability,
         outcome.finished_at_epoch_s,
     )?;
-    transaction.commit()?;
+    transaction.commit().map_err(MailboxWriteError::from)?;
     Ok((sync_state, history, summary))
 }
 
@@ -557,13 +574,20 @@ pub(crate) fn persist_failed_sync_outcome(
     busy_timeout_ms: u64,
     sync_state_update: &SyncStateUpdate,
     outcome: &SyncRunOutcomeInput,
-) -> Result<(SyncStateRecord, SyncRunHistoryRecord, SyncRunSummaryRecord)> {
+) -> std::result::Result<
+    (SyncStateRecord, SyncRunHistoryRecord, SyncRunSummaryRecord),
+    MailboxWriteError,
+> {
     ensure_sync_outcome_matches_account(&sync_state_update.account_id, &outcome.account_id)?;
-    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)?;
-    let transaction = connection.transaction()?;
-    let sync_state = upsert_sync_state_in_transaction(&transaction, sync_state_update)?;
-    let history = insert_sync_run_history_in_transaction(&transaction, outcome)?;
-    prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)?;
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| MailboxWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction().map_err(MailboxWriteError::from)?;
+    let sync_state = upsert_sync_state_in_transaction(&transaction, sync_state_update)
+        .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
+    let history = insert_sync_run_history_in_transaction(&transaction, outcome)
+        .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
+    prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)
+        .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
     let comparability = comparability_for_outcome(outcome);
     let summary = recompute_sync_run_summary_in_transaction(
         &transaction,
@@ -572,18 +596,19 @@ pub(crate) fn persist_failed_sync_outcome(
         &comparability,
         outcome.finished_at_epoch_s,
     )?;
-    transaction.commit()?;
+    transaction.commit().map_err(MailboxWriteError::from)?;
     Ok((sync_state, history, summary))
 }
 
 fn ensure_sync_outcome_matches_account(
     expected_account_id: &str,
     outcome_account_id: &str,
-) -> Result<()> {
+) -> std::result::Result<(), MailboxWriteError> {
     if expected_account_id != outcome_account_id {
-        return Err(anyhow!(
-            "sync state account_id `{expected_account_id}` does not match outcome account_id `{outcome_account_id}`"
-        ));
+        return Err(MailboxWriteError::AccountMismatch {
+            expected_account_id: expected_account_id.to_owned(),
+            outcome_account_id: outcome_account_id.to_owned(),
+        });
     }
     Ok(())
 }
@@ -1022,8 +1047,37 @@ fn stage_full_sync_messages_in_transaction(
     page_seq: Option<i64>,
     messages: &[GmailMessageUpsertInput],
 ) -> Result<()> {
+    stage_messages_in_transaction(
+        transaction,
+        account_id,
+        messages,
+        SyncStageTables {
+            message_table: "gmail_full_sync_stage_messages",
+            label_table: "gmail_full_sync_stage_message_labels",
+            attachment_table: "gmail_full_sync_stage_attachments",
+            page_message_table: Some("gmail_full_sync_stage_page_messages"),
+        },
+        page_seq,
+    )
+}
+
+struct SyncStageTables<'a> {
+    message_table: &'a str,
+    label_table: &'a str,
+    attachment_table: &'a str,
+    page_message_table: Option<&'a str>,
+}
+
+fn stage_messages_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    messages: &[GmailMessageUpsertInput],
+    tables: SyncStageTables<'_>,
+    page_seq: Option<i64>,
+) -> Result<()> {
     let mut upsert_message = transaction.prepare_cached(
-        "INSERT INTO gmail_full_sync_stage_messages (
+        &format!(
+            "INSERT INTO {} (
              account_id,
              message_id,
              thread_id,
@@ -1067,27 +1121,32 @@ fn stage_full_sync_messages_in_transaction(
              precedence_header = excluded.precedence_header,
              auto_submitted_header = excluded.auto_submitted_header,
              label_names_text = excluded.label_names_text",
+            tables.message_table
+        ),
     )?;
-    let mut delete_labels = transaction.prepare_cached(
-        "DELETE FROM gmail_full_sync_stage_message_labels
+    let mut delete_labels = transaction.prepare_cached(&format!(
+        "DELETE FROM {}
          WHERE account_id = ?1
            AND message_id = ?2",
-    )?;
-    let mut delete_attachments = transaction.prepare_cached(
-        "DELETE FROM gmail_full_sync_stage_attachments
+        tables.label_table
+    ))?;
+    let mut delete_attachments = transaction.prepare_cached(&format!(
+        "DELETE FROM {}
          WHERE account_id = ?1
            AND message_id = ?2",
-    )?;
-    let mut insert_label = transaction.prepare_cached(
-        "INSERT INTO gmail_full_sync_stage_message_labels (
+        tables.attachment_table
+    ))?;
+    let mut insert_label = transaction.prepare_cached(&format!(
+        "INSERT INTO {} (
              account_id,
              message_id,
              label_id
          )
          VALUES (?1, ?2, ?3)",
-    )?;
-    let mut insert_attachment = transaction.prepare_cached(
-        "INSERT INTO gmail_full_sync_stage_attachments (
+        tables.label_table
+    ))?;
+    let mut insert_attachment = transaction.prepare_cached(&format!(
+        "INSERT INTO {} (
              account_id,
              message_id,
              attachment_key,
@@ -1111,21 +1170,21 @@ fn stage_full_sync_messages_in_transaction(
              content_disposition = excluded.content_disposition,
              content_id = excluded.content_id,
              is_inline = excluded.is_inline",
-    )?;
-    let mut insert_page_message = page_seq
-        .is_some()
-        .then(|| {
-            transaction.prepare_cached(
-                "INSERT INTO gmail_full_sync_stage_page_messages (
+        tables.attachment_table
+    ))?;
+    let mut insert_page_message = match (page_seq, tables.page_message_table) {
+        (Some(_), Some(page_message_table)) => Some(transaction.prepare_cached(&format!(
+            "INSERT INTO {} (
                      account_id,
                      page_seq,
                      message_id
                  )
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT (account_id, page_seq, message_id) DO NOTHING",
-            )
-        })
-        .transpose()?;
+            page_message_table
+        ))?),
+        _ => None,
+    };
 
     for message in messages {
         ensure!(
@@ -1286,158 +1345,18 @@ fn stage_incremental_sync_messages_in_transaction(
     account_id: &str,
     messages: &[GmailMessageUpsertInput],
 ) -> Result<()> {
-    let mut upsert_message = transaction.prepare_cached(
-        "INSERT INTO gmail_incremental_sync_stage_messages (
-             account_id,
-             message_id,
-             thread_id,
-             history_id,
-             internal_date_epoch_ms,
-             snippet,
-             subject,
-             from_header,
-             from_address,
-             recipient_headers,
-             to_header,
-             cc_header,
-             bcc_header,
-             reply_to_header,
-             size_estimate,
-             list_id_header,
-             list_unsubscribe_header,
-             list_unsubscribe_post_header,
-             precedence_header,
-             auto_submitted_header,
-             label_names_text
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
-         ON CONFLICT (account_id, message_id) DO UPDATE SET
-             thread_id = excluded.thread_id,
-             history_id = excluded.history_id,
-             internal_date_epoch_ms = excluded.internal_date_epoch_ms,
-             snippet = excluded.snippet,
-             subject = excluded.subject,
-             from_header = excluded.from_header,
-             from_address = excluded.from_address,
-             recipient_headers = excluded.recipient_headers,
-             to_header = excluded.to_header,
-             cc_header = excluded.cc_header,
-             bcc_header = excluded.bcc_header,
-             reply_to_header = excluded.reply_to_header,
-             size_estimate = excluded.size_estimate,
-             list_id_header = excluded.list_id_header,
-             list_unsubscribe_header = excluded.list_unsubscribe_header,
-             list_unsubscribe_post_header = excluded.list_unsubscribe_post_header,
-             precedence_header = excluded.precedence_header,
-             auto_submitted_header = excluded.auto_submitted_header,
-             label_names_text = excluded.label_names_text",
-    )?;
-    let mut delete_labels = transaction.prepare_cached(
-        "DELETE FROM gmail_incremental_sync_stage_message_labels
-         WHERE account_id = ?1
-           AND message_id = ?2",
-    )?;
-    let mut delete_attachments = transaction.prepare_cached(
-        "DELETE FROM gmail_incremental_sync_stage_attachments
-         WHERE account_id = ?1
-           AND message_id = ?2",
-    )?;
-    let mut insert_label = transaction.prepare_cached(
-        "INSERT INTO gmail_incremental_sync_stage_message_labels (
-             account_id,
-             message_id,
-             label_id
-         )
-         VALUES (?1, ?2, ?3)",
-    )?;
-    let mut insert_attachment = transaction.prepare_cached(
-        "INSERT INTO gmail_incremental_sync_stage_attachments (
-             account_id,
-             message_id,
-             attachment_key,
-             part_id,
-             gmail_attachment_id,
-             filename,
-             mime_type,
-             size_bytes,
-             content_disposition,
-             content_id,
-             is_inline
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-         ON CONFLICT (account_id, attachment_key) DO UPDATE SET
-             message_id = excluded.message_id,
-             part_id = excluded.part_id,
-             gmail_attachment_id = excluded.gmail_attachment_id,
-             filename = excluded.filename,
-             mime_type = excluded.mime_type,
-             size_bytes = excluded.size_bytes,
-             content_disposition = excluded.content_disposition,
-             content_id = excluded.content_id,
-             is_inline = excluded.is_inline",
-    )?;
-
-    for message in messages {
-        ensure!(
-            message.account_id == account_id,
-            "mailbox message account_id `{}` does not match batch account `{}`",
-            message.account_id,
-            account_id
-        );
-
-        upsert_message.execute(params![
-            account_id,
-            &message.message_id,
-            &message.thread_id,
-            &message.history_id,
-            message.internal_date_epoch_ms,
-            &message.snippet,
-            &message.subject,
-            &message.from_header,
-            &message.from_address,
-            &message.recipient_headers,
-            &message.to_header,
-            &message.cc_header,
-            &message.bcc_header,
-            &message.reply_to_header,
-            message.size_estimate,
-            &message.automation_headers.list_id_header,
-            &message.automation_headers.list_unsubscribe_header,
-            &message.automation_headers.list_unsubscribe_post_header,
-            &message.automation_headers.precedence_header,
-            &message.automation_headers.auto_submitted_header,
-            &message.label_names_text,
-        ])?;
-        delete_labels.execute(params![account_id, &message.message_id])?;
-        delete_attachments.execute(params![account_id, &message.message_id])?;
-
-        for label_id in unique_sorted_strings(&message.label_ids) {
-            insert_label.execute(params![account_id, &message.message_id, label_id])?;
-        }
-
-        for attachment in &message.attachments {
-            insert_attachment.execute(params![
-                account_id,
-                &message.message_id,
-                &attachment.attachment_key,
-                &attachment.part_id,
-                &attachment.gmail_attachment_id,
-                &attachment.filename,
-                &attachment.mime_type,
-                attachment.size_bytes,
-                &attachment.content_disposition,
-                &attachment.content_id,
-                if attachment.is_inline { 1_i64 } else { 0_i64 },
-            ])?;
-        }
-    }
-
-    drop(insert_attachment);
-    drop(insert_label);
-    drop(delete_attachments);
-    drop(delete_labels);
-    drop(upsert_message);
-    Ok(())
+    stage_messages_in_transaction(
+        transaction,
+        account_id,
+        messages,
+        SyncStageTables {
+            message_table: "gmail_incremental_sync_stage_messages",
+            label_table: "gmail_incremental_sync_stage_message_labels",
+            attachment_table: "gmail_incremental_sync_stage_attachments",
+            page_message_table: None,
+        },
+        None,
+    )
 }
 
 fn finalize_full_sync_from_stage_with_connection(

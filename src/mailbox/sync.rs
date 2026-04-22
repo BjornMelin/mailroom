@@ -2485,7 +2485,7 @@ impl MailboxStoreHandle {
         let busy_timeout_ms = self.busy_timeout_ms;
         let sync_state = sync_state.clone();
         let outcome = outcome.clone();
-        spawn_blocking(move || {
+        Ok(spawn_blocking(move || {
             store::mailbox::persist_successful_sync_outcome(
                 &database_path,
                 busy_timeout_ms,
@@ -2493,7 +2493,7 @@ impl MailboxStoreHandle {
                 &outcome,
             )
         })
-        .await?
+        .await??)
     }
 
     async fn persist_failed_sync_outcome(
@@ -2509,7 +2509,7 @@ impl MailboxStoreHandle {
         let busy_timeout_ms = self.busy_timeout_ms;
         let sync_state_update = sync_state_update.clone();
         let outcome = outcome.clone();
-        spawn_blocking(move || {
+        Ok(spawn_blocking(move || {
             store::mailbox::persist_failed_sync_outcome(
                 &database_path,
                 busy_timeout_ms,
@@ -2517,7 +2517,7 @@ impl MailboxStoreHandle {
                 &outcome,
             )
         })
-        .await?
+        .await??)
     }
 }
 
