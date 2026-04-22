@@ -101,7 +101,6 @@ impl GmailQuotaPolicy {
 
     pub(crate) async fn acquire(&self, request_cost: GmailRequestCost) -> Result<(), u32> {
         let requested_units = request_cost.units();
-        let started_at = Instant::now();
 
         loop {
             let wait_duration = {
@@ -116,8 +115,9 @@ impl GmailQuotaPolicy {
                     return Ok(());
                 }
                 Some(wait_duration) => {
+                    let sleep_started = Instant::now();
                     tokio::time::sleep(wait_duration).await;
-                    self.metrics.record_throttle_wait(started_at.elapsed());
+                    self.metrics.record_throttle_wait(sleep_started.elapsed());
                 }
             }
         }

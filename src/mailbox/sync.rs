@@ -113,7 +113,7 @@ pub async fn sync_run_with_options(
     }
     let mut failure_bootstrap_query = initial_bootstrap_query;
     let mut failure_fallback_from_history = false;
-    let failure_resumed_from_checkpoint = false;
+    let mut failure_resumed_from_checkpoint = false;
     let mut incremental_failure_telemetry = IncrementalFailureTelemetry::zero_work();
     let mut failure_pipeline_report = disabled_pipeline_report();
     let sync_started_at = Instant::now();
@@ -138,6 +138,7 @@ pub async fn sync_run_with_options(
                     &mut pacing,
                     initial_bootstrap_query,
                     false,
+                    &mut failure_resumed_from_checkpoint,
                     &mut failure_pipeline_report,
                 )
                 .await
@@ -178,6 +179,7 @@ pub async fn sync_run_with_options(
                             &mut pacing,
                             persisted_bootstrap_query,
                             true,
+                            &mut failure_resumed_from_checkpoint,
                             &mut failure_pipeline_report,
                         )
                         .await
@@ -253,6 +255,7 @@ pub async fn sync_run_with_options(
                         quota_units_budget_per_minute: options.quota_units_per_minute,
                         message_fetch_concurrency: options.message_fetch_concurrency,
                         metrics,
+                        elapsed: sync_started_at.elapsed(),
                         error_message: sync_error.to_string(),
                     },
                 )
@@ -827,10 +830,12 @@ async fn run_full_sync(
     pacing: &mut AdaptiveSyncPacing,
     bootstrap_query: &str,
     fallback_from_history: bool,
+    failure_resumed_from_checkpoint: &mut bool,
     failure_pipeline_report: &mut PipelineStatsReport,
 ) -> Result<SyncRunReport> {
     let mut checkpoint =
         initialize_full_sync_checkpoint(context, bootstrap_query, fallback_from_history).await?;
+    *failure_resumed_from_checkpoint = checkpoint.resumed_from_checkpoint;
     let checkpoint_reused_pages =
         usize::try_from(checkpoint.record.pages_fetched).unwrap_or(usize::MAX);
     let checkpoint_reused_messages_upserted =
@@ -896,142 +901,155 @@ async fn run_full_sync(
         .await
     });
 
-    let mut next_page_seq = checkpoint_reused_pages;
-    let mut next_chunk_seq = 0usize;
-    let mut buffered_pages: BTreeMap<usize, BTreeMap<usize, PreparedFullSyncPage>> =
-        BTreeMap::new();
-    let labels_synced = i64::try_from(context.labels.len()).unwrap_or(i64::MAX);
-    loop {
-        let wait_started = Instant::now();
-        let maybe_page = write_rx.recv().await;
-        stats.record_writer_wait(wait_started.elapsed());
+    let mut lister_handle = Some(lister_handle);
+    let mut processor_handle = Some(processor_handle);
+    let result = async {
+        let mut next_page_seq = checkpoint_reused_pages;
+        let mut next_chunk_seq = 0usize;
+        let mut buffered_pages: BTreeMap<usize, BTreeMap<usize, PreparedFullSyncPage>> =
+            BTreeMap::new();
+        let labels_synced = i64::try_from(context.labels.len()).unwrap_or(i64::MAX);
+        loop {
+            let wait_started = Instant::now();
+            let maybe_page = write_rx.recv().await;
+            stats.record_writer_wait(wait_started.elapsed());
 
-        let Some(page) = maybe_page else {
-            break;
-        };
-        stats.on_write_dequeued();
-        buffered_pages
-            .entry(page.page_seq)
-            .or_default()
-            .insert(page.chunk_seq, page);
-        stats.observe_reorder_buffer_depth(
-            buffered_pages.values().map(BTreeMap::len).sum::<usize>(),
-        );
-
-        while let Some(page_chunks) = buffered_pages.get_mut(&next_page_seq) {
-            let Some(page) = page_chunks.remove(&next_chunk_seq) else {
+            let Some(page) = maybe_page else {
                 break;
             };
-            let page_complete = page.page_complete;
-            let staged_message_count = page.upserts.len();
-            let staged_attachment_count = page
-                .upserts
-                .iter()
-                .map(|message| message.attachments.len())
-                .sum::<usize>();
-            let write_started = Instant::now();
-            checkpoint.record = stage_prepared_full_sync_page_chunk(
-                context,
-                &checkpoint.record,
-                bootstrap_query,
-                labels_synced,
-                page,
-            )
-            .await
-            .inspect_err(|_| {
-                record_pipeline_failure(failure_pipeline_report, &stats);
-            })?;
-            stats.record_writer_transaction(write_started.elapsed());
-            stats.record_staged_messages(staged_message_count);
-            stats.record_staged_attachments(staged_attachment_count);
-            stats.on_write_batch_committed();
-            observe_latest_metrics(pacing, context.gmail_client).inspect_err(|_| {
-                record_pipeline_failure(failure_pipeline_report, &stats);
-            })?;
-            fetch_concurrency.store(
-                pacing.current_message_fetch_concurrency(),
-                Ordering::Release,
-            );
-
-            if page_complete {
-                next_page_seq += 1;
-                next_chunk_seq = 0;
-                buffered_pages.remove(&(next_page_seq - 1));
-            } else {
-                next_chunk_seq += 1;
-                if page_chunks.is_empty() {
-                    buffered_pages.remove(&next_page_seq);
-                }
-            }
+            stats.on_write_dequeued();
+            buffered_pages
+                .entry(page.page_seq)
+                .or_default()
+                .insert(page.chunk_seq, page);
             stats.observe_reorder_buffer_depth(
                 buffered_pages.values().map(BTreeMap::len).sum::<usize>(),
             );
+
+            while let Some(page_chunks) = buffered_pages.get_mut(&next_page_seq) {
+                let Some(page) = page_chunks.remove(&next_chunk_seq) else {
+                    break;
+                };
+                let page_complete = page.page_complete;
+                let staged_message_count = page.upserts.len();
+                let staged_attachment_count = page
+                    .upserts
+                    .iter()
+                    .map(|message| message.attachments.len())
+                    .sum::<usize>();
+                let write_started = Instant::now();
+                checkpoint.record = stage_prepared_full_sync_page_chunk(
+                    context,
+                    &checkpoint.record,
+                    bootstrap_query,
+                    labels_synced,
+                    page,
+                )
+                .await
+                .inspect_err(|_| {
+                    record_pipeline_failure(failure_pipeline_report, &stats);
+                })?;
+                stats.record_writer_transaction(write_started.elapsed());
+                stats.record_staged_messages(staged_message_count);
+                stats.record_staged_attachments(staged_attachment_count);
+                stats.on_write_batch_committed();
+                observe_latest_metrics(pacing, context.gmail_client).inspect_err(|_| {
+                    record_pipeline_failure(failure_pipeline_report, &stats);
+                })?;
+                fetch_concurrency.store(
+                    pacing.current_message_fetch_concurrency(),
+                    Ordering::Release,
+                );
+
+                if page_complete {
+                    next_page_seq += 1;
+                    next_chunk_seq = 0;
+                    buffered_pages.remove(&(next_page_seq - 1));
+                } else {
+                    next_chunk_seq += 1;
+                    if page_chunks.is_empty() {
+                        buffered_pages.remove(&next_page_seq);
+                    }
+                }
+                stats.observe_reorder_buffer_depth(
+                    buffered_pages.values().map(BTreeMap::len).sum::<usize>(),
+                );
+            }
         }
-    }
 
-    let lister_result = lister_handle
-        .await
-        .context("full sync lister task failed")
-        .inspect_err(|_| {
+        let lister_result = lister_handle
+            .take()
+            .expect("full sync lister handle missing")
+            .await
+            .context("full sync lister task failed")
+            .inspect_err(|_| {
+                record_pipeline_failure(failure_pipeline_report, &stats);
+            })?;
+        let processor_result = processor_handle
+            .take()
+            .expect("full sync processor handle missing")
+            .await
+            .context("full sync processor task failed")
+            .inspect_err(|_| {
+                record_pipeline_failure(failure_pipeline_report, &stats);
+            })?;
+
+        if let Err(error) = lister_result {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+            if error.downcast_ref::<RestartFullSyncFromScratch>().is_some() {
+                context.writer.reset_full_sync_progress().await?;
+                return Box::pin(run_full_sync(
+                    context,
+                    pacing,
+                    bootstrap_query,
+                    fallback_from_history,
+                    failure_resumed_from_checkpoint,
+                    failure_pipeline_report,
+                ))
+                .await;
+            }
+            return Err(error);
+        }
+        processor_result.inspect_err(|_| {
             record_pipeline_failure(failure_pipeline_report, &stats);
         })?;
-    let processor_result = processor_handle
-        .await
-        .context("full sync processor task failed")
-        .inspect_err(|_| {
-            record_pipeline_failure(failure_pipeline_report, &stats);
-        })?;
 
-    if let Err(error) = lister_result {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-        if error.downcast_ref::<RestartFullSyncFromScratch>().is_some() {
-            context.writer.reset_full_sync_progress().await?;
-            return Box::pin(run_full_sync(
-                context,
-                pacing,
+        if !buffered_pages.is_empty() {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+            return Err(anyhow!(
+                "full sync pipeline terminated with {} buffered pages still waiting to commit",
+                buffered_pages.len()
+            ));
+        }
+        if checkpoint.record.status != store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+            return Err(anyhow!(
+                "full sync pipeline drained before reaching a finalize-ready checkpoint"
+            ));
+        }
+
+        finalize_full_sync_report(
+            context,
+            FullSyncFinalizeRequest {
                 bootstrap_query,
                 fallback_from_history,
-                failure_pipeline_report,
-            ))
-            .await;
-        }
-        return Err(error);
+                resumed_from_checkpoint: checkpoint.resumed_from_checkpoint,
+                startup_seed_run_id: pacing.startup_seed_run_id(),
+                checkpoint: checkpoint.record,
+                checkpoint_reused_pages,
+                checkpoint_reused_messages_upserted,
+                pipeline_report: stats.report(),
+            },
+        )
+        .await
+        .inspect_err(|_| {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+        })
     }
-    processor_result.inspect_err(|_| {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-    })?;
+    .await;
 
-    if !buffered_pages.is_empty() {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-        return Err(anyhow!(
-            "full sync pipeline terminated with {} buffered pages still waiting to commit",
-            buffered_pages.len()
-        ));
-    }
-    if checkpoint.record.status != store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-        return Err(anyhow!(
-            "full sync pipeline drained before reaching a finalize-ready checkpoint"
-        ));
-    }
-
-    finalize_full_sync_report(
-        context,
-        FullSyncFinalizeRequest {
-            bootstrap_query,
-            fallback_from_history,
-            resumed_from_checkpoint: checkpoint.resumed_from_checkpoint,
-            startup_seed_run_id: pacing.startup_seed_run_id(),
-            checkpoint: checkpoint.record,
-            checkpoint_reused_pages,
-            checkpoint_reused_messages_upserted,
-            pipeline_report: stats.report(),
-        },
-    )
-    .await
-    .inspect_err(|_| {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-    })
+    abort_pipeline_tasks(lister_handle.take(), processor_handle.take()).await;
+    result
 }
 
 async fn run_incremental_sync(
@@ -1189,102 +1207,150 @@ async fn run_incremental_sync(
         .await
     });
 
-    let mut next_batch_seq = 0usize;
-    let mut buffered_batches = BTreeMap::new();
-    let mut messages_listed = 0usize;
-    let mut messages_upserted = 0usize;
+    let mut lister_handle = Some(lister_handle);
+    let mut processor_handle = Some(processor_handle);
+    let result = async {
+        let mut next_batch_seq = 0usize;
+        let mut buffered_batches = BTreeMap::new();
+        let mut messages_listed = 0usize;
+        let mut messages_upserted = 0usize;
 
-    loop {
-        let wait_started = Instant::now();
-        let maybe_batch = write_rx.recv().await;
-        stats.record_writer_wait(wait_started.elapsed());
+        loop {
+            let wait_started = Instant::now();
+            let maybe_batch = write_rx.recv().await;
+            stats.record_writer_wait(wait_started.elapsed());
 
-        let Some(batch) = maybe_batch else {
-            break;
-        };
-        stats.on_write_dequeued();
-        buffered_batches.insert(batch.batch_seq, batch);
-        stats.observe_reorder_buffer_depth(buffered_batches.len());
+            let Some(batch) = maybe_batch else {
+                break;
+            };
+            stats.on_write_dequeued();
+            buffered_batches.insert(batch.batch_seq, batch);
+            stats.observe_reorder_buffer_depth(buffered_batches.len());
 
-        while let Some(batch) = buffered_batches.remove(&next_batch_seq) {
-            messages_listed += batch.listed_count;
-            messages_upserted += batch.upserts.len();
-            let staged_attachment_count = batch
-                .upserts
-                .iter()
-                .map(|message| message.attachments.len())
-                .sum::<usize>();
-            let write_started = Instant::now();
-            context
-                .writer
-                .stage_incremental_sync_batch(&batch.upserts, &batch.message_ids_to_delete)
-                .await
-                .inspect_err(|_| {
+            while let Some(batch) = buffered_batches.remove(&next_batch_seq) {
+                messages_listed += batch.listed_count;
+                messages_upserted += batch.upserts.len();
+                let staged_attachment_count = batch
+                    .upserts
+                    .iter()
+                    .map(|message| message.attachments.len())
+                    .sum::<usize>();
+                let write_started = Instant::now();
+                context
+                    .writer
+                    .stage_incremental_sync_batch(&batch.upserts, &batch.message_ids_to_delete)
+                    .await
+                    .inspect_err(|_| {
+                        record_pipeline_failure(failure_pipeline_report, &stats);
+                    })?;
+                stats.record_writer_transaction(write_started.elapsed());
+                stats.record_staged_messages(batch.upserts.len());
+                stats.record_staged_deletes(batch.message_ids_to_delete.len());
+                stats.record_staged_attachments(staged_attachment_count);
+                next_batch_seq += 1;
+                stats.on_write_batch_committed();
+                observe_latest_metrics(pacing, context.gmail_client).inspect_err(|_| {
                     record_pipeline_failure(failure_pipeline_report, &stats);
                 })?;
-            stats.record_writer_transaction(write_started.elapsed());
-            stats.record_staged_messages(batch.upserts.len());
-            stats.record_staged_deletes(batch.message_ids_to_delete.len());
-            stats.record_staged_attachments(staged_attachment_count);
-            next_batch_seq += 1;
-            stats.on_write_batch_committed();
-            observe_latest_metrics(pacing, context.gmail_client).inspect_err(|_| {
+                fetch_concurrency.store(
+                    pacing.current_message_fetch_concurrency(),
+                    Ordering::Release,
+                );
+                stats.observe_reorder_buffer_depth(buffered_batches.len());
+            }
+        }
+
+        let lister_result = lister_handle
+            .take()
+            .expect("incremental sync lister handle missing")
+            .await
+            .context("incremental sync lister task failed")
+            .inspect_err(|_| {
                 record_pipeline_failure(failure_pipeline_report, &stats);
             })?;
-            fetch_concurrency.store(
-                pacing.current_message_fetch_concurrency(),
-                Ordering::Release,
-            );
-            stats.observe_reorder_buffer_depth(buffered_batches.len());
+        lister_result.inspect_err(|_| {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+        })?;
+
+        let processor_result = processor_handle
+            .take()
+            .expect("incremental sync processor handle missing")
+            .await
+            .context("incremental sync processor task failed")
+            .inspect_err(|_| {
+                record_pipeline_failure(failure_pipeline_report, &stats);
+            })?;
+        processor_result.inspect_err(|_| {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+        })?;
+
+        if !buffered_batches.is_empty() {
+            record_pipeline_failure(failure_pipeline_report, &stats);
+            return Err(anyhow!(
+                "incremental sync pipeline terminated with {} buffered batches still waiting to commit",
+                buffered_batches.len()
+            ));
         }
-    }
 
-    let lister_result = lister_handle
-        .await
-        .context("incremental sync lister task failed")
-        .inspect_err(|_| {
-            record_pipeline_failure(failure_pipeline_report, &stats);
-        })?;
-    lister_result.inspect_err(|_| {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-    })?;
-
-    let processor_result = processor_handle
-        .await
-        .context("incremental sync processor task failed")
-        .inspect_err(|_| {
-            record_pipeline_failure(failure_pipeline_report, &stats);
-        })?;
-    processor_result.inspect_err(|_| {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-    })?;
-
-    if !buffered_batches.is_empty() {
-        record_pipeline_failure(failure_pipeline_report, &stats);
-        return Err(anyhow!(
-            "incremental sync pipeline terminated with {} buffered batches still waiting to commit",
-            buffered_batches.len()
-        ));
-    }
-
-    let now_epoch_s = current_epoch_seconds()?;
-    let pipeline_report = stats.report();
-    let sync_update = success_sync_state_update_with_pipeline(
-        context.account,
-        bootstrap_query,
-        &FinalizeSyncInput {
+        let now_epoch_s = current_epoch_seconds()?;
+        let pipeline_report = stats.report();
+        let sync_update = success_sync_state_update_with_pipeline(
+            context.account,
+            bootstrap_query,
+            &FinalizeSyncInput {
+                mode: store::mailbox::SyncMode::Incremental,
+                comparability_kind: comparability.kind,
+                comparability_key: comparability.key.clone(),
+                comparability_label: comparability.label.clone(),
+                startup_seed_run_id: pacing.startup_seed_run_id(),
+                fallback_from_history: false,
+                resumed_from_checkpoint: false,
+                cursor_history_id: Some(latest_history_id.clone()),
+                pages_fetched,
+                messages_listed,
+                messages_upserted,
+                messages_deleted: 0,
+                labels_synced: context.labels.len(),
+                checkpoint_reused_pages: 0,
+                checkpoint_reused_messages_upserted: 0,
+                pipeline_enabled: pipeline_report.pipeline_enabled,
+                pipeline_list_queue_high_water: pipeline_report.list_queue_high_water,
+                pipeline_write_queue_high_water: pipeline_report.write_queue_high_water,
+                pipeline_write_batch_count: pipeline_report.write_batch_count,
+                pipeline_writer_wait_ms: pipeline_report.writer_wait_ms,
+                pipeline_fetch_batch_count: pipeline_report.fetch_batch_count,
+                pipeline_fetch_batch_avg_ms: pipeline_report.fetch_batch_avg_ms,
+                pipeline_fetch_batch_max_ms: pipeline_report.fetch_batch_max_ms,
+                pipeline_writer_tx_count: pipeline_report.writer_tx_count,
+                pipeline_writer_tx_avg_ms: pipeline_report.writer_tx_avg_ms,
+                pipeline_writer_tx_max_ms: pipeline_report.writer_tx_max_ms,
+                pipeline_reorder_buffer_high_water: pipeline_report.reorder_buffer_high_water,
+                pipeline_staged_message_count: pipeline_report.staged_message_count,
+                pipeline_staged_delete_count: pipeline_report.staged_delete_count,
+                pipeline_staged_attachment_count: pipeline_report.staged_attachment_count,
+            },
+            now_epoch_s,
+        );
+        let (sync_state, messages_deleted) = context
+            .writer
+            .finalize_incremental_from_stage(context.labels, now_epoch_s, sync_update)
+            .await
+            .inspect_err(|_| {
+                record_pipeline_failure(failure_pipeline_report, &stats);
+            })?;
+        let finalize_input = FinalizeSyncInput {
             mode: store::mailbox::SyncMode::Incremental,
             comparability_kind: comparability.kind,
-            comparability_key: comparability.key.clone(),
-            comparability_label: comparability.label.clone(),
+            comparability_key: comparability.key,
+            comparability_label: comparability.label,
             startup_seed_run_id: pacing.startup_seed_run_id(),
             fallback_from_history: false,
             resumed_from_checkpoint: false,
-            cursor_history_id: Some(latest_history_id.clone()),
+            cursor_history_id: Some(latest_history_id),
             pages_fetched,
             messages_listed,
             messages_upserted,
-            messages_deleted: 0,
+            messages_deleted,
             labels_synced: context.labels.len(),
             checkpoint_reused_pages: 0,
             checkpoint_reused_messages_upserted: 0,
@@ -1303,50 +1369,32 @@ async fn run_incremental_sync(
             pipeline_staged_message_count: pipeline_report.staged_message_count,
             pipeline_staged_delete_count: pipeline_report.staged_delete_count,
             pipeline_staged_attachment_count: pipeline_report.staged_attachment_count,
-        },
-        now_epoch_s,
-    );
-    let (sync_state, messages_deleted) = context
-        .writer
-        .finalize_incremental_from_stage(context.labels, now_epoch_s, sync_update)
-        .await
-        .inspect_err(|_| {
-            record_pipeline_failure(failure_pipeline_report, &stats);
-        })?;
-    let finalize_input = FinalizeSyncInput {
-        mode: store::mailbox::SyncMode::Incremental,
-        comparability_kind: comparability.kind,
-        comparability_key: comparability.key,
-        comparability_label: comparability.label,
-        startup_seed_run_id: pacing.startup_seed_run_id(),
-        fallback_from_history: false,
-        resumed_from_checkpoint: false,
-        cursor_history_id: Some(latest_history_id),
-        pages_fetched,
-        messages_listed,
-        messages_upserted,
-        messages_deleted,
-        labels_synced: context.labels.len(),
-        checkpoint_reused_pages: 0,
-        checkpoint_reused_messages_upserted: 0,
-        pipeline_enabled: pipeline_report.pipeline_enabled,
-        pipeline_list_queue_high_water: pipeline_report.list_queue_high_water,
-        pipeline_write_queue_high_water: pipeline_report.write_queue_high_water,
-        pipeline_write_batch_count: pipeline_report.write_batch_count,
-        pipeline_writer_wait_ms: pipeline_report.writer_wait_ms,
-        pipeline_fetch_batch_count: pipeline_report.fetch_batch_count,
-        pipeline_fetch_batch_avg_ms: pipeline_report.fetch_batch_avg_ms,
-        pipeline_fetch_batch_max_ms: pipeline_report.fetch_batch_max_ms,
-        pipeline_writer_tx_count: pipeline_report.writer_tx_count,
-        pipeline_writer_tx_avg_ms: pipeline_report.writer_tx_avg_ms,
-        pipeline_writer_tx_max_ms: pipeline_report.writer_tx_max_ms,
-        pipeline_reorder_buffer_high_water: pipeline_report.reorder_buffer_high_water,
-        pipeline_staged_message_count: pipeline_report.staged_message_count,
-        pipeline_staged_delete_count: pipeline_report.staged_delete_count,
-        pipeline_staged_attachment_count: pipeline_report.staged_attachment_count,
-    };
+        };
 
-    finalize_sync(sync_state, bootstrap_query, finalize_input)
+        finalize_sync(sync_state, bootstrap_query, finalize_input)
+    }
+    .await;
+
+    abort_pipeline_tasks(lister_handle.take(), processor_handle.take()).await;
+    result
+}
+
+async fn abort_pipeline_tasks(
+    lister_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+    processor_handle: Option<tokio::task::JoinHandle<Result<()>>>,
+) {
+    if let Some(lister_handle) = lister_handle {
+        if !lister_handle.is_finished() {
+            lister_handle.abort();
+        }
+        let _ = lister_handle.await;
+    }
+    if let Some(processor_handle) = processor_handle {
+        if !processor_handle.is_finished() {
+            processor_handle.abort();
+        }
+        let _ = processor_handle.await;
+    }
 }
 
 fn success_sync_state_update(

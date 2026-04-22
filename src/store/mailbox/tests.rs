@@ -623,7 +623,11 @@ fn upsert_sync_pacing_state_rejects_invalid_ranges() {
         },
     );
 
-    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().contains("CHECK constraint failed"),
+        "expected pacing range constraint failure, got: {error:#}"
+    );
 }
 
 #[test]
@@ -1703,19 +1707,18 @@ fn list_label_usage_counts_only_the_requested_account() {
     )
     .unwrap();
 
-    let inbox = labels
-        .iter()
-        .find(|label| label.label_id == "INBOX")
-        .unwrap();
-    assert_eq!(inbox.local_message_count, 1);
-    assert_eq!(inbox.local_thread_count, 1);
-
-    let project = labels
-        .iter()
-        .find(|label| label.label_id == "Label_1")
-        .unwrap();
-    assert_eq!(project.local_message_count, 1);
-    assert_eq!(project.local_thread_count, 1);
+    assert_eq!(labels.len(), 2);
+    assert_eq!(
+        labels
+            .iter()
+            .map(|label| (
+                label.label_id.as_str(),
+                label.local_message_count,
+                label.local_thread_count
+            ))
+            .collect::<Vec<_>>(),
+        vec![("INBOX", 1, 1), ("Label_1", 1, 1)]
+    );
 }
 
 #[test]

@@ -370,7 +370,9 @@ fn pressure_kind(
 }
 
 fn quota_floor_units_per_minute(quota_units_cap_per_minute: u32) -> u32 {
-    DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE.min(quota_units_cap_per_minute)
+    DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE
+        .min(quota_units_cap_per_minute)
+        .max(MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE)
 }
 
 fn downshifted_quota_units_per_minute(current: u32, floor: u32) -> u32 {

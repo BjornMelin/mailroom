@@ -27,6 +27,7 @@ pub(crate) struct FailedSyncTelemetryContext<'a> {
     pub(crate) quota_units_budget_per_minute: u32,
     pub(crate) message_fetch_concurrency: usize,
     pub(crate) metrics: GmailQuotaMetricsSnapshot,
+    pub(crate) elapsed: std::time::Duration,
     pub(crate) error_message: String,
 }
 
@@ -110,6 +111,17 @@ impl SyncRunContext {
         finished_at_epoch_s: i64,
         failure: &FailedSyncTelemetryContext<'_>,
     ) -> store::mailbox::SyncRunOutcomeInput {
+        let duration_ms =
+            u64_to_i64(u64::try_from(failure.elapsed.as_millis()).unwrap_or(u64::MAX));
+        let elapsed_seconds = failure.elapsed.as_secs_f64();
+        let (pages_per_second, messages_per_second) = if elapsed_seconds > 0.0 {
+            (
+                failure.pages_fetched as f64 / elapsed_seconds,
+                failure.messages_listed as f64 / elapsed_seconds,
+            )
+        } else {
+            (0.0, 0.0)
+        };
         store::mailbox::SyncRunOutcomeInput {
             account_id: self.account_id.clone(),
             sync_mode: failure.mode,
@@ -186,9 +198,9 @@ impl SyncRunContext {
             throttle_wait_count: u64_to_i64(failure.metrics.throttle_wait_count),
             throttle_wait_ms: u64_to_i64(failure.metrics.throttle_wait_ms),
             retry_after_wait_ms: u64_to_i64(failure.metrics.retry_after_wait_ms),
-            duration_ms: 0,
-            pages_per_second: 0.0,
-            messages_per_second: 0.0,
+            duration_ms,
+            pages_per_second,
+            messages_per_second,
             error_message: Some(failure.error_message.clone()),
         }
     }

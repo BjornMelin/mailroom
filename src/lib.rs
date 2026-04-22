@@ -13,7 +13,7 @@ mod time;
 mod workflows;
 mod workspace;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use cli::{
     AccountCommand, AttachmentCommand, AuditCommand, AuthCommand, AutomationCommand,
@@ -542,7 +542,7 @@ async fn handle_sync_command(
 
     match command {
         SyncCommand::Run(args) | SyncCommand::Benchmark(args) => {
-            mailbox::sync_run_with_options(&config_report, resolve_sync_run_options(&args))
+            mailbox::sync_run_with_options(&config_report, resolve_sync_run_options(&args)?)
                 .await?
                 .print(args.json)?
         }
@@ -590,27 +590,38 @@ fn sync_profile_defaults(profile: SyncProfileArg) -> SyncProfileDefaults {
     }
 }
 
-fn resolve_sync_run_options(args: &SyncRunArgs) -> mailbox::SyncRunOptions {
+fn resolve_sync_run_options(args: &SyncRunArgs) -> Result<mailbox::SyncRunOptions> {
     let defaults = args
         .profile
         .map(sync_profile_defaults)
         .unwrap_or_else(default_sync_profile_defaults);
-    let recent_days = args.recent_days.unwrap_or(defaults.recent_days).max(1);
+    let recent_days = args.recent_days.unwrap_or(defaults.recent_days);
+    if recent_days == 0 {
+        return Err(anyhow!("--recent-days must be greater than zero"));
+    }
     let quota_units_per_minute = args
         .quota_units_per_minute
-        .unwrap_or(defaults.quota_units_per_minute)
-        .max(crate::gmail::MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE);
+        .unwrap_or(defaults.quota_units_per_minute);
+    if quota_units_per_minute == 0 {
+        return Err(anyhow!(
+            "--quota-units-per-minute must be greater than zero"
+        ));
+    }
     let message_fetch_concurrency = args
         .message_fetch_concurrency
-        .unwrap_or(defaults.message_fetch_concurrency)
-        .max(1);
+        .unwrap_or(defaults.message_fetch_concurrency);
+    if message_fetch_concurrency == 0 {
+        return Err(anyhow!(
+            "--message-fetch-concurrency must be greater than zero"
+        ));
+    }
 
-    mailbox::SyncRunOptions {
+    Ok(mailbox::SyncRunOptions {
         force_full: args.full || defaults.force_full,
         recent_days,
         quota_units_per_minute,
         message_fetch_concurrency,
-    }
+    })
 }
 
 async fn handle_workflow_command(
@@ -1245,7 +1256,7 @@ runtime_root = "{}"
             json: false,
         };
 
-        let options = resolve_sync_run_options(&args);
+        let options = resolve_sync_run_options(&args).unwrap();
 
         assert_eq!(
             options.recent_days,
@@ -1273,7 +1284,7 @@ runtime_root = "{}"
             json: false,
         };
 
-        let options = resolve_sync_run_options(&args);
+        let options = resolve_sync_run_options(&args).unwrap();
 
         assert_eq!(options.recent_days, 365);
         assert_eq!(options.quota_units_per_minute, 9_000);
@@ -1292,12 +1303,27 @@ runtime_root = "{}"
             json: false,
         };
 
-        let options = resolve_sync_run_options(&args);
+        let options = resolve_sync_run_options(&args).unwrap();
 
         assert_eq!(options.recent_days, 180);
         assert_eq!(options.quota_units_per_minute, 8_000);
         assert_eq!(options.message_fetch_concurrency, 2);
         assert!(options.force_full);
+    }
+
+    #[test]
+    fn resolve_sync_run_options_rejects_zero_overrides() {
+        let args = SyncRunArgs {
+            full: false,
+            profile: None,
+            recent_days: Some(0),
+            quota_units_per_minute: Some(0),
+            message_fetch_concurrency: Some(0),
+            json: false,
+        };
+
+        let error = resolve_sync_run_options(&args).unwrap_err();
+        assert_eq!(error.to_string(), "--recent-days must be greater than zero");
     }
 
     #[test]
@@ -1334,8 +1360,8 @@ runtime_root = "{}"
         );
         assert_eq!(run_args, benchmark_args);
         assert_eq!(
-            resolve_sync_run_options(&run_args),
-            resolve_sync_run_options(&benchmark_args)
+            resolve_sync_run_options(&run_args).unwrap(),
+            resolve_sync_run_options(&benchmark_args).unwrap()
         );
     }
 
