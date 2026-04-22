@@ -935,20 +935,24 @@ pub(crate) async fn refresh_active_account_record_with_client(
 ) -> Result<store::accounts::AccountRecord> {
     let configured_paths = configured_paths(config_report)?;
     let (profile, access_scope) = gmail_client.get_profile_with_access_scope().await?;
-    configured_paths.ensure_runtime_dirs()?;
-    store::init(config_report)?;
-    store::accounts::upsert_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &store::accounts::UpsertAccountInput {
-            email_address: profile.email_address,
-            history_id: profile.history_id,
-            messages_total: profile.messages_total,
-            threads_total: profile.threads_total,
-            access_scope,
-            refreshed_at_epoch_s: current_epoch_seconds()?,
-        },
-    )
+    let config_report = config_report.clone();
+    tokio::task::spawn_blocking(move || {
+        configured_paths.ensure_runtime_dirs()?;
+        store::init(&config_report)?;
+        store::accounts::upsert_active(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            &store::accounts::UpsertAccountInput {
+                email_address: profile.email_address,
+                history_id: profile.history_id,
+                messages_total: profile.messages_total,
+                threads_total: profile.threads_total,
+                access_scope,
+                refreshed_at_epoch_s: current_epoch_seconds()?,
+            },
+        )
+    })
+    .await?
 }
 
 async fn refresh_active_account(config_report: &config::ConfigReport) -> Result<AccountShowReport> {
@@ -1324,6 +1328,42 @@ runtime_root = "{}"
 
         let error = resolve_sync_run_options(&args).unwrap_err();
         assert_eq!(error.to_string(), "--recent-days must be greater than zero");
+    }
+
+    #[test]
+    fn resolve_sync_run_options_rejects_zero_quota_override() {
+        let args = SyncRunArgs {
+            full: false,
+            profile: None,
+            recent_days: None,
+            quota_units_per_minute: Some(0),
+            message_fetch_concurrency: None,
+            json: false,
+        };
+
+        let error = resolve_sync_run_options(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--quota-units-per-minute must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn resolve_sync_run_options_rejects_zero_message_fetch_concurrency_override() {
+        let args = SyncRunArgs {
+            full: false,
+            profile: None,
+            recent_days: None,
+            quota_units_per_minute: None,
+            message_fetch_concurrency: Some(0),
+            json: false,
+        };
+
+        let error = resolve_sync_run_options(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--message-fetch-concurrency must be greater than zero"
+        );
     }
 
     #[test]

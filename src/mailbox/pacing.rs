@@ -183,14 +183,14 @@ impl AdaptiveSyncPacing {
             return Ok(false);
         }
 
+        if let Some(gmail_client) = gmail_client {
+            gmail_client.update_quota_budget(quota_units_per_minute)?;
+        }
         self.starting_quota_units_per_minute = quota_units_per_minute;
         self.starting_message_fetch_concurrency = message_fetch_concurrency;
         self.effective_quota_units_per_minute = quota_units_per_minute;
         self.effective_message_fetch_concurrency = message_fetch_concurrency;
         self.startup_seed_run_id = Some(seed.run_id);
-        if let Some(gmail_client) = gmail_client {
-            gmail_client.update_quota_budget(quota_units_per_minute)?;
-        }
 
         Ok(true)
     }
@@ -218,10 +218,10 @@ impl AdaptiveSyncPacing {
                 quota_floor_units_per_minute(self.quota_units_cap_per_minute),
             );
             if new_quota < self.effective_quota_units_per_minute {
-                self.effective_quota_units_per_minute = new_quota;
                 if let Some(gmail_client) = gmail_client {
                     gmail_client.update_quota_budget(new_quota)?;
                 }
+                self.effective_quota_units_per_minute = new_quota;
                 downshifted = true;
             }
         }
@@ -289,7 +289,7 @@ impl AdaptiveSyncPacing {
         } else if self.saw_backend_retry {
             clean_run_streak = 0;
         } else {
-            clean_run_streak = self.persisted_clean_run_streak + 1;
+            clean_run_streak = self.persisted_clean_run_streak.saturating_add(1);
             if clean_run_streak >= CLEAN_STREAK_FOR_QUOTA_UPSHIFT
                 && learned_quota_units_per_minute < DEFAULT_SYNC_QUOTA_UNITS_PER_MINUTE
             {
@@ -370,9 +370,11 @@ fn pressure_kind(
 }
 
 fn quota_floor_units_per_minute(quota_units_cap_per_minute: u32) -> u32 {
-    DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE
-        .min(quota_units_cap_per_minute)
-        .max(MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE)
+    if quota_units_cap_per_minute < DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE {
+        MIN_READ_REQUEST_QUOTA_UNITS_PER_MINUTE
+    } else {
+        DEFAULT_ADAPTIVE_QUOTA_FLOOR_UNITS_PER_MINUTE
+    }
 }
 
 fn downshifted_quota_units_per_minute(current: u32, floor: u32) -> u32 {

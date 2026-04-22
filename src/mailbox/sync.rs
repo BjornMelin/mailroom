@@ -113,9 +113,8 @@ pub async fn sync_run_with_options(
     }
     let mut failure_bootstrap_query = initial_bootstrap_query;
     let mut failure_fallback_from_history = false;
-    let mut failure_resumed_from_checkpoint = false;
+    let mut full_sync_failure_telemetry = FullSyncFailureTelemetry::zero_work();
     let mut incremental_failure_telemetry = IncrementalFailureTelemetry::zero_work();
-    let mut failure_pipeline_report = disabled_pipeline_report();
     let sync_started_at = Instant::now();
 
     let result = async {
@@ -138,8 +137,7 @@ pub async fn sync_run_with_options(
                     &mut pacing,
                     initial_bootstrap_query,
                     false,
-                    &mut failure_resumed_from_checkpoint,
-                    &mut failure_pipeline_report,
+                    &mut full_sync_failure_telemetry,
                 )
                 .await
             }
@@ -153,7 +151,7 @@ pub async fn sync_run_with_options(
                     persisted_bootstrap_query,
                     sync_state.cursor_history_id.clone(),
                     &mut incremental_failure_telemetry,
-                    &mut failure_pipeline_report,
+                    &mut full_sync_failure_telemetry.pipeline_report,
                 )
                 .await
                 {
@@ -179,8 +177,7 @@ pub async fn sync_run_with_options(
                             &mut pacing,
                             persisted_bootstrap_query,
                             true,
-                            &mut failure_resumed_from_checkpoint,
-                            &mut failure_pipeline_report,
+                            &mut full_sync_failure_telemetry,
                         )
                         .await
                     }
@@ -246,11 +243,65 @@ pub async fn sync_run_with_options(
                         startup_seed_run_id: pacing.startup_seed_run_id(),
                         cursor_history_id: failure_cursor_history_id,
                         fallback_from_history: failure_fallback_from_history,
-                        resumed_from_checkpoint: failure_resumed_from_checkpoint,
-                        pages_fetched: incremental_failure_telemetry.pages_fetched,
-                        messages_listed: incremental_failure_telemetry.messages_listed,
+                        resumed_from_checkpoint: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.resumed_from_checkpoint
+                            }
+                            store::mailbox::SyncMode::Incremental => false,
+                        },
+                        pages_fetched: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.pages_fetched
+                            }
+                            store::mailbox::SyncMode::Incremental => {
+                                incremental_failure_telemetry.pages_fetched
+                            }
+                        },
+                        messages_listed: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.messages_listed
+                            }
+                            store::mailbox::SyncMode::Incremental => {
+                                incremental_failure_telemetry.messages_listed
+                            }
+                        },
+                        messages_upserted: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.messages_upserted
+                            }
+                            store::mailbox::SyncMode::Incremental => {
+                                incremental_failure_telemetry.messages_upserted
+                            }
+                        },
                         messages_deleted: incremental_failure_telemetry.messages_deleted,
-                        pipeline_report: failure_pipeline_report,
+                        labels_synced: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.labels_synced
+                            }
+                            store::mailbox::SyncMode::Incremental => {
+                                incremental_failure_telemetry.labels_synced
+                            }
+                        },
+                        checkpoint_reused_pages: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.checkpoint_reused_pages
+                            }
+                            store::mailbox::SyncMode::Incremental => 0,
+                        },
+                        checkpoint_reused_messages_upserted: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.checkpoint_reused_messages_upserted
+                            }
+                            store::mailbox::SyncMode::Incremental => 0,
+                        },
+                        pipeline_report: match failure_mode {
+                            store::mailbox::SyncMode::Full => {
+                                full_sync_failure_telemetry.pipeline_report
+                            }
+                            store::mailbox::SyncMode::Incremental => {
+                                full_sync_failure_telemetry.pipeline_report
+                            }
+                        },
                         pacing_report,
                         quota_units_budget_per_minute: options.quota_units_per_minute,
                         message_fetch_concurrency: options.message_fetch_concurrency,
@@ -452,7 +503,21 @@ struct IncrementalFailureTelemetry {
     comparability: store::mailbox::SyncRunComparability,
     pages_fetched: usize,
     messages_listed: usize,
+    messages_upserted: usize,
     messages_deleted: usize,
+    labels_synced: usize,
+}
+
+#[derive(Debug, Clone)]
+struct FullSyncFailureTelemetry {
+    resumed_from_checkpoint: bool,
+    pages_fetched: usize,
+    messages_listed: usize,
+    messages_upserted: usize,
+    labels_synced: usize,
+    checkpoint_reused_pages: usize,
+    checkpoint_reused_messages_upserted: usize,
+    pipeline_report: PipelineStatsReport,
 }
 
 impl IncrementalFailureTelemetry {
@@ -461,7 +526,24 @@ impl IncrementalFailureTelemetry {
             comparability: store::mailbox::comparability_for_incremental_workload(0, 0),
             pages_fetched: 0,
             messages_listed: 0,
+            messages_upserted: 0,
             messages_deleted: 0,
+            labels_synced: 0,
+        }
+    }
+}
+
+impl FullSyncFailureTelemetry {
+    fn zero_work() -> Self {
+        Self {
+            resumed_from_checkpoint: false,
+            pages_fetched: 0,
+            messages_listed: 0,
+            messages_upserted: 0,
+            labels_synced: 0,
+            checkpoint_reused_pages: 0,
+            checkpoint_reused_messages_upserted: 0,
+            pipeline_report: disabled_pipeline_report(),
         }
     }
 }
@@ -830,16 +912,25 @@ async fn run_full_sync(
     pacing: &mut AdaptiveSyncPacing,
     bootstrap_query: &str,
     fallback_from_history: bool,
-    failure_resumed_from_checkpoint: &mut bool,
-    failure_pipeline_report: &mut PipelineStatsReport,
+    failure_telemetry: &mut FullSyncFailureTelemetry,
 ) -> Result<SyncRunReport> {
     let mut checkpoint =
         initialize_full_sync_checkpoint(context, bootstrap_query, fallback_from_history).await?;
-    *failure_resumed_from_checkpoint = checkpoint.resumed_from_checkpoint;
     let checkpoint_reused_pages =
         usize::try_from(checkpoint.record.pages_fetched).unwrap_or(usize::MAX);
     let checkpoint_reused_messages_upserted =
         usize::try_from(checkpoint.record.messages_upserted).unwrap_or(usize::MAX);
+    *failure_telemetry = FullSyncFailureTelemetry {
+        resumed_from_checkpoint: checkpoint.resumed_from_checkpoint,
+        pages_fetched: usize::try_from(checkpoint.record.pages_fetched).unwrap_or(usize::MAX),
+        messages_listed: usize::try_from(checkpoint.record.messages_listed).unwrap_or(usize::MAX),
+        messages_upserted: usize::try_from(checkpoint.record.messages_upserted)
+            .unwrap_or(usize::MAX),
+        labels_synced: usize::try_from(checkpoint.record.labels_synced).unwrap_or(usize::MAX),
+        checkpoint_reused_pages,
+        checkpoint_reused_messages_upserted,
+        pipeline_report: disabled_pipeline_report(),
+    };
 
     if checkpoint.record.status == store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
         return finalize_full_sync_report(
@@ -857,7 +948,7 @@ async fn run_full_sync(
         )
         .await
         .inspect_err(|_| {
-            *failure_pipeline_report = disabled_pipeline_report();
+            failure_telemetry.pipeline_report = disabled_pipeline_report();
         });
     }
     let stats = PipelineStats::default();
@@ -947,14 +1038,22 @@ async fn run_full_sync(
                 )
                 .await
                 .inspect_err(|_| {
-                    record_pipeline_failure(failure_pipeline_report, &stats);
+                    record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
                 })?;
+                failure_telemetry.pages_fetched =
+                    usize::try_from(checkpoint.record.pages_fetched).unwrap_or(usize::MAX);
+                failure_telemetry.messages_listed =
+                    usize::try_from(checkpoint.record.messages_listed).unwrap_or(usize::MAX);
+                failure_telemetry.messages_upserted =
+                    usize::try_from(checkpoint.record.messages_upserted).unwrap_or(usize::MAX);
+                failure_telemetry.labels_synced =
+                    usize::try_from(checkpoint.record.labels_synced).unwrap_or(usize::MAX);
                 stats.record_writer_transaction(write_started.elapsed());
                 stats.record_staged_messages(staged_message_count);
                 stats.record_staged_attachments(staged_attachment_count);
                 stats.on_write_batch_committed();
                 observe_latest_metrics(pacing, context.gmail_client).inspect_err(|_| {
-                    record_pipeline_failure(failure_pipeline_report, &stats);
+                    record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
                 })?;
                 fetch_concurrency.store(
                     pacing.current_message_fetch_concurrency(),
@@ -983,7 +1082,7 @@ async fn run_full_sync(
             .await
             .context("full sync lister task failed")
             .inspect_err(|_| {
-                record_pipeline_failure(failure_pipeline_report, &stats);
+                record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
             })?;
         let processor_result = processor_handle
             .take()
@@ -991,11 +1090,11 @@ async fn run_full_sync(
             .await
             .context("full sync processor task failed")
             .inspect_err(|_| {
-                record_pipeline_failure(failure_pipeline_report, &stats);
+                record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
             })?;
 
         if let Err(error) = lister_result {
-            record_pipeline_failure(failure_pipeline_report, &stats);
+            record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
             if error.downcast_ref::<RestartFullSyncFromScratch>().is_some() {
                 context.writer.reset_full_sync_progress().await?;
                 return Box::pin(run_full_sync(
@@ -1003,26 +1102,25 @@ async fn run_full_sync(
                     pacing,
                     bootstrap_query,
                     fallback_from_history,
-                    failure_resumed_from_checkpoint,
-                    failure_pipeline_report,
+                    failure_telemetry,
                 ))
                 .await;
             }
             return Err(error);
         }
         processor_result.inspect_err(|_| {
-            record_pipeline_failure(failure_pipeline_report, &stats);
+            record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
         })?;
 
         if !buffered_pages.is_empty() {
-            record_pipeline_failure(failure_pipeline_report, &stats);
+            record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
             return Err(anyhow!(
                 "full sync pipeline terminated with {} buffered pages still waiting to commit",
                 buffered_pages.len()
             ));
         }
         if checkpoint.record.status != store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize {
-            record_pipeline_failure(failure_pipeline_report, &stats);
+            record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
             return Err(anyhow!(
                 "full sync pipeline drained before reaching a finalize-ready checkpoint"
             ));
@@ -1043,7 +1141,7 @@ async fn run_full_sync(
         )
         .await
         .inspect_err(|_| {
-            record_pipeline_failure(failure_pipeline_report, &stats);
+            record_pipeline_failure(&mut failure_telemetry.pipeline_report, &stats);
         })
     }
     .await;
@@ -1103,7 +1201,9 @@ async fn run_incremental_sync(
         comparability: comparability.clone(),
         pages_fetched,
         messages_listed: changed_message_ids.len(),
+        messages_upserted: 0,
         messages_deleted: deleted_message_ids.len(),
+        labels_synced: context.labels.len(),
     };
     maybe_seed_pacing_from_history(
         context.store_handle,
@@ -1294,6 +1394,14 @@ async fn run_incremental_sync(
 
         let now_epoch_s = current_epoch_seconds()?;
         let pipeline_report = stats.report();
+        *failure_telemetry = IncrementalFailureTelemetry {
+            comparability: comparability.clone(),
+            pages_fetched,
+            messages_listed,
+            messages_upserted,
+            messages_deleted: deleted_message_ids.len(),
+            labels_synced: context.labels.len(),
+        };
         let sync_update = success_sync_state_update_with_pipeline(
             context.account,
             bootstrap_query,
