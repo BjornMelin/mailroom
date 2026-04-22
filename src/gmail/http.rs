@@ -2,7 +2,7 @@ use super::client::{GmailClient, GmailClientError, GmailResult};
 use super::constants::{
     GMAIL_INITIAL_RETRY_DELAY_MS, GMAIL_MAX_RETRY_ATTEMPTS, TOKEN_REFRESH_LEEWAY_SECS,
 };
-use super::quota::{GmailRequestCost, GmailRetryClassification};
+use super::quota::{GmailQuotaPolicy, GmailRequestCost, GmailRetryClassification};
 use super::response::GoogleApiErrorEnvelope;
 use super::types::GmailProfile;
 use crate::auth::file_store::{CredentialStore, StoredCredentials};
@@ -262,113 +262,18 @@ impl GmailClient {
         body: Option<&serde_json::Value>,
         request_cost: GmailRequestCost,
     ) -> GmailResult<reqwest::Response> {
-        let url = format!(
-            "{}/{}",
-            self.config.api_base_url.trim_end_matches('/'),
-            path
-        );
-        let retryable_request = request_supports_automatic_retry(&method);
-        let mut retry_delay_ms = GMAIL_INITIAL_RETRY_DELAY_MS;
-        let mut attempt = 0usize;
-
-        loop {
-            attempt += 1;
-            self.acquire_request_budget(request_cost).await?;
-            self.record_http_attempt();
-            let mut request = self
-                .http
-                .request(method.clone(), &url)
-                .bearer_auth(access_token)
-                .query(query);
-            if let Some(body) = body {
-                request = request.json(body);
-            }
-            let response = request.send().await;
-
-            match response {
-                Ok(response) if response.status().is_success() => return Ok(response),
-                Ok(response) => {
-                    let status = response.status();
-                    let retry_after = retry_after_delay(response.headers());
-                    let body = response.text().await.unwrap_or_default();
-                    let retry_classification = retryable_request
-                        .then(|| classify_retryable_api_response(status, &body))
-                        .flatten();
-                    if let Some(retry_classification) = retry_classification
-                        && attempt < GMAIL_MAX_RETRY_ATTEMPTS
-                    {
-                        let retry_delay = retry_after
-                            .unwrap_or_else(|| jittered_retry_delay(retry_delay_ms, attempt));
-                        self.record_retry(retry_classification);
-                        if retry_after.is_some() {
-                            self.record_retry_after_wait(retry_delay);
-                        }
-                        sleep(retry_delay).await;
-                        retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
-                        continue;
-                    }
-
-                    return Err(GmailClientError::Api {
-                        path: path.to_owned(),
-                        status,
-                        body,
-                    });
-                }
-                Err(error) => {
-                    if retryable_request
-                        && is_retryable_transport_error(&error)
-                        && attempt < GMAIL_MAX_RETRY_ATTEMPTS
-                    {
-                        self.record_retry(GmailRetryClassification::Backend);
-                        sleep(retry_delay_duration(
-                            &HeaderMap::new(),
-                            retry_delay_ms,
-                            attempt,
-                        ))
-                        .await;
-                        retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
-                        continue;
-                    }
-
-                    return Err(GmailClientError::Transport {
-                        path: path.to_owned(),
-                        source: error,
-                    });
-                }
-            }
-        }
-    }
-
-    async fn acquire_request_budget(&self, request_cost: GmailRequestCost) -> GmailResult<()> {
-        if let Some(policy) = &self.request_policy {
-            policy
-                .acquire(request_cost)
-                .await
-                .map_err(|requested_units| GmailClientError::InvalidQuotaBudget {
-                    units_per_minute: policy.units_per_minute(),
-                    minimum_units_per_minute: requested_units,
-                })?;
-        }
-
-        Ok(())
-    }
-
-    fn record_http_attempt(&self) {
-        if let Some(policy) = &self.request_policy {
-            policy.record_http_attempt();
-        }
-    }
-
-    fn record_retry(&self, classification: GmailRetryClassification) {
-        if let Some(policy) = &self.request_policy {
-            policy.record_retry(classification);
-        }
-    }
-
-    fn record_retry_after_wait(&self, waited: Duration) {
-        if let Some(policy) = &self.request_policy {
-            policy.record_retry_after_wait(waited);
-        }
+        send_request_with_retry(
+            &self.http,
+            self.request_policy.as_ref(),
+            &self.config.api_base_url,
+            method,
+            path,
+            query,
+            access_token,
+            body,
+            request_cost,
+        )
+        .await
     }
 }
 
@@ -377,34 +282,21 @@ pub(super) async fn fetch_profile_with_access_token(
     access_token: &str,
 ) -> GmailResult<GmailProfile> {
     let http = build_gmail_http_client(config)?;
-
-    let url = format!(
-        "{}/users/me/profile",
-        config.api_base_url.trim_end_matches('/')
-    );
-    let response = http
-        .get(url)
-        .bearer_auth(access_token)
-        .query(&[(
+    let response = send_request_with_retry(
+        &http,
+        None,
+        &config.api_base_url,
+        Method::GET,
+        "users/me/profile",
+        &[(
             "fields",
-            "emailAddress,messagesTotal,threadsTotal,historyId",
-        )])
-        .send()
-        .await
-        .map_err(|source| GmailClientError::Transport {
-            path: String::from("users/me/profile"),
-            source,
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(GmailClientError::Api {
-            path: String::from("users/me/profile"),
-            status,
-            body,
-        });
-    }
+            String::from("emailAddress,messagesTotal,threadsTotal,historyId"),
+        )],
+        access_token,
+        None,
+        GmailRequestCost::ProfileGet,
+    )
+    .await?;
 
     response
         .json()
@@ -507,6 +399,103 @@ pub(super) fn build_gmail_http_client(config: &GmailConfig) -> GmailResult<reqwe
         .map_err(|source| GmailClientError::HttpClientBuild {
             source: source.into(),
         })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_request_with_retry(
+    http: &reqwest::Client,
+    request_policy: Option<&GmailQuotaPolicy>,
+    api_base_url: &str,
+    method: Method,
+    path: &str,
+    query: &[(&str, String)],
+    access_token: &str,
+    body: Option<&serde_json::Value>,
+    request_cost: GmailRequestCost,
+) -> GmailResult<reqwest::Response> {
+    let url = format!("{}/{}", api_base_url.trim_end_matches('/'), path);
+    let retryable_request = request_supports_automatic_retry(&method);
+    let mut retry_delay_ms = GMAIL_INITIAL_RETRY_DELAY_MS;
+    let mut attempt = 0usize;
+
+    loop {
+        attempt += 1;
+        if let Some(policy) = request_policy {
+            policy
+                .acquire(request_cost)
+                .await
+                .map_err(|requested_units| GmailClientError::InvalidQuotaBudget {
+                    units_per_minute: policy.units_per_minute(),
+                    minimum_units_per_minute: requested_units,
+                })?;
+            policy.record_http_attempt();
+        }
+
+        let mut request = http
+            .request(method.clone(), &url)
+            .bearer_auth(access_token)
+            .query(query);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await;
+
+        match response {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                let retry_after = retry_after_delay(response.headers());
+                let body = response.text().await.unwrap_or_default();
+                let retry_classification = retryable_request
+                    .then(|| classify_retryable_api_response(status, &body))
+                    .flatten();
+                if let Some(retry_classification) = retry_classification
+                    && attempt < GMAIL_MAX_RETRY_ATTEMPTS
+                {
+                    let retry_delay = retry_after
+                        .unwrap_or_else(|| jittered_retry_delay(retry_delay_ms, attempt));
+                    if let Some(policy) = request_policy {
+                        policy.record_retry(retry_classification);
+                        if retry_after.is_some() {
+                            policy.record_retry_after_wait(retry_delay);
+                        }
+                    }
+                    sleep(retry_delay).await;
+                    retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
+                    continue;
+                }
+
+                return Err(GmailClientError::Api {
+                    path: path.to_owned(),
+                    status,
+                    body,
+                });
+            }
+            Err(error) => {
+                if retryable_request
+                    && is_retryable_transport_error(&error)
+                    && attempt < GMAIL_MAX_RETRY_ATTEMPTS
+                {
+                    if let Some(policy) = request_policy {
+                        policy.record_retry(GmailRetryClassification::Backend);
+                    }
+                    sleep(retry_delay_duration(
+                        &HeaderMap::new(),
+                        retry_delay_ms,
+                        attempt,
+                    ))
+                    .await;
+                    retry_delay_ms = next_retry_delay_ms(retry_delay_ms);
+                    continue;
+                }
+
+                return Err(GmailClientError::Transport {
+                    path: path.to_owned(),
+                    source: error,
+                });
+            }
+        }
+    }
 }
 
 fn classify_forbidden_retry(body: &str) -> Option<GmailRetryClassification> {
