@@ -559,7 +559,15 @@ fn is_concurrent_request_limit_message(message: &str) -> bool {
         .contains("too many concurrent requests for user")
 }
 
-fn jittered_retry_delay(default_delay_ms: u64, _attempt: usize) -> Duration {
-    let jitter_ms = rand::thread_rng().gen_range(0..GMAIL_RETRY_JITTER_MS.max(1));
-    Duration::from_millis(default_delay_ms.saturating_add(jitter_ms))
+fn jittered_retry_delay(default_delay_ms: u64, attempt: usize) -> Duration {
+    let attempt = u64::try_from(attempt).unwrap_or(u64::MAX).max(1);
+    let scaled_delay = default_delay_ms
+        .saturating_mul(attempt)
+        .clamp(default_delay_ms, GMAIL_MAX_RETRY_DELAY_MS);
+    let scaled_jitter = GMAIL_RETRY_JITTER_MS
+        .saturating_mul(attempt)
+        .min(GMAIL_MAX_RETRY_DELAY_MS.saturating_sub(scaled_delay))
+        .max(1);
+    let jitter_ms = rand::thread_rng().gen_range(0..scaled_jitter);
+    Duration::from_millis(scaled_delay.saturating_add(jitter_ms))
 }

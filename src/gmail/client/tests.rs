@@ -17,7 +17,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::super::constants::{MESSAGE_CATALOG_FIELDS, MESSAGE_CATALOG_FULL_FIELDS};
 use super::super::http::{
     classify_retryable_api_response, next_retry_delay_ms, request_supports_automatic_retry,
-    retry_after_delay,
+    retry_after_delay, retry_delay_duration,
 };
 use super::super::response::{
     GmailMessagePayload, extract_email_address, payload_projection_truncated,
@@ -387,6 +387,18 @@ fn next_retry_delay_ms_doubles_and_caps_backoff() {
     assert_eq!(next_retry_delay_ms(1_000), 2_000);
     assert_eq!(next_retry_delay_ms(16_000), 32_000);
     assert_eq!(next_retry_delay_ms(32_000), 32_000);
+}
+
+#[test]
+fn retry_delay_duration_scales_with_attempt_when_retry_after_is_missing() {
+    let headers = HeaderMap::new();
+    let first_attempt = retry_delay_duration(&headers, 1_000, 1);
+    let third_attempt = retry_delay_duration(&headers, 1_000, 3);
+
+    assert!(first_attempt >= Duration::from_millis(1_000));
+    assert!(first_attempt < Duration::from_millis(1_250));
+    assert!(third_attempt >= Duration::from_millis(3_000));
+    assert!(third_attempt < Duration::from_millis(3_750));
 }
 
 #[test]
