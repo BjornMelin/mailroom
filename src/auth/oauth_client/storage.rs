@@ -109,7 +109,7 @@ pub(super) fn save_imported_client(path: &Path, client: &StoredOAuthClientFile) 
 
 pub(super) fn discover_import_path(credentials_file: Option<PathBuf>) -> Result<ImportDiscovery> {
     if let Some(path) = credentials_file {
-        if !path.exists() {
+        if !path.is_file() {
             return Err(OAuthClientError::MissingImportFile { path }.into());
         }
         return Ok(ImportDiscovery {
@@ -218,8 +218,17 @@ pub(super) fn collect_candidate_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
     let mut candidates = Vec::new();
     for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !file_type.is_file() {
             continue;
         }
 

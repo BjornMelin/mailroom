@@ -96,6 +96,23 @@ fn imported_client_becomes_the_resolved_oauth_source() {
 }
 
 #[test]
+fn imported_client_rejects_directory_credentials_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let workspace = workspace_for(&temp_dir);
+    let config = gmail_config();
+    let credentials_dir = temp_dir.path().join("client_secret_dir");
+    fs::create_dir_all(&credentials_dir).unwrap();
+
+    let error = import_google_desktop_client(&config, &workspace, Some(credentials_dir.clone()))
+        .unwrap_err();
+
+    assert!(matches!(
+        error.downcast_ref::<OAuthClientError>(),
+        Some(OAuthClientError::MissingImportFile { path }) if path == &credentials_dir
+    ));
+}
+
+#[test]
 fn imported_client_overwrites_existing_workspace_file() {
     let temp_dir = TempDir::new().unwrap();
     let workspace = workspace_for(&temp_dir);
