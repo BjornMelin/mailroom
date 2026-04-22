@@ -1,4 +1,4 @@
-use super::draft_remote::{delete_remote_draft_if_present, retire_local_draft_state};
+use super::draft_remote::retire_local_draft_then_delete_remote;
 use super::{WorkflowResult, join_blocking};
 use crate::config::ConfigReport;
 use crate::gmail::{GmailThreadContext, GmailThreadMessage};
@@ -215,12 +215,6 @@ pub(super) fn resolve_workflow_account_id_blocking(
     busy_timeout_ms: u64,
     thread_id: Option<&str>,
 ) -> WorkflowResult<String> {
-    if let Some(active_account) = store::accounts::get_active(database_path, busy_timeout_ms)
-        .map_err(|source| WorkflowServiceError::AccountState { source })?
-    {
-        return Ok(active_account.account_id);
-    }
-
     if let Some(thread_id) = thread_id
         && let Some(account_id) = store::workflows::lookup_workflow_account_id(
             database_path,
@@ -229,6 +223,12 @@ pub(super) fn resolve_workflow_account_id_blocking(
         )?
     {
         return Ok(account_id);
+    }
+
+    if let Some(active_account) = store::accounts::get_active(database_path, busy_timeout_ms)
+        .map_err(|source| WorkflowServiceError::AccountState { source })?
+    {
+        return Ok(active_account.account_id);
     }
 
     if let Some(account_id) =
@@ -332,11 +332,10 @@ pub async fn promote_workflow(
                 gmail_client
             }
         };
-        delete_remote_draft_if_present(&gmail_client, workflow.gmail_draft_id.as_deref()).await?;
-        workflow = retire_local_draft_state(
+        workflow = retire_local_draft_then_delete_remote(
             config_report,
-            &workflow.account_id,
-            &workflow.thread_id,
+            &gmail_client,
+            workflow,
             "workflow.retire_draft_state",
         )
         .await?;

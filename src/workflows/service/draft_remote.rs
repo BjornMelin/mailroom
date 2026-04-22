@@ -297,3 +297,21 @@ pub(super) async fn retire_local_draft_state(
     )
     .await
 }
+
+pub(super) async fn retire_local_draft_then_delete_remote(
+    config_report: &ConfigReport,
+    gmail_client: &GmailClient,
+    workflow: store::workflows::WorkflowRecord,
+    operation: &'static str,
+) -> WorkflowResult<store::workflows::WorkflowRecord> {
+    let gmail_draft_id = workflow.gmail_draft_id.clone();
+    let retired_workflow = retire_local_draft_state(
+        config_report,
+        &workflow.account_id,
+        &workflow.thread_id,
+        operation,
+    )
+    .await?;
+    delete_remote_draft_if_present(gmail_client, gmail_draft_id.as_deref()).await?;
+    Ok(retired_workflow)
+}

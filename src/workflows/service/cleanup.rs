@@ -1,4 +1,4 @@
-use super::draft_remote::{delete_remote_draft_if_present, retire_local_draft_state};
+use super::draft_remote::retire_local_draft_then_delete_remote;
 use super::queries::{
     best_effort_sync_report, load_workflow_detail_if_present, resolve_workflow_account_id,
     workflow_detail,
@@ -236,11 +236,10 @@ async fn execute_cleanup_after_auth(
     let needs_draft_retirement =
         workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some();
     if needs_draft_retirement {
-        delete_remote_draft_if_present(gmail_client, workflow.gmail_draft_id.as_deref()).await?;
-        workflow = retire_local_draft_state(
+        workflow = retire_local_draft_then_delete_remote(
             config_report,
-            &workflow.account_id,
-            &workflow.thread_id,
+            gmail_client,
+            workflow,
             "cleanup.retire_draft_state",
         )
         .await?;

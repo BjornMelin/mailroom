@@ -22,7 +22,10 @@ use draft_local::{
     AttachmentRemovalResult, attachment_input_from_path, remove_attachment_by_path_or_name,
 };
 #[cfg(test)]
-use draft_remote::{RemoteDraftUpsert, mark_sent_after_remote_send, persist_remote_draft_state};
+use draft_remote::{
+    RemoteDraftUpsert, mark_sent_after_remote_send, persist_remote_draft_state,
+    retire_local_draft_then_delete_remote,
+};
 #[cfg(test)]
 use message_build::build_reply_recipients;
 #[cfg(test)]
