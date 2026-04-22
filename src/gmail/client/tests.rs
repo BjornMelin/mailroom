@@ -8,6 +8,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::time::sleep;
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -231,6 +233,74 @@ async fn refresh_credentials_preserves_existing_refresh_token_when_response_omit
 }
 
 #[tokio::test]
+async fn refresh_credentials_uses_latest_stored_refresh_token_when_response_omits_it() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "fresh-access-token",
+            "expires_in": 3600,
+            "scope": "scope:a",
+            "token_type": "Bearer"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let store = test_store(&temp_dir);
+    let stale_credentials = StoredCredentials {
+        account_id: String::from("gmail:operator@example.com"),
+        access_token: SecretString::from(String::from("stale-access-token")),
+        refresh_token: Some(SecretString::from(String::from("stale-refresh-token"))),
+        expires_at_epoch_s: Some(0),
+        scopes: vec![String::from("scope:a")],
+    };
+    store.save(&stale_credentials).unwrap();
+    store
+        .save(&StoredCredentials {
+            account_id: String::from("gmail:operator@example.com"),
+            access_token: SecretString::from(String::from("newer-access-token")),
+            refresh_token: Some(SecretString::from(String::from("newer-refresh-token"))),
+            expires_at_epoch_s: Some(0),
+            scopes: vec![String::from("scope:a")],
+        })
+        .unwrap();
+
+    let client = GmailClient::new(
+        GmailConfig {
+            client_id: Some(String::from("client-id")),
+            client_secret: None,
+            auth_url: format!("{}/oauth2/auth", mock_server.uri()),
+            token_url: format!("{}/oauth2/token", mock_server.uri()),
+            api_base_url: format!("{}/gmail/v1", mock_server.uri()),
+            listen_host: String::from("127.0.0.1"),
+            listen_port: 0,
+            open_browser: false,
+            request_timeout_secs: 30,
+            scopes: vec![String::from("scope:a")],
+        },
+        workspace_for(&temp_dir),
+        store.clone(),
+    )
+    .unwrap();
+
+    let refreshed = client
+        .refresh_credentials(&stale_credentials)
+        .await
+        .unwrap();
+    let persisted = store.load().unwrap().unwrap();
+
+    assert_eq!(
+        refreshed.refresh_token.as_ref().unwrap().expose_secret(),
+        "newer-refresh-token"
+    );
+    assert_eq!(
+        persisted.refresh_token.as_ref().unwrap().expose_secret(),
+        "newer-refresh-token"
+    );
+}
+
+#[tokio::test]
 async fn get_profile_with_access_scope_does_not_reload_credentials_after_success() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -442,6 +512,50 @@ async fn list_labels_waits_for_retry_after_before_retrying_throttled_requests() 
         result.is_ok(),
         "client should succeed after the delayed retry"
     );
+}
+
+#[tokio::test]
+async fn list_labels_surfaces_response_body_read_failures() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = vec![0_u8; 4096];
+        let _ = stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 10\r\nConnection: close\r\n\r\nno",
+            )
+            .await
+            .unwrap();
+    });
+
+    let temp_dir = TempDir::new().unwrap();
+    let client = GmailClient::new(
+        GmailConfig {
+            client_id: Some(String::from("client-id")),
+            client_secret: None,
+            auth_url: format!("http://{address}/oauth2/auth"),
+            token_url: format!("http://{address}/oauth2/token"),
+            api_base_url: format!("http://{address}/gmail/v1"),
+            listen_host: String::from("127.0.0.1"),
+            listen_port: 0,
+            open_browser: false,
+            request_timeout_secs: 30,
+            scopes: vec![String::from("scope:a")],
+        },
+        workspace_for(&temp_dir),
+        test_store(&temp_dir),
+    )
+    .unwrap();
+
+    let error = client.list_labels().await.unwrap_err();
+    server.await.unwrap();
+
+    assert!(matches!(
+        error,
+        GmailClientError::Transport { ref path, .. } if path == "users/me/labels"
+    ));
 }
 
 #[tokio::test]

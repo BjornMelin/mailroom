@@ -203,7 +203,16 @@ impl GmailClient {
             &credentials.scopes,
         );
         if refreshed.refresh_token.is_none() {
-            refreshed.refresh_token = credentials.refresh_token.clone();
+            let credential_store = self.credential_store.clone();
+            let latest_credentials = tokio::task::spawn_blocking(move || credential_store.load())
+                .await
+                .map_err(|source| GmailClientError::CredentialLoad {
+                    source: source.into(),
+                })?
+                .map_err(|source| GmailClientError::CredentialLoad { source })?;
+            refreshed.refresh_token = latest_credentials
+                .and_then(|latest| latest.refresh_token)
+                .or_else(|| credentials.refresh_token.clone());
         }
         let credential_store = self.credential_store.clone();
         let refreshed_for_save = refreshed.clone();
@@ -445,7 +454,13 @@ async fn send_request_with_retry(
             Ok(response) => {
                 let status = response.status();
                 let retry_after = retry_after_delay(response.headers());
-                let body = response.text().await.unwrap_or_default();
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|source| GmailClientError::Transport {
+                        path: path.to_owned(),
+                        source,
+                    })?;
                 let retry_classification = retryable_request
                     .then(|| classify_retryable_api_response(status, &body))
                     .flatten();
