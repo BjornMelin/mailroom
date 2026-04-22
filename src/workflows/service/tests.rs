@@ -439,11 +439,12 @@ async fn persist_remote_draft_state_retries_existing_remote_draft_write_after_tr
     )
     .unwrap();
     let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
-    let lock_handle = lock_workflow_store_after_delay(
+    let (lock_handle, ready_rx) = lock_workflow_store_after_delay(
         config_report.config.store.database_path.clone(),
         Duration::from_millis(0),
         Duration::from_millis(80),
     );
+    ready_rx.recv().unwrap();
 
     let persisted = persist_remote_draft_state(
         &config_report,
@@ -759,11 +760,12 @@ async fn draft_send_retries_mark_sent_after_transient_local_lock() {
     .unwrap()
     .unwrap()
     .workflow;
-    let lock_handle = lock_workflow_store_after_delay(
+    let (lock_handle, ready_rx) = lock_workflow_store_after_delay(
         config_report.config.store.database_path.clone(),
         Duration::from_millis(0),
         Duration::from_millis(80),
     );
+    ready_rx.recv().unwrap();
 
     let report = mark_sent_after_remote_send(&config_report, &workflow, "sent-message-1")
         .await
@@ -1129,6 +1131,12 @@ async fn workflow_commands_use_persisted_workflow_account_after_logout_without_s
     let report = list_workflows(&config_report, None, None).await.unwrap();
     assert_eq!(report.workflows.len(), 1);
     assert_eq!(report.workflows[0].thread_id, "thread-1");
+
+    let resolved_account_id =
+        super::queries::resolve_workflow_account_id(&config_report, Some("thread-1"))
+            .await
+            .unwrap();
+    assert_eq!(resolved_account_id, "gmail:operator@example.com");
 }
 
 #[tokio::test]
@@ -1776,6 +1784,7 @@ async fn retire_local_draft_then_delete_remote_restores_draft_state_when_delete_
 #[tokio::test]
 async fn cleanup_label_validates_before_deleting_remote_draft() {
     let mock_server = MockServer::start().await;
+    mount_profile(&mock_server).await;
     Mock::given(method("DELETE"))
         .and(path("/gmail/v1/users/me/drafts/draft-1"))
         .respond_with(ResponseTemplate::new(204))
@@ -1870,7 +1879,7 @@ async fn cleanup_label_validates_before_deleting_remote_draft() {
 
     assert_eq!(
         error.to_string(),
-        "failed to refresh the active Gmail account"
+        "one or more add-label names were not found locally; run `mailroom sync run` first"
     );
 
     let detail = get_workflow_detail(
@@ -2604,14 +2613,18 @@ fn lock_workflow_store_after_delay(
     database_path: PathBuf,
     start_delay: Duration,
     hold_for: Duration,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+    let (ready_tx, ready_rx) = sync_channel(1);
+    let handle = std::thread::spawn(move || {
         std::thread::sleep(start_delay);
         let connection = rusqlite::Connection::open(database_path).unwrap();
         connection.busy_timeout(Duration::from_millis(1)).unwrap();
         loop {
             match connection.execute_batch("BEGIN IMMEDIATE;") {
-                Ok(()) => break,
+                Ok(()) => {
+                    ready_tx.send(()).unwrap();
+                    break;
+                }
                 Err(rusqlite::Error::SqliteFailure(error, _))
                     if error.code == rusqlite::ErrorCode::DatabaseBusy =>
                 {
@@ -2622,7 +2635,8 @@ fn lock_workflow_store_after_delay(
         }
         std::thread::sleep(hold_for);
         connection.execute_batch("ROLLBACK;").unwrap();
-    })
+    });
+    (handle, ready_rx)
 }
 
 fn lock_workflow_store_until_locked(

@@ -296,7 +296,7 @@ pub async fn set_triage(
     note: Option<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -328,7 +328,11 @@ pub async fn promote_workflow(
     to_stage: store::workflows::WorkflowStage,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
+    let account_id = if to_stage == store::workflows::WorkflowStage::Closed {
+        resolve_mutating_workflow_account_id(config_report, &thread_id).await?
+    } else {
+        resolve_workflow_account_id(config_report, Some(&thread_id)).await?
+    };
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -392,7 +396,7 @@ pub async fn snooze_workflow(
     use super::message_build::parse_day_to_epoch_s;
 
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let snoozed_until_epoch_s = until.as_deref().map(parse_day_to_epoch_s).transpose()?;
     let database_path = config_report.config.store.database_path.clone();

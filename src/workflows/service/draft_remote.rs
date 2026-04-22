@@ -23,6 +23,37 @@ struct RestoreDraftStateRequest {
     expected_workflow_version: i64,
 }
 
+async fn restore_expected_workflow_version(
+    config_report: &ConfigReport,
+    account_id: &str,
+    thread_id: &str,
+) -> WorkflowResult<i64> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let account_id = account_id.to_owned();
+    let thread_id = thread_id.to_owned();
+    let thread_id_for_lookup = thread_id.clone();
+
+    let detail = join_blocking(
+        spawn_blocking(move || {
+            store::workflows::get_workflow_detail(
+                &database_path,
+                busy_timeout_ms,
+                &account_id,
+                &thread_id_for_lookup,
+            )
+        }),
+        "draft.restore_local_state.version",
+    )
+    .await?;
+
+    detail
+        .map(|detail| detail.workflow.workflow_version)
+        .ok_or_else(|| WorkflowServiceError::WorkflowNotFound {
+            thread_id: thread_id.to_owned(),
+        })
+}
+
 pub(super) fn matches_missing_draft_error(error: &GmailClientError, draft_id: &str) -> bool {
     let expected_path = format!("users/me/drafts/{draft_id}");
     matches!(
@@ -343,6 +374,25 @@ pub(super) async fn retire_local_draft_then_delete_remote(
         };
         let mut restore_error = None;
         for attempt in 0..RESTORE_DRAFT_STATE_MAX_ATTEMPTS {
+            let expected_workflow_version = match restore_expected_workflow_version(
+                config_report,
+                &request.account_id,
+                &request.thread_id,
+            )
+            .await
+            {
+                Ok(version) => version,
+                Err(error) => {
+                    restore_error = Some(error);
+                    if attempt + 1 < RESTORE_DRAFT_STATE_MAX_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            RESTORE_DRAFT_STATE_RETRY_DELAY_MS,
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+            };
             match restore_local_draft_state(
                 config_report,
                 RestoreDraftStateRequest {
@@ -352,7 +402,7 @@ pub(super) async fn retire_local_draft_then_delete_remote(
                     gmail_draft_id: request.gmail_draft_id.clone(),
                     gmail_draft_message_id: request.gmail_draft_message_id.clone(),
                     gmail_draft_thread_id: request.gmail_draft_thread_id.clone(),
-                    expected_workflow_version: request.expected_workflow_version,
+                    expected_workflow_version,
                 },
                 "draft.restore_local_state",
             )
