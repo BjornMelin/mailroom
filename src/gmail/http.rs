@@ -507,7 +507,7 @@ fn classify_forbidden_retry(body: &str) -> Option<GmailRetryClassification> {
                 .errors
                 .into_iter()
                 .find_map(|detail| match detail.reason.as_deref() {
-                    Some("dailyLimitExceeded" | "rateLimitExceeded" | "userRateLimitExceeded") => {
+                    Some("rateLimitExceeded" | "userRateLimitExceeded") => {
                         Some(GmailRetryClassification::QuotaPressure)
                     }
                     _ => None,

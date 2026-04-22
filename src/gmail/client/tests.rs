@@ -166,6 +166,71 @@ async fn refresh_credentials_persists_rotated_refresh_tokens() {
 }
 
 #[tokio::test]
+async fn refresh_credentials_preserves_existing_refresh_token_when_response_omits_it() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "fresh-access-token",
+            "expires_in": 3600,
+            "scope": "scope:a",
+            "token_type": "Bearer"
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/profile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "emailAddress": "operator@example.com",
+            "messagesTotal": 10,
+            "threadsTotal": 7,
+            "historyId": "12345"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let store = test_store(&temp_dir);
+    store
+        .save(&StoredCredentials {
+            account_id: String::from("gmail:operator@example.com"),
+            access_token: SecretString::from(String::from("stale-access-token")),
+            refresh_token: Some(SecretString::from(String::from("stale-refresh-token"))),
+            expires_at_epoch_s: Some(0),
+            scopes: vec![String::from("scope:a")],
+        })
+        .unwrap();
+
+    let client = GmailClient::new(
+        GmailConfig {
+            client_id: Some(String::from("client-id")),
+            client_secret: None,
+            auth_url: format!("{}/oauth2/auth", mock_server.uri()),
+            token_url: format!("{}/oauth2/token", mock_server.uri()),
+            api_base_url: format!("{}/gmail/v1", mock_server.uri()),
+            listen_host: String::from("127.0.0.1"),
+            listen_port: 0,
+            open_browser: false,
+            request_timeout_secs: 30,
+            scopes: vec![String::from("scope:a")],
+        },
+        workspace_for(&temp_dir),
+        store.clone(),
+    )
+    .unwrap();
+
+    let (profile, access_scope) = client.get_profile_with_access_scope().await.unwrap();
+    let refreshed = store.load().unwrap().unwrap();
+
+    assert_eq!(profile.email_address, "operator@example.com");
+    assert_eq!(access_scope, "scope:a");
+    assert_eq!(
+        refreshed.refresh_token.as_ref().unwrap().expose_secret(),
+        "stale-refresh-token"
+    );
+}
+
+#[tokio::test]
 async fn get_profile_with_access_scope_does_not_reload_credentials_after_success() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -283,7 +348,7 @@ fn gmail_usage_limit_forbidden_errors_are_classified_as_quota_pressure() {
 }
 
 #[test]
-fn gmail_daily_limit_forbidden_errors_are_classified_as_quota_pressure() {
+fn gmail_daily_limit_forbidden_errors_are_not_classified_as_retryable() {
     let body = serde_json::to_string(&json!({
         "error": {
             "errors": [
@@ -299,7 +364,7 @@ fn gmail_daily_limit_forbidden_errors_are_classified_as_quota_pressure() {
 
     assert_eq!(
         classify_retryable_api_response(StatusCode::FORBIDDEN, &body),
-        Some(GmailRetryClassification::QuotaPressure)
+        None
     );
 }
 
@@ -356,10 +421,27 @@ async fn list_labels_waits_for_retry_after_before_retrying_throttled_requests() 
 
     let temp_dir = TempDir::new().unwrap();
     let client = test_client(&mock_server, &temp_dir);
+    let retry_task = tokio::spawn(async move { client.list_labels().await });
 
-    let result = tokio::time::timeout(Duration::from_millis(800), client.list_labels()).await;
+    sleep(Duration::from_millis(1_200)).await;
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("request recording should be enabled");
+    assert_eq!(
+        requests.len(),
+        1,
+        "client retried before honoring the Retry-After header"
+    );
 
-    assert!(result.is_err(), "client retried before Retry-After elapsed");
+    let result = tokio::time::timeout(Duration::from_millis(2_500), retry_task)
+        .await
+        .expect("client should retry after Retry-After elapses")
+        .expect("retry task should complete successfully");
+    assert!(
+        result.is_ok(),
+        "client should succeed after the delayed retry"
+    );
 }
 
 #[tokio::test]
