@@ -628,7 +628,7 @@ fn upsert_sync_pacing_state_rejects_invalid_ranges() {
         Some(rusqlite::Error::SqliteFailure(_, Some(message))) => {
             assert!(
                 message.contains("learned_quota_units_per_minute BETWEEN 5 AND 12000")
-                    || message.contains("learned_message_fetch_concurrency >= 1")
+                    || message.contains("learned_message_fetch_concurrency BETWEEN 1 AND 4")
                     || message.contains("clean_run_streak >= 0"),
                 "expected pacing range constraint failure, got: {message}"
             );
@@ -3668,7 +3668,7 @@ fn sync_run_summary_tracks_separate_comparability_buckets() {
 }
 
 #[test]
-fn sync_run_history_pruning_preserves_other_comparability_buckets() {
+fn sync_run_history_pruning_keeps_account_wide_retention_and_clears_stale_bucket_summaries() {
     let repo_root = unique_temp_dir("mailroom-sync-history-prune-buckets");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
@@ -3768,9 +3768,14 @@ fn sync_run_history_pruning_preserves_other_comparability_buckets() {
         1_100,
     )
     .unwrap();
+    assert_eq!(history.len(), 1_000);
     assert!(
-        history.iter().any(|row| row.run_id == large_history.run_id),
-        "expected large comparability bucket history to survive tiny-bucket pruning"
+        history.iter().all(|row| row.comparability_key == "tiny"),
+        "expected account-wide pruning to evict the older large bucket rows"
+    );
+    assert!(
+        history.iter().all(|row| row.run_id != large_history.run_id),
+        "expected the oldest large-bucket row to be pruned by account-wide retention"
     );
 
     let large_summary = get_sync_run_summary_for_comparability(
@@ -3781,9 +3786,20 @@ fn sync_run_history_pruning_preserves_other_comparability_buckets() {
         SyncRunComparabilityKind::IncrementalWorkloadTier,
         "large",
     )
+    .unwrap();
+    assert!(large_summary.is_none());
+
+    let tiny_summary = get_sync_run_summary_for_comparability(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        SyncMode::Incremental,
+        SyncRunComparabilityKind::IncrementalWorkloadTier,
+        "tiny",
+    )
     .unwrap()
     .unwrap();
-    assert_eq!(large_summary.latest_run_id, large_history.run_id);
+    assert_eq!(tiny_summary.comparability_key, "tiny");
 }
 
 #[test]

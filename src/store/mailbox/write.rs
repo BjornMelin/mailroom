@@ -9,8 +9,9 @@ use super::run_history_summary::recompute_sync_run_summary_in_transaction;
 use super::{
     AttachmentExportEventInput, AttachmentVaultStateUpdate, FullSyncCheckpointRecord,
     FullSyncCheckpointUpdate, FullSyncStagePageInput, GmailMessageUpsertInput, MailboxWriteError,
-    SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunHistoryRecord, SyncRunOutcomeInput,
-    SyncRunSummaryRecord, SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
+    SyncMode, SyncPacingStateRecord, SyncPacingStateUpdate, SyncRunComparability,
+    SyncRunComparabilityKind, SyncRunHistoryRecord, SyncRunOutcomeInput, SyncRunSummaryRecord,
+    SyncStateRecord, SyncStateUpdate, unique_sorted_strings,
 };
 use crate::gmail::GmailLabel;
 use crate::store::connection;
@@ -19,6 +20,7 @@ use rusqlite::{Connection, ToSql, TransactionBehavior, params, params_from_iter}
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::str::FromStr;
 
 const DELETE_BATCH_SIZE: usize = 400;
 const FULL_SYNC_STAGE_PAGE_STATUS_PARTIAL: &str = "partial";
@@ -555,15 +557,16 @@ pub(crate) fn persist_successful_sync_outcome(
         .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
     let history = insert_sync_run_history_in_transaction(&transaction, outcome)
         .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
+    delete_all_sync_run_summaries_for_account_in_transaction(&transaction, &outcome.account_id)
+        .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
     prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)
         .map_err(|error| mailbox_write_invariant("persist_successful_sync_outcome", error))?;
-    let comparability = comparability_for_outcome(outcome);
-    let summary = recompute_sync_run_summary_in_transaction(
+    let summary = reconcile_sync_run_summaries_for_account_in_transaction(
         &transaction,
         &outcome.account_id,
-        outcome.sync_mode,
-        &comparability,
         outcome.finished_at_epoch_s,
+        outcome.sync_mode,
+        &comparability_for_outcome(outcome),
     )?;
     transaction.commit().map_err(MailboxWriteError::from)?;
     Ok((sync_state, history, summary))
@@ -586,15 +589,16 @@ pub(crate) fn persist_failed_sync_outcome(
         .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
     let history = insert_sync_run_history_in_transaction(&transaction, outcome)
         .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
+    delete_all_sync_run_summaries_for_account_in_transaction(&transaction, &outcome.account_id)
+        .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
     prune_sync_run_history_in_transaction(&transaction, &outcome.account_id)
         .map_err(|error| mailbox_write_invariant("persist_failed_sync_outcome", error))?;
-    let comparability = comparability_for_outcome(outcome);
-    let summary = recompute_sync_run_summary_in_transaction(
+    let summary = reconcile_sync_run_summaries_for_account_in_transaction(
         &transaction,
         &outcome.account_id,
-        outcome.sync_mode,
-        &comparability,
         outcome.finished_at_epoch_s,
+        outcome.sync_mode,
+        &comparability_for_outcome(outcome),
     )?;
     transaction.commit().map_err(MailboxWriteError::from)?;
     Ok((sync_state, history, summary))
@@ -1986,7 +1990,7 @@ fn prune_sync_run_history_in_transaction(
                  SELECT
                      run_id,
                      ROW_NUMBER() OVER (
-                         PARTITION BY account_id, sync_mode, comparability_kind, comparability_key
+                         PARTITION BY account_id
                          ORDER BY finished_at_epoch_s DESC, run_id DESC
                      ) AS row_number
                  FROM gmail_sync_run_history
@@ -1997,6 +2001,107 @@ fn prune_sync_run_history_in_transaction(
     )?;
     statement.execute(params![account_id, SYNC_RUN_HISTORY_RETENTION_PER_ACCOUNT])?;
     Ok(())
+}
+
+fn reconcile_sync_run_summaries_for_account_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+    updated_at_epoch_s: i64,
+    requested_sync_mode: SyncMode,
+    requested_comparability: &SyncRunComparability,
+) -> Result<SyncRunSummaryRecord, MailboxWriteError> {
+    let history_buckets = list_sync_run_history_buckets_in_transaction(transaction, account_id)?;
+
+    let mut requested_summary = None;
+    for bucket in history_buckets {
+        let summary = recompute_sync_run_summary_in_transaction(
+            transaction,
+            account_id,
+            bucket.sync_mode,
+            &bucket.comparability,
+            updated_at_epoch_s,
+        )?;
+        if bucket.sync_mode == requested_sync_mode
+            && bucket.comparability.kind == requested_comparability.kind
+            && bucket.comparability.key == requested_comparability.key
+        {
+            requested_summary = Some(summary);
+        }
+    }
+
+    requested_summary.ok_or_else(|| MailboxWriteError::InvariantViolation {
+        operation: "reconcile_sync_run_summaries",
+        detail: format!(
+            "requested summary bucket {}:{}:{} disappeared after pruning",
+            requested_sync_mode.as_str(),
+            requested_comparability.kind.as_str(),
+            requested_comparability.key
+        ),
+    })
+}
+
+fn delete_all_sync_run_summaries_for_account_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<(), MailboxWriteError> {
+    transaction.execute(
+        "DELETE FROM gmail_sync_run_summary
+         WHERE account_id = ?1",
+        params![account_id],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyncRunSummaryBucket {
+    sync_mode: SyncMode,
+    comparability: SyncRunComparability,
+}
+
+fn list_sync_run_history_buckets_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    account_id: &str,
+) -> Result<Vec<SyncRunSummaryBucket>, MailboxWriteError> {
+    let mut statement = transaction.prepare_cached(
+        "SELECT DISTINCT sync_mode, comparability_kind, comparability_key
+         FROM gmail_sync_run_history
+         WHERE account_id = ?1",
+    )?;
+    let rows = statement.query_map([account_id], |row| {
+        let sync_mode = SyncMode::from_str(row.get_ref(0)?.as_str()?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        let comparability_kind = SyncRunComparabilityKind::from_str(row.get_ref(1)?.as_str()?)
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+        let comparability_key = row.get::<_, String>(2)?;
+        Ok(SyncRunSummaryBucket {
+            sync_mode,
+            comparability: SyncRunComparability {
+                kind: comparability_kind,
+                label: String::new(),
+                key: comparability_key,
+            },
+        })
+    })?;
+
+    let mut buckets = Vec::new();
+    for row in rows {
+        let bucket = row?;
+        if !buckets.contains(&bucket) {
+            buckets.push(bucket);
+        }
+    }
+    Ok(buckets)
 }
 
 fn delete_account_messages(

@@ -1,4 +1,4 @@
-use super::read::{read_sync_run_history_record, row_to_sync_run_history};
+use super::read::row_to_sync_run_history;
 use super::run_history_policy::{
     DetectedSyncRunRegression, SYNC_RUN_SUMMARY_RECENT_WINDOW, compare_best_clean_run,
     detect_sync_run_regression, is_clean_success,
@@ -312,20 +312,4 @@ pub(crate) fn read_sync_run_summary_for_comparability(
             super::read::row_to_sync_run_summary,
         )
         .optional()
-}
-
-#[allow(dead_code)]
-pub(crate) fn read_best_clean_run_for_summary(
-    connection: &rusqlite::Connection,
-    summary: &SyncRunSummaryRecord,
-) -> Result<Option<SyncRunHistoryRecord>, MailboxWriteError> {
-    let Some(run_id) = summary.best_clean_run_id else {
-        return Ok(None);
-    };
-    read_sync_run_history_record(connection, run_id).map_err(|error| {
-        MailboxWriteError::InvariantViolation {
-            operation: "read_best_clean_run_for_summary",
-            detail: error.to_string(),
-        }
-    })
 }
