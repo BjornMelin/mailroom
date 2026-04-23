@@ -325,6 +325,7 @@ pub(super) fn label_names_changed(
     Ok(existing_labels != next_labels)
 }
 
+/// Merge partial sync-state updates while preserving prior success timestamps when absent.
 pub(super) fn upsert_sync_state_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     update: &SyncStateUpdate,
@@ -437,6 +438,7 @@ pub(super) fn upsert_sync_state_in_transaction(
     Ok(record)
 }
 
+/// Restore a fully materialized sync-state record without preserving prior field values.
 pub(super) fn upsert_sync_state_record_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     record: &SyncStateRecord,

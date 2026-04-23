@@ -183,7 +183,7 @@ async fn sync_history_returns_persisted_run_summary_for_active_account() {
 async fn sync_perf_explain_uses_best_clean_baseline_for_latest_bucket() {
     let temp_dir = TempDir::new().unwrap();
     let mock_server = MockServer::start().await;
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     store::init(&config_report).unwrap();
     let account = accounts::upsert_active(
@@ -313,7 +313,7 @@ async fn sync_perf_explain_uses_best_clean_baseline_for_latest_bucket() {
 async fn sync_perf_explain_suppresses_drift_for_tiny_incremental_workloads() {
     let temp_dir = TempDir::new().unwrap();
     let mock_server = MockServer::start().await;
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     store::init(&config_report).unwrap();
     let account = accounts::upsert_active(
@@ -517,7 +517,7 @@ async fn full_sync_failure_preserves_existing_mailbox_cache() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox(&config_report, "250", "cached-1", "Existing cached message");
 
@@ -604,7 +604,7 @@ async fn cursorless_failed_bootstrap_retries_with_full_sync() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let failing_config = config_report_for(&temp_dir, &failing_server);
+    let failing_config = config_report_for(&temp_dir, &failing_server.uri());
     seed_credentials(&failing_config);
 
     let first_error = sync_run(&failing_config, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
@@ -639,7 +639,7 @@ async fn cursorless_failed_bootstrap_retries_with_full_sync() {
         .await;
     mount_message_metadata(&success_server, "m-recovered", "650", "Recovered message").await;
 
-    let success_config = config_report_for(&temp_dir, &success_server);
+    let success_config = config_report_for(&temp_dir, &success_server.uri());
     let report = sync_run(&success_config, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
         .unwrap();
@@ -685,7 +685,7 @@ async fn stale_history_failure_clears_cursor_before_retrying_full_sync() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let failing_config = config_report_for(&temp_dir, &failing_server);
+    let failing_config = config_report_for(&temp_dir, &failing_server.uri());
     seed_credentials(&failing_config);
     seed_existing_mailbox(
         &failing_config,
@@ -734,7 +734,7 @@ async fn stale_history_failure_clears_cursor_before_retrying_full_sync() {
         .await;
     mount_message_metadata(&success_server, "m-recovered", "650", "Recovered message").await;
 
-    let success_config = config_report_for(&temp_dir, &success_server);
+    let success_config = config_report_for(&temp_dir, &success_server.uri());
     let report = sync_run(&success_config, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
         .unwrap();
@@ -781,7 +781,7 @@ async fn stale_history_retry_keeps_persisted_bootstrap_query() {
     mount_message_metadata(&stale_server, "m-recovered", "650", "Recovered message").await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &stale_server);
+    let config_report = config_report_for(&temp_dir, &stale_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox_with_bootstrap_query(
         &config_report,
@@ -828,7 +828,7 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
     mount_message_metadata(&mock_server, "m-forced", "650", "Forced full sync").await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox_with_bootstrap_query(
         &config_report,
@@ -902,7 +902,7 @@ async fn label_refresh_failure_marks_existing_sync_state_as_failed() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox_with_bootstrap_query(
         &config_report,
@@ -967,7 +967,7 @@ async fn full_sync_failure_keeps_cached_labels_until_mailbox_changes_commit() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox_with_custom_labels(
         &config_report,
@@ -1059,7 +1059,7 @@ async fn full_sync_keeps_the_newest_history_cursor_across_pages() {
     mount_message_metadata(&mock_server, "m-older", "900", "Older message").await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox(&config_report, "250", "cached-1", "Stale cached message");
 
@@ -1136,7 +1136,7 @@ async fn full_sync_failure_after_staging_a_page_preserves_existing_mailbox_cache
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox(&config_report, "250", "cached-1", "Existing cached message");
 
@@ -1230,7 +1230,7 @@ async fn full_sync_resume_reuses_saved_page_token_after_midstream_failure() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
 
     let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
@@ -1292,7 +1292,7 @@ async fn full_sync_ready_to_finalize_checkpoint_skips_relisting_pages() {
     mount_labels(&mock_server).await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_full_sync_checkpoint(
         &config_report,
@@ -1364,7 +1364,7 @@ async fn full_sync_invalid_resume_page_token_restarts_from_scratch() {
     mount_message_metadata(&mock_server, "m-fresh", "980", "Fresh after reset").await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_full_sync_checkpoint(
         &config_report,
@@ -1450,7 +1450,7 @@ async fn full_sync_checkpoint_query_mismatch_restarts_from_first_page() {
     .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_full_sync_checkpoint(
         &config_report,
@@ -1517,7 +1517,7 @@ async fn incremental_sync_skips_messages_deleted_on_later_history_pages() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox(
         &config_report,
@@ -1578,7 +1578,7 @@ async fn full_sync_skips_messages_that_disappear_before_metadata_fetch() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
 
     let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
@@ -1617,7 +1617,7 @@ async fn incremental_sync_deletes_messages_that_404_during_metadata_fetch() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox(&config_report, "250", "cached-1", "Now missing in Gmail");
 
@@ -1654,7 +1654,7 @@ async fn incremental_sync_keeps_existing_bootstrap_query() {
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox_with_bootstrap_query(
         &config_report,
@@ -1723,7 +1723,7 @@ async fn incremental_sync_failure_preserves_deleted_messages_until_changes_commi
         .await;
 
     let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
+    let config_report = config_report_for(&temp_dir, &mock_server.uri());
     seed_credentials(&config_report);
     seed_existing_mailbox(
         &config_report,

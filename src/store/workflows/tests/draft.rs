@@ -7,6 +7,7 @@ fn workflow_event_payload(
     let event = detail
         .events
         .iter()
+        .rev()
         .find(|event| event.event_kind == event_kind)
         .unwrap();
     serde_json::from_str(&event.payload_json).unwrap()

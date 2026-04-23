@@ -26,13 +26,13 @@ mod search_orchestration;
 mod sync;
 mod unit;
 
-fn config_report_for(temp_dir: &TempDir, mock_server: &MockServer) -> ConfigReport {
+fn config_report_for(temp_dir: &TempDir, mock_server_uri: &str) -> ConfigReport {
     let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let mut config_report = resolve(&paths).unwrap();
-    config_report.config.gmail.api_base_url = format!("{}/gmail/v1", mock_server.uri());
-    config_report.config.gmail.auth_url = format!("{}/oauth2/auth", mock_server.uri());
-    config_report.config.gmail.token_url = format!("{}/oauth2/token", mock_server.uri());
+    config_report.config.gmail.api_base_url = format!("{mock_server_uri}/gmail/v1");
+    config_report.config.gmail.auth_url = format!("{mock_server_uri}/oauth2/auth");
+    config_report.config.gmail.token_url = format!("{mock_server_uri}/oauth2/token");
     config_report.config.gmail.open_browser = false;
     config_report.config.gmail.client_id = Some(String::from("client-id"));
     config_report.config.gmail.client_secret = Some(String::from("client-secret"));

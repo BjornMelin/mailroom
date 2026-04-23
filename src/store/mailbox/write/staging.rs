@@ -38,19 +38,21 @@ pub(super) fn cleanup_incomplete_full_sync_stage_pages_in_transaction(
     // For resumable full syncs, staged pages at or beyond the completed-page checkpoint
     // are considered in-progress and must be purged with any non-complete pages.
     transaction.execute(
-        "DELETE FROM gmail_full_sync_stage_attachments
+        "DROP TABLE IF EXISTS temp.gmail_full_sync_stage_pages_to_purge",
+        [],
+    )?;
+    transaction.execute(
+        "CREATE TEMP TABLE gmail_full_sync_stage_pages_to_purge (
+             page_seq INTEGER PRIMARY KEY
+         )",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO gmail_full_sync_stage_pages_to_purge (page_seq)
+         SELECT page_seq
+         FROM gmail_full_sync_stage_pages
          WHERE account_id = ?1
-           AND message_id IN (
-               SELECT message_id
-               FROM gmail_full_sync_stage_page_messages
-               WHERE account_id = ?1
-                 AND page_seq IN (
-                     SELECT page_seq
-                     FROM gmail_full_sync_stage_pages
-                     WHERE account_id = ?1
-                       AND (status != ?2 OR page_seq >= ?3)
-                 )
-           )",
+           AND (status != ?2 OR page_seq >= ?3)",
         params![
             account_id,
             FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
@@ -66,16 +68,10 @@ pub(super) fn cleanup_incomplete_full_sync_stage_pages_in_transaction(
                WHERE account_id = ?1
                  AND page_seq IN (
                      SELECT page_seq
-                     FROM gmail_full_sync_stage_pages
-                     WHERE account_id = ?1
-                       AND (status != ?2 OR page_seq >= ?3)
+                     FROM temp.gmail_full_sync_stage_pages_to_purge
                  )
            )",
-        params![
-            account_id,
-            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
-            completed_page_count
-        ],
+        [account_id],
     )?;
     transaction.execute(
         "DELETE FROM gmail_full_sync_stage_messages
@@ -86,42 +82,30 @@ pub(super) fn cleanup_incomplete_full_sync_stage_pages_in_transaction(
                WHERE account_id = ?1
                  AND page_seq IN (
                      SELECT page_seq
-                     FROM gmail_full_sync_stage_pages
-                     WHERE account_id = ?1
-                       AND (status != ?2 OR page_seq >= ?3)
+                     FROM temp.gmail_full_sync_stage_pages_to_purge
                  )
            )",
-        params![
-            account_id,
-            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
-            completed_page_count
-        ],
+        [account_id],
     )?;
     transaction.execute(
         "DELETE FROM gmail_full_sync_stage_page_messages
          WHERE account_id = ?1
            AND page_seq IN (
                SELECT page_seq
-               FROM gmail_full_sync_stage_pages
-               WHERE account_id = ?1
-                 AND (status != ?2 OR page_seq >= ?3)
+               FROM temp.gmail_full_sync_stage_pages_to_purge
            )",
-        params![
-            account_id,
-            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
-            completed_page_count
-        ],
+        [account_id],
     )?;
     transaction.execute(
         "DELETE FROM gmail_full_sync_stage_pages
          WHERE account_id = ?1
-           AND (status != ?2 OR page_seq >= ?3)",
-        params![
-            account_id,
-            FULL_SYNC_STAGE_PAGE_STATUS_COMPLETE,
-            completed_page_count
-        ],
+           AND page_seq IN (
+               SELECT page_seq
+               FROM temp.gmail_full_sync_stage_pages_to_purge
+           )",
+        [account_id],
     )?;
+    transaction.execute("DROP TABLE temp.gmail_full_sync_stage_pages_to_purge", [])?;
     Ok(())
 }
 

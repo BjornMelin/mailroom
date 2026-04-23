@@ -35,7 +35,7 @@ fn persist_workflow_rejects_stale_updates() {
         config_report.config.store.busy_timeout_ms,
     )
     .unwrap();
-    connection
+    let rows_affected = connection
         .execute(
             "UPDATE thread_workflows
              SET workflow_version = workflow_version + 1
@@ -43,6 +43,10 @@ fn persist_workflow_rejects_stale_updates() {
             rusqlite::params![stale_workflow.workflow_id],
         )
         .unwrap();
+    assert_eq!(
+        rows_affected, 1,
+        "expected exactly one workflow row to be bumped"
+    );
     let transaction = connection.transaction().unwrap();
 
     let error = super::write::persist_workflow(

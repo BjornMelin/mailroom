@@ -53,14 +53,15 @@ fn mailbox_message(
     label_names_text: &str,
     attachment_part_ids: &[&str],
 ) -> GmailMessageUpsertInput {
+    let history_id = message_id.bytes().fold(1_700_000_000_000u64, |acc, byte| {
+        acc.wrapping_mul(131).wrapping_add(u64::from(byte))
+    });
+
     GmailMessageUpsertInput {
         account_id: account_id.to_owned(),
         message_id: message_id.to_owned(),
         thread_id: format!("thread-{message_id}"),
-        history_id: format!(
-            "{}",
-            1_700_000_000_000u64 + message_id.bytes().map(u64::from).sum::<u64>()
-        ),
+        history_id: history_id.to_string(),
         internal_date_epoch_ms: 1_700_000_000_000,
         snippet: format!("snippet for {subject}"),
         subject: subject.to_owned(),
@@ -98,7 +99,7 @@ fn mailbox_message(
 fn full_sync_state(account_id: &str, epoch_s: i64) -> SyncStateUpdate {
     SyncStateUpdate {
         account_id: account_id.to_owned(),
-        cursor_history_id: Some(epoch_s.to_string()),
+        cursor_history_id: (epoch_s >= 0).then(|| epoch_s.to_string()),
         bootstrap_query: String::from("newer_than:90d"),
         last_sync_mode: SyncMode::Full,
         last_sync_status: SyncStatus::Ok,

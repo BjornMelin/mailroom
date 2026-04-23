@@ -314,18 +314,7 @@ pub(super) fn reindex_message_search_for_account(
                  )
              ), '')
          FROM gmail_messages gm
-         LEFT JOIN gmail_message_labels gml
-           ON gml.message_rowid = gm.message_rowid
-         LEFT JOIN gmail_labels gl
-           ON gl.account_id = gm.account_id
-          AND gl.label_id = gml.label_id
-         WHERE gm.account_id = ?1
-         GROUP BY
-             gm.message_rowid,
-             gm.subject,
-             gm.from_header,
-             gm.recipient_headers,
-             gm.snippet",
+         WHERE gm.account_id = ?1",
         [account_id],
     )?;
     Ok(())
