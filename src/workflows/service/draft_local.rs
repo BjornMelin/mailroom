@@ -7,7 +7,7 @@ use super::queries::{
     action_report, best_effort_sync_report, latest_thread_message, resolve_active_account,
     thread_message_by_id, workflow_detail, workflow_snapshot_from_message,
 };
-use super::{WorkflowResult, join_blocking};
+use super::{WorkflowResult, current_epoch_seconds, join_blocking};
 use crate::config::ConfigReport;
 use crate::mailbox;
 use crate::store;
@@ -42,7 +42,8 @@ pub async fn draft_start(
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
     let account = resolve_active_account(config_report).await?;
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    let gmail_client = crate::gmail_client_for_config(config_report)
+        .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
     let latest_message = latest_thread_message(&thread)?;
     let snapshot = workflow_snapshot_from_message(latest_message);
@@ -60,7 +61,7 @@ pub async fn draft_start(
         body_text: String::new(),
         attachments: Vec::new(),
         snapshot,
-        updated_at_epoch_s: crate::time::current_epoch_seconds()?,
+        updated_at_epoch_s: current_epoch_seconds()?,
     };
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -144,7 +145,8 @@ pub async fn draft_attach_remove(
 ) -> WorkflowResult<WorkflowActionReport> {
     let repo_root = crate::workspace::configured_repo_root_from_locations(
         &config_report.locations.repo_config_path,
-    )?;
+    )
+    .map_err(|source| WorkflowServiceError::RepoRoot { source })?;
     let invocation_dir = std::env::current_dir().unwrap_or_else(|_| repo_root.clone());
     update_draft_revision(
         config_report,
@@ -188,7 +190,8 @@ pub async fn draft_send(
             thread_id: thread_id.clone(),
         }
     })?;
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    let gmail_client = crate::gmail_client_for_config(config_report)
+        .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
     let source_message = thread_message_by_id(&thread, &draft.revision.source_message_id)?;
     let attachments = draft
@@ -255,7 +258,8 @@ where
             .ok_or_else(|| WorkflowServiceError::CurrentDraftNotFound {
                 thread_id: thread_id.clone(),
             })?;
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    let gmail_client = crate::gmail_client_for_config(config_report)
+        .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
     let latest_message = latest_thread_message(&thread)?;
     let source_message = thread_message_by_id(&thread, &current_draft.revision.source_message_id)?;
@@ -297,7 +301,7 @@ where
         body_text: draft.body_text.clone(),
         attachments: draft.attachments.clone(),
         snapshot,
-        updated_at_epoch_s: crate::time::current_epoch_seconds()?,
+        updated_at_epoch_s: current_epoch_seconds()?,
     };
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;

@@ -1,4 +1,4 @@
-use super::{WorkflowResult, join_blocking};
+use super::{WorkflowResult, current_epoch_seconds, join_blocking};
 use crate::config::ConfigReport;
 use crate::gmail::{GmailClient, GmailClientError};
 use crate::store;
@@ -163,7 +163,7 @@ pub(super) async fn persist_remote_draft_state(
     let expected_workflow_version = workflow.workflow_version;
     let mut last_error = None;
     for attempt in 0..REMOTE_DRAFT_STATE_MAX_ATTEMPTS {
-        let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+        let updated_at_epoch_s = current_epoch_seconds()?;
         let database_path = database_path.clone();
         let account_id = account_id.clone();
         let thread_id = thread_id.clone();
@@ -268,7 +268,7 @@ pub(super) async fn mark_sent_after_remote_send(
     for attempt in 0..MARK_SENT_MAX_ATTEMPTS {
         let database_path = config_report.config.store.database_path.clone();
         let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-        let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+        let updated_at_epoch_s = current_epoch_seconds()?;
         let account_id = workflow.account_id.clone();
         let thread_id = workflow.thread_id.clone();
         let sent_message_id = sent_message_id.to_owned();
@@ -318,7 +318,7 @@ pub(super) async fn retire_local_draft_state(
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let updated_at_epoch_s = current_epoch_seconds()?;
     let account_id = account_id.to_owned();
     let thread_id = thread_id.to_owned();
 
@@ -445,7 +445,7 @@ async fn restore_local_draft_state(
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let updated_at_epoch_s = current_epoch_seconds()?;
 
     join_blocking(
         spawn_blocking(move || {

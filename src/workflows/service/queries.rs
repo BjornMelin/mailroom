@@ -1,5 +1,5 @@
 use super::draft_remote::retire_local_draft_then_delete_remote;
-use super::{WorkflowResult, join_blocking};
+use super::{WorkflowResult, current_epoch_seconds, join_blocking};
 use crate::config::ConfigReport;
 use crate::gmail::{GmailThreadContext, GmailThreadMessage};
 use crate::mailbox;
@@ -300,7 +300,7 @@ pub async fn set_triage(
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let updated_at_epoch_s = current_epoch_seconds()?;
     let workflow = join_blocking(
         spawn_blocking(move || {
             store::workflows::set_triage_state(
@@ -336,10 +336,11 @@ pub async fn promote_workflow(
     let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let updated_at_epoch_s = current_epoch_seconds()?;
     let mut promoted_close_gmail_client: Option<crate::gmail::GmailClient> = None;
     if to_stage == store::workflows::WorkflowStage::Closed {
-        let gmail_client = crate::gmail_client_for_config(config_report)?;
+        let gmail_client = crate::gmail_client_for_config(config_report)
+            .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
         gmail_client.get_profile_with_access_scope().await?;
         promoted_close_gmail_client = Some(gmail_client);
     }
@@ -366,7 +367,8 @@ pub async fn promote_workflow(
         let gmail_client = match promoted_close_gmail_client {
             Some(gmail_client) => gmail_client,
             None => {
-                let gmail_client = crate::gmail_client_for_config(config_report)?;
+                let gmail_client = crate::gmail_client_for_config(config_report)
+                    .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
                 gmail_client.get_profile_with_access_scope().await?;
                 gmail_client
             }
@@ -401,7 +403,7 @@ pub async fn snooze_workflow(
     let snoozed_until_epoch_s = until.as_deref().map(parse_day_to_epoch_s).transpose()?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let updated_at_epoch_s = current_epoch_seconds()?;
     let workflow = join_blocking(
         spawn_blocking(move || {
             store::workflows::snooze_workflow(

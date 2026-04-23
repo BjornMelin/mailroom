@@ -46,3 +46,7 @@ where
         .map_err(|source| WorkflowServiceError::BlockingTask { operation, source })?
         .map_err(Into::into)
 }
+
+fn current_epoch_seconds() -> WorkflowResult<i64> {
+    crate::time::current_epoch_seconds().map_err(|source| WorkflowServiceError::Time { source })
+}

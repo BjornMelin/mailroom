@@ -30,6 +30,21 @@ pub(crate) enum WorkflowServiceError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("failed to initialize the Gmail client")]
+    GmailClientInit {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("failed to resolve the configured repo root")]
+    RepoRoot {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("failed to read the current system time")]
+    Time {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("workflow blocking task `{operation}` failed")]
     BlockingTask {
         operation: &'static str,
@@ -151,6 +166,4 @@ pub(crate) enum WorkflowServiceError {
         #[source]
         source: anyhow::Error,
     },
-    #[error(transparent)]
-    Unexpected(#[from] anyhow::Error),
 }

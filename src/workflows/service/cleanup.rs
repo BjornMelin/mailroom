@@ -1,3 +1,4 @@
+use super::current_epoch_seconds;
 use super::draft_remote::retire_local_draft_then_delete_remote;
 use super::queries::{
     best_effort_sync_report, load_workflow_detail_if_present, resolve_mutating_workflow_account_id,
@@ -151,7 +152,8 @@ async fn cleanup_impl(
         None
     };
 
-    let gmail_client = crate::gmail_client_for_config(config_report)?;
+    let gmail_client = crate::gmail_client_for_config(config_report)
+        .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
     gmail_client.get_profile_with_access_scope().await?;
     let workflow = execute_cleanup_after_auth(
         config_report,
@@ -197,7 +199,7 @@ async fn execute_cleanup_after_auth(
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
     let cleanup_account_id = account_id.clone();
     let cleanup_thread_id = thread_id.clone();
-    let updated_at_epoch_s = crate::time::current_epoch_seconds()?;
+    let updated_at_epoch_s = current_epoch_seconds()?;
     let mut workflow = join_blocking(
         spawn_blocking(move || {
             store::workflows::apply_cleanup(

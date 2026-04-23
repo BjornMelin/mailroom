@@ -244,6 +244,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowServiceError::BlockingTask { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.blocking_join");
             }
+            WorkflowServiceError::Time { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.time");
+            }
             WorkflowServiceError::LabelCleanupInvariant => {
                 return (ErrorCode::InternalFailure, "workflow.invariant");
             }
@@ -267,6 +270,12 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowServiceError::AccountState { .. } => {
                 return (ErrorCode::StorageFailure, "workflow.account_state");
             }
+            WorkflowServiceError::GmailClientInit { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.gmail_client");
+            }
+            WorkflowServiceError::RepoRoot { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.repo_root");
+            }
             WorkflowServiceError::MessageBuild { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.message_build");
             }
@@ -276,8 +285,7 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | WorkflowServiceError::MailboxRead(_)
             | WorkflowServiceError::ActiveAccountRefresh { .. }
             | WorkflowServiceError::Json(_)
-            | WorkflowServiceError::IntConversion(_)
-            | WorkflowServiceError::Unexpected(_) => {}
+            | WorkflowServiceError::IntConversion(_) => {}
         }
     }
 
@@ -874,6 +882,20 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("auth_required"));
         assert_eq!(value["error"]["kind"], json!("workflow.account.mismatch"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
+    }
+
+    #[test]
+    fn workflow_time_error_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::Time {
+            source: anyhow!("system time before unix epoch"),
+        });
+
+        let report = describe_error(&error, "workflow.snooze");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.time"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
     }
 
     #[test]
