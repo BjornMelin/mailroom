@@ -753,6 +753,6 @@ pub(super) fn parse_callback_request(request: &str) -> Result<Result<ParsedCallb
 
 #[derive(Debug)]
 pub(super) struct ParsedCallback {
-    pub(super) code: String,
-    pub(super) state: String,
+    pub(in crate::auth) code: String,
+    pub(in crate::auth) state: String,
 }

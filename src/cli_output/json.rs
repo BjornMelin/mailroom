@@ -4,13 +4,13 @@ use serde::Serialize;
 use std::io::Write;
 
 #[derive(Debug, Serialize)]
-pub(super) struct JsonSuccessEnvelope<'a, T> {
+pub(crate) struct JsonSuccessEnvelope<'a, T> {
     success: bool,
     data: &'a T,
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct JsonFailureEnvelope<'a> {
+pub(crate) struct JsonFailureEnvelope<'a> {
     success: bool,
     error: &'a JsonErrorBody,
 }
@@ -39,14 +39,14 @@ fn write_json_failure<W: Write>(writer: &mut W, error: &JsonErrorBody) -> Result
     Ok(())
 }
 
-pub(super) fn json_success_value<T: Serialize>(data: &T) -> JsonSuccessEnvelope<'_, T> {
+pub(crate) fn json_success_value<T: Serialize>(data: &T) -> JsonSuccessEnvelope<'_, T> {
     JsonSuccessEnvelope {
         success: true,
         data,
     }
 }
 
-pub(super) fn json_failure_value(error: &JsonErrorBody) -> JsonFailureEnvelope<'_> {
+pub(crate) fn json_failure_value(error: &JsonErrorBody) -> JsonFailureEnvelope<'_> {
     JsonFailureEnvelope {
         success: false,
         error,
