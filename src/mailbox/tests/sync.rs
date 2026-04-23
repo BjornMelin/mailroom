@@ -71,97 +71,32 @@ async fn sync_history_returns_persisted_run_summary_for_active_account() {
     let sync_state = store::mailbox::upsert_sync_state(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
-        &store::mailbox::SyncStateUpdate {
-            account_id: account.account_id.clone(),
-            cursor_history_id: Some(String::from("100")),
-            bootstrap_query: String::from("newer_than:90d"),
-            last_sync_mode: store::mailbox::SyncMode::Incremental,
-            last_sync_status: store::mailbox::SyncStatus::Ok,
-            last_error: None,
-            last_sync_epoch_s: 100,
-            last_full_sync_success_epoch_s: Some(90),
-            last_incremental_sync_success_epoch_s: Some(100),
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
-            pipeline_staged_message_count: 0,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-        },
+        &incremental_ok_sync_state(&account.account_id),
     )
     .unwrap();
-    let (_, history, _) = store::mailbox::persist_successful_sync_outcome(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &sync_state,
-        &store::mailbox::SyncRunOutcomeInput {
-            account_id: account.account_id.clone(),
-            sync_mode: store::mailbox::SyncMode::Incremental,
-            status: store::mailbox::SyncStatus::Ok,
-            comparability_kind: store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier,
-            comparability_key: String::from("small"),
-            startup_seed_run_id: None,
+    let small_run = perf_sync_run_outcome(
+        &account.account_id,
+        PerfSyncRunParams {
+            comparability_key: "small",
             started_at_epoch_s: 95,
             finished_at_epoch_s: 100,
-            bootstrap_query: String::from("newer_than:90d"),
-            cursor_history_id: Some(String::from("100")),
-            fallback_from_history: false,
-            resumed_from_checkpoint: false,
-            pages_fetched: 1,
             messages_listed: 25,
             messages_upserted: 25,
             messages_deleted: 0,
             labels_synced: 3,
-            checkpoint_reused_pages: 0,
-            checkpoint_reused_messages_upserted: 0,
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
             pipeline_staged_message_count: 25,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-            adaptive_pacing_enabled: true,
-            quota_units_budget_per_minute: 12_000,
-            message_fetch_concurrency: 4,
-            quota_units_cap_per_minute: 12_000,
-            message_fetch_concurrency_cap: 4,
-            starting_quota_units_per_minute: 12_000,
-            starting_message_fetch_concurrency: 4,
-            effective_quota_units_per_minute: 12_000,
-            effective_message_fetch_concurrency: 4,
-            adaptive_downshift_count: 0,
             estimated_quota_units_reserved: 100,
-            http_attempt_count: 1,
-            retry_count: 0,
-            quota_pressure_retry_count: 0,
-            concurrency_pressure_retry_count: 0,
-            backend_retry_count: 0,
-            throttle_wait_count: 0,
-            throttle_wait_ms: 0,
-            retry_after_wait_ms: 0,
             duration_ms: 500,
             pages_per_second: 2.0,
             messages_per_second: 50.0,
-            error_message: None,
+            cursor_history_id: Some(String::from("100")),
         },
+    );
+    let (_, history, _) = store::mailbox::persist_successful_sync_outcome(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &sync_state,
+        &small_run,
     )
     .unwrap();
 
@@ -184,7 +119,7 @@ async fn sync_perf_explain_uses_best_clean_baseline_for_latest_bucket() {
     let temp_dir = TempDir::new().unwrap();
     let mock_server = MockServer::start().await;
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
+    blocking_seed(&config_report, seed_credentials).await;
     store::init(&config_report).unwrap();
     let account = accounts::upsert_active(
         &config_report.config.store.database_path,
@@ -202,97 +137,31 @@ async fn sync_perf_explain_uses_best_clean_baseline_for_latest_bucket() {
     let sync_state = store::mailbox::upsert_sync_state(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
-        &store::mailbox::SyncStateUpdate {
-            account_id: account.account_id.clone(),
-            cursor_history_id: Some(String::from("100")),
-            bootstrap_query: String::from("newer_than:90d"),
-            last_sync_mode: store::mailbox::SyncMode::Incremental,
-            last_sync_status: store::mailbox::SyncStatus::Ok,
-            last_error: None,
-            last_sync_epoch_s: 100,
-            last_full_sync_success_epoch_s: Some(90),
-            last_incremental_sync_success_epoch_s: Some(100),
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
-            pipeline_staged_message_count: 0,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-        },
+        &incremental_ok_sync_state(&account.account_id),
     )
     .unwrap();
     let (_, history, _) = store::mailbox::persist_successful_sync_outcome(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         &sync_state,
-        &store::mailbox::SyncRunOutcomeInput {
-            account_id: account.account_id.clone(),
-            sync_mode: store::mailbox::SyncMode::Incremental,
-            status: store::mailbox::SyncStatus::Ok,
-            comparability_kind: store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier,
-            comparability_key: String::from("small"),
-            startup_seed_run_id: None,
-            started_at_epoch_s: 95,
-            finished_at_epoch_s: 100,
-            bootstrap_query: String::from("newer_than:90d"),
-            cursor_history_id: Some(String::from("100")),
-            fallback_from_history: false,
-            resumed_from_checkpoint: false,
-            pages_fetched: 1,
-            messages_listed: 25,
-            messages_upserted: 25,
-            messages_deleted: 0,
-            labels_synced: 3,
-            checkpoint_reused_pages: 0,
-            checkpoint_reused_messages_upserted: 0,
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
-            pipeline_staged_message_count: 25,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-            adaptive_pacing_enabled: true,
-            quota_units_budget_per_minute: 12_000,
-            message_fetch_concurrency: 4,
-            quota_units_cap_per_minute: 12_000,
-            message_fetch_concurrency_cap: 4,
-            starting_quota_units_per_minute: 12_000,
-            starting_message_fetch_concurrency: 4,
-            effective_quota_units_per_minute: 12_000,
-            effective_message_fetch_concurrency: 4,
-            adaptive_downshift_count: 0,
-            estimated_quota_units_reserved: 100,
-            http_attempt_count: 1,
-            retry_count: 0,
-            quota_pressure_retry_count: 0,
-            concurrency_pressure_retry_count: 0,
-            backend_retry_count: 0,
-            throttle_wait_count: 0,
-            throttle_wait_ms: 0,
-            retry_after_wait_ms: 0,
-            duration_ms: 500,
-            pages_per_second: 2.0,
-            messages_per_second: 50.0,
-            error_message: None,
-        },
+        &perf_sync_run_outcome(
+            &account.account_id,
+            PerfSyncRunParams {
+                comparability_key: "small",
+                started_at_epoch_s: 95,
+                finished_at_epoch_s: 100,
+                messages_listed: 25,
+                messages_upserted: 25,
+                messages_deleted: 0,
+                labels_synced: 3,
+                pipeline_staged_message_count: 25,
+                estimated_quota_units_reserved: 100,
+                duration_ms: 500,
+                pages_per_second: 2.0,
+                messages_per_second: 50.0,
+                cursor_history_id: Some(String::from("100")),
+            },
+        ),
     )
     .unwrap();
 
@@ -314,7 +183,7 @@ async fn sync_perf_explain_suppresses_drift_for_tiny_incremental_workloads() {
     let temp_dir = TempDir::new().unwrap();
     let mock_server = MockServer::start().await;
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
+    blocking_seed(&config_report, seed_credentials).await;
     store::init(&config_report).unwrap();
     let account = accounts::upsert_active(
         &config_report.config.store.database_path,
@@ -332,162 +201,56 @@ async fn sync_perf_explain_suppresses_drift_for_tiny_incremental_workloads() {
     let sync_state = store::mailbox::upsert_sync_state(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
-        &store::mailbox::SyncStateUpdate {
-            account_id: account.account_id.clone(),
-            cursor_history_id: Some(String::from("100")),
-            bootstrap_query: String::from("newer_than:90d"),
-            last_sync_mode: store::mailbox::SyncMode::Incremental,
-            last_sync_status: store::mailbox::SyncStatus::Ok,
-            last_error: None,
-            last_sync_epoch_s: 100,
-            last_full_sync_success_epoch_s: Some(90),
-            last_incremental_sync_success_epoch_s: Some(100),
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
-            pipeline_staged_message_count: 0,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-        },
+        &incremental_ok_sync_state(&account.account_id),
     )
     .unwrap();
+    let aid = account.account_id.as_str();
     let (_, baseline_history, _) = store::mailbox::persist_successful_sync_outcome(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         &sync_state,
-        &store::mailbox::SyncRunOutcomeInput {
-            account_id: account.account_id.clone(),
-            sync_mode: store::mailbox::SyncMode::Incremental,
-            status: store::mailbox::SyncStatus::Ok,
-            comparability_kind: store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier,
-            comparability_key: String::from("tiny"),
-            startup_seed_run_id: None,
-            started_at_epoch_s: 95,
-            finished_at_epoch_s: 100,
-            bootstrap_query: String::from("newer_than:90d"),
-            cursor_history_id: Some(String::from("100")),
-            fallback_from_history: false,
-            resumed_from_checkpoint: false,
-            pages_fetched: 1,
-            messages_listed: 16,
-            messages_upserted: 16,
-            messages_deleted: 0,
-            labels_synced: 3,
-            checkpoint_reused_pages: 0,
-            checkpoint_reused_messages_upserted: 0,
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
-            pipeline_staged_message_count: 16,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-            adaptive_pacing_enabled: true,
-            quota_units_budget_per_minute: 12_000,
-            message_fetch_concurrency: 4,
-            quota_units_cap_per_minute: 12_000,
-            message_fetch_concurrency_cap: 4,
-            starting_quota_units_per_minute: 12_000,
-            starting_message_fetch_concurrency: 4,
-            effective_quota_units_per_minute: 12_000,
-            effective_message_fetch_concurrency: 4,
-            adaptive_downshift_count: 0,
-            estimated_quota_units_reserved: 64,
-            http_attempt_count: 1,
-            retry_count: 0,
-            quota_pressure_retry_count: 0,
-            concurrency_pressure_retry_count: 0,
-            backend_retry_count: 0,
-            throttle_wait_count: 0,
-            throttle_wait_ms: 0,
-            retry_after_wait_ms: 0,
-            duration_ms: 400,
-            pages_per_second: 2.5,
-            messages_per_second: 40.0,
-            error_message: None,
-        },
+        &perf_sync_run_outcome(
+            aid,
+            PerfSyncRunParams {
+                comparability_key: "tiny",
+                started_at_epoch_s: 95,
+                finished_at_epoch_s: 100,
+                messages_listed: 16,
+                messages_upserted: 16,
+                messages_deleted: 0,
+                labels_synced: 3,
+                pipeline_staged_message_count: 16,
+                estimated_quota_units_reserved: 64,
+                duration_ms: 400,
+                pages_per_second: 2.5,
+                messages_per_second: 40.0,
+                cursor_history_id: Some(String::from("100")),
+            },
+        ),
     )
     .unwrap();
     let (_, latest_history, _) = store::mailbox::persist_successful_sync_outcome(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
         &sync_state,
-        &store::mailbox::SyncRunOutcomeInput {
-            account_id: account.account_id.clone(),
-            sync_mode: store::mailbox::SyncMode::Incremental,
-            status: store::mailbox::SyncStatus::Ok,
-            comparability_kind: store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier,
-            comparability_key: String::from("tiny"),
-            startup_seed_run_id: None,
-            started_at_epoch_s: 101,
-            finished_at_epoch_s: 103,
-            bootstrap_query: String::from("newer_than:90d"),
-            cursor_history_id: Some(String::from("101")),
-            fallback_from_history: false,
-            resumed_from_checkpoint: false,
-            pages_fetched: 1,
-            messages_listed: 2,
-            messages_upserted: 2,
-            messages_deleted: 0,
-            labels_synced: 1,
-            checkpoint_reused_pages: 0,
-            checkpoint_reused_messages_upserted: 0,
-            pipeline_enabled: false,
-            pipeline_list_queue_high_water: 0,
-            pipeline_write_queue_high_water: 0,
-            pipeline_write_batch_count: 0,
-            pipeline_writer_wait_ms: 0,
-            pipeline_fetch_batch_count: 0,
-            pipeline_fetch_batch_avg_ms: 0,
-            pipeline_fetch_batch_max_ms: 0,
-            pipeline_writer_tx_count: 0,
-            pipeline_writer_tx_avg_ms: 0,
-            pipeline_writer_tx_max_ms: 0,
-            pipeline_reorder_buffer_high_water: 0,
-            pipeline_staged_message_count: 2,
-            pipeline_staged_delete_count: 0,
-            pipeline_staged_attachment_count: 0,
-            adaptive_pacing_enabled: true,
-            quota_units_budget_per_minute: 12_000,
-            message_fetch_concurrency: 4,
-            quota_units_cap_per_minute: 12_000,
-            message_fetch_concurrency_cap: 4,
-            starting_quota_units_per_minute: 12_000,
-            starting_message_fetch_concurrency: 4,
-            effective_quota_units_per_minute: 12_000,
-            effective_message_fetch_concurrency: 4,
-            adaptive_downshift_count: 0,
-            estimated_quota_units_reserved: 10,
-            http_attempt_count: 1,
-            retry_count: 0,
-            quota_pressure_retry_count: 0,
-            concurrency_pressure_retry_count: 0,
-            backend_retry_count: 0,
-            throttle_wait_count: 0,
-            throttle_wait_ms: 0,
-            retry_after_wait_ms: 0,
-            duration_ms: 500,
-            pages_per_second: 2.0,
-            messages_per_second: 4.0,
-            error_message: None,
-        },
+        &perf_sync_run_outcome(
+            aid,
+            PerfSyncRunParams {
+                comparability_key: "tiny",
+                started_at_epoch_s: 101,
+                finished_at_epoch_s: 103,
+                messages_listed: 2,
+                messages_upserted: 2,
+                messages_deleted: 0,
+                labels_synced: 1,
+                pipeline_staged_message_count: 2,
+                estimated_quota_units_reserved: 10,
+                duration_ms: 500,
+                pages_per_second: 2.0,
+                messages_per_second: 4.0,
+                cursor_history_id: Some(String::from("101")),
+            },
+        ),
     )
     .unwrap();
 
@@ -518,8 +281,11 @@ async fn full_sync_failure_preserves_existing_mailbox_cache() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox(&config_report, "250", "cached-1", "Existing cached message");
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Existing cached message");
+    })
+    .await;
 
     let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -605,7 +371,7 @@ async fn cursorless_failed_bootstrap_retries_with_full_sync() {
 
     let temp_dir = TempDir::new().unwrap();
     let failing_config = config_report_for(&temp_dir, &failing_server.uri());
-    seed_credentials(&failing_config);
+    blocking_seed(&failing_config, seed_credentials).await;
 
     let first_error = sync_run(&failing_config, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -686,13 +452,11 @@ async fn stale_history_failure_clears_cursor_before_retrying_full_sync() {
 
     let temp_dir = TempDir::new().unwrap();
     let failing_config = config_report_for(&temp_dir, &failing_server.uri());
-    seed_credentials(&failing_config);
-    seed_existing_mailbox(
-        &failing_config,
-        "250",
-        "cached-1",
-        "Existing cached message",
-    );
+    blocking_seed(&failing_config, seed_credentials).await;
+    blocking_seed(&failing_config, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Existing cached message");
+    })
+    .await;
 
     let first_error = sync_run(&failing_config, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -782,14 +546,17 @@ async fn stale_history_retry_keeps_persisted_bootstrap_query() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &stale_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox_with_bootstrap_query(
-        &config_report,
-        "250",
-        "cached-1",
-        "Existing cached message",
-        "newer_than:7d",
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox_with_bootstrap_query(
+            c,
+            "250",
+            "cached-1",
+            "Existing cached message",
+            "newer_than:7d",
+        );
+    })
+    .await;
 
     let report = sync_run(&config_report, false, 90).await.unwrap();
 
@@ -829,14 +596,17 @@ async fn forced_full_sync_uses_requested_bootstrap_query() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox_with_bootstrap_query(
-        &config_report,
-        "250",
-        "cached-1",
-        "Existing cached message",
-        "newer_than:7d",
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox_with_bootstrap_query(
+            c,
+            "250",
+            "cached-1",
+            "Existing cached message",
+            "newer_than:7d",
+        );
+    })
+    .await;
 
     let report = sync_run(&config_report, true, 90).await.unwrap();
 
@@ -903,14 +673,17 @@ async fn label_refresh_failure_marks_existing_sync_state_as_failed() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox_with_bootstrap_query(
-        &config_report,
-        "250",
-        "cached-1",
-        "Existing cached message",
-        "newer_than:7d",
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox_with_bootstrap_query(
+            c,
+            "250",
+            "cached-1",
+            "Existing cached message",
+            "newer_than:7d",
+        );
+    })
+    .await;
 
     let error = sync_run(&config_report, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -968,29 +741,33 @@ async fn full_sync_failure_keeps_cached_labels_until_mailbox_changes_commit() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox_with_custom_labels(
-        &config_report,
-        "250",
-        "cached-1",
-        "Existing cached message",
-        "newer_than:7d",
-        SeededMailboxLabels {
-            labels: vec![crate::gmail::GmailLabel {
-                id: String::from("Label_1"),
-                name: String::from("Project/Old"),
-                label_type: String::from("user"),
-                message_list_visibility: None,
-                label_list_visibility: None,
-                messages_total: None,
-                messages_unread: None,
-                threads_total: None,
-                threads_unread: None,
-            }],
-            label_ids: vec![String::from("Label_1")],
-            label_names_text: String::from("Project/Old"),
-        },
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    let seeded_labels = SeededMailboxLabels {
+        labels: vec![crate::gmail::GmailLabel {
+            id: String::from("Label_1"),
+            name: String::from("Project/Old"),
+            label_type: String::from("user"),
+            message_list_visibility: None,
+            label_list_visibility: None,
+            messages_total: None,
+            messages_unread: None,
+            threads_total: None,
+            threads_unread: None,
+        }],
+        label_ids: vec![String::from("Label_1")],
+        label_names_text: String::from("Project/Old"),
+    };
+    blocking_seed(&config_report, move |c| {
+        seed_existing_mailbox_with_custom_labels(
+            c,
+            "250",
+            "cached-1",
+            "Existing cached message",
+            "newer_than:7d",
+            seeded_labels,
+        );
+    })
+    .await;
 
     let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1060,8 +837,11 @@ async fn full_sync_keeps_the_newest_history_cursor_across_pages() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox(&config_report, "250", "cached-1", "Stale cached message");
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Stale cached message");
+    })
+    .await;
 
     let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1137,8 +917,11 @@ async fn full_sync_failure_after_staging_a_page_preserves_existing_mailbox_cache
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox(&config_report, "250", "cached-1", "Existing cached message");
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Existing cached message");
+    })
+    .await;
 
     let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1231,7 +1014,7 @@ async fn full_sync_resume_reuses_saved_page_token_after_midstream_failure() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
+    blocking_seed(&config_report, seed_credentials).await;
 
     let error = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1293,24 +1076,29 @@ async fn full_sync_ready_to_finalize_checkpoint_skips_relisting_pages() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_full_sync_checkpoint(
-        &config_report,
-        FullSyncCheckpointSeed {
-            bootstrap_query: &bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS),
-            status: store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize,
-            next_page_token: None,
-            pages_fetched: 1,
-            messages_listed: 1,
-            messages_upserted: 1,
-            staged_messages: vec![seeded_mailbox_message(
-                "gmail:operator@example.com",
-                "m-ready",
-                "950",
-                "Checkpoint finalize subject",
-            )],
-        },
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    let bootstrap_q = bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS);
+    let staged = vec![seeded_mailbox_message(
+        "gmail:operator@example.com",
+        "m-ready",
+        "950",
+        "Checkpoint finalize subject",
+    )];
+    blocking_seed(&config_report, move |c| {
+        seed_full_sync_checkpoint(
+            c,
+            FullSyncCheckpointSeed {
+                bootstrap_query: bootstrap_q.as_str(),
+                status: store::mailbox::FullSyncCheckpointStatus::ReadyToFinalize,
+                next_page_token: None,
+                pages_fetched: 1,
+                messages_listed: 1,
+                messages_upserted: 1,
+                staged_messages: staged,
+            },
+        );
+    })
+    .await;
 
     let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1365,24 +1153,29 @@ async fn full_sync_invalid_resume_page_token_restarts_from_scratch() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_full_sync_checkpoint(
-        &config_report,
-        FullSyncCheckpointSeed {
-            bootstrap_query: &bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS),
-            status: store::mailbox::FullSyncCheckpointStatus::Paging,
-            next_page_token: Some("expired-page"),
-            pages_fetched: 1,
-            messages_listed: 1,
-            messages_upserted: 1,
-            staged_messages: vec![seeded_mailbox_message(
-                "gmail:operator@example.com",
-                "m-stale-stage",
-                "970",
-                "Stale staged message",
-            )],
-        },
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    let bootstrap_q = bootstrap_query(DEFAULT_BOOTSTRAP_RECENT_DAYS);
+    let staged = vec![seeded_mailbox_message(
+        "gmail:operator@example.com",
+        "m-stale-stage",
+        "970",
+        "Stale staged message",
+    )];
+    blocking_seed(&config_report, move |c| {
+        seed_full_sync_checkpoint(
+            c,
+            FullSyncCheckpointSeed {
+                bootstrap_query: bootstrap_q.as_str(),
+                status: store::mailbox::FullSyncCheckpointStatus::Paging,
+                next_page_token: Some("expired-page"),
+                pages_fetched: 1,
+                messages_listed: 1,
+                messages_upserted: 1,
+                staged_messages: staged,
+            },
+        );
+    })
+    .await;
 
     let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1451,24 +1244,28 @@ async fn full_sync_checkpoint_query_mismatch_restarts_from_first_page() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_full_sync_checkpoint(
-        &config_report,
-        FullSyncCheckpointSeed {
-            bootstrap_query: "in:anywhere newer_than:7d",
-            status: store::mailbox::FullSyncCheckpointStatus::Paging,
-            next_page_token: Some("page-9"),
-            pages_fetched: 1,
-            messages_listed: 1,
-            messages_upserted: 1,
-            staged_messages: vec![seeded_mailbox_message(
-                "gmail:operator@example.com",
-                "m-old-query",
-                "970",
-                "Old query staged message",
-            )],
-        },
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    let staged = vec![seeded_mailbox_message(
+        "gmail:operator@example.com",
+        "m-old-query",
+        "970",
+        "Old query staged message",
+    )];
+    blocking_seed(&config_report, move |c| {
+        seed_full_sync_checkpoint(
+            c,
+            FullSyncCheckpointSeed {
+                bootstrap_query: "in:anywhere newer_than:7d",
+                status: store::mailbox::FullSyncCheckpointStatus::Paging,
+                next_page_token: Some("page-9"),
+                pages_fetched: 1,
+                messages_listed: 1,
+                messages_upserted: 1,
+                staged_messages: staged,
+            },
+        );
+    })
+    .await;
 
     let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1518,13 +1315,11 @@ async fn incremental_sync_skips_messages_deleted_on_later_history_pages() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox(
-        &config_report,
-        "250",
-        "cached-1",
-        "Message removed remotely",
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Message removed remotely");
+    })
+    .await;
 
     let report = sync_run(&config_report, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1579,7 +1374,7 @@ async fn full_sync_skips_messages_that_disappear_before_metadata_fetch() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
+    blocking_seed(&config_report, seed_credentials).await;
 
     let report = sync_run(&config_report, true, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1618,8 +1413,11 @@ async fn incremental_sync_deletes_messages_that_404_during_metadata_fetch() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox(&config_report, "250", "cached-1", "Now missing in Gmail");
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Now missing in Gmail");
+    })
+    .await;
 
     let report = sync_run(&config_report, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await
@@ -1655,14 +1453,17 @@ async fn incremental_sync_keeps_existing_bootstrap_query() {
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox_with_bootstrap_query(
-        &config_report,
-        "250",
-        "cached-1",
-        "Existing cached message",
-        "newer_than:7d",
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox_with_bootstrap_query(
+            c,
+            "250",
+            "cached-1",
+            "Existing cached message",
+            "newer_than:7d",
+        );
+    })
+    .await;
 
     let report = sync_run(&config_report, false, 90).await.unwrap();
 
@@ -1724,13 +1525,11 @@ async fn incremental_sync_failure_preserves_deleted_messages_until_changes_commi
 
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server.uri());
-    seed_credentials(&config_report);
-    seed_existing_mailbox(
-        &config_report,
-        "250",
-        "cached-1",
-        "Should survive failed sync",
-    );
+    blocking_seed(&config_report, seed_credentials).await;
+    blocking_seed(&config_report, |c| {
+        seed_existing_mailbox(c, "250", "cached-1", "Should survive failed sync");
+    })
+    .await;
 
     let error = sync_run(&config_report, false, DEFAULT_BOOTSTRAP_RECENT_DAYS)
         .await

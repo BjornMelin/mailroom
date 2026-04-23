@@ -39,6 +39,125 @@ fn inbox_seeded_labels() -> SeededMailboxLabels {
     }
 }
 
+/// Run filesystem/DB setup on a blocking thread (keeps the Tokio worker pool unblocked).
+async fn blocking_seed(config: &ConfigReport, work: impl FnOnce(&ConfigReport) + Send + 'static) {
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || work(&config))
+        .await
+        .expect("blocking seed");
+}
+
+/// Shared incremental-OK `SyncStateUpdate` for perf + history tests (no pipeline).
+fn incremental_ok_sync_state(account_id: &str) -> store::mailbox::SyncStateUpdate {
+    store::mailbox::SyncStateUpdate {
+        account_id: String::from(account_id),
+        cursor_history_id: Some(String::from("100")),
+        bootstrap_query: String::from("newer_than:90d"),
+        last_sync_mode: store::mailbox::SyncMode::Incremental,
+        last_sync_status: store::mailbox::SyncStatus::Ok,
+        last_error: None,
+        last_sync_epoch_s: 100,
+        last_full_sync_success_epoch_s: Some(90),
+        last_incremental_sync_success_epoch_s: Some(100),
+        pipeline_enabled: false,
+        pipeline_list_queue_high_water: 0,
+        pipeline_write_queue_high_water: 0,
+        pipeline_write_batch_count: 0,
+        pipeline_writer_wait_ms: 0,
+        pipeline_fetch_batch_count: 0,
+        pipeline_fetch_batch_avg_ms: 0,
+        pipeline_fetch_batch_max_ms: 0,
+        pipeline_writer_tx_count: 0,
+        pipeline_writer_tx_avg_ms: 0,
+        pipeline_writer_tx_max_ms: 0,
+        pipeline_reorder_buffer_high_water: 0,
+        pipeline_staged_message_count: 0,
+        pipeline_staged_delete_count: 0,
+        pipeline_staged_attachment_count: 0,
+    }
+}
+
+struct PerfSyncRunParams {
+    comparability_key: &'static str,
+    started_at_epoch_s: i64,
+    finished_at_epoch_s: i64,
+    messages_listed: i64,
+    messages_upserted: i64,
+    messages_deleted: i64,
+    labels_synced: i64,
+    pipeline_staged_message_count: i64,
+    estimated_quota_units_reserved: i64,
+    duration_ms: i64,
+    pages_per_second: f64,
+    messages_per_second: f64,
+    cursor_history_id: Option<String>,
+}
+
+fn perf_sync_run_outcome(
+    account_id: &str,
+    p: PerfSyncRunParams,
+) -> store::mailbox::SyncRunOutcomeInput {
+    store::mailbox::SyncRunOutcomeInput {
+        account_id: String::from(account_id),
+        sync_mode: store::mailbox::SyncMode::Incremental,
+        status: store::mailbox::SyncStatus::Ok,
+        comparability_kind: store::mailbox::SyncRunComparabilityKind::IncrementalWorkloadTier,
+        comparability_key: String::from(p.comparability_key),
+        startup_seed_run_id: None,
+        started_at_epoch_s: p.started_at_epoch_s,
+        finished_at_epoch_s: p.finished_at_epoch_s,
+        bootstrap_query: String::from("newer_than:90d"),
+        cursor_history_id: p.cursor_history_id,
+        fallback_from_history: false,
+        resumed_from_checkpoint: false,
+        pages_fetched: 1,
+        messages_listed: p.messages_listed,
+        messages_upserted: p.messages_upserted,
+        messages_deleted: p.messages_deleted,
+        labels_synced: p.labels_synced,
+        checkpoint_reused_pages: 0,
+        checkpoint_reused_messages_upserted: 0,
+        pipeline_enabled: false,
+        pipeline_list_queue_high_water: 0,
+        pipeline_write_queue_high_water: 0,
+        pipeline_write_batch_count: 0,
+        pipeline_writer_wait_ms: 0,
+        pipeline_fetch_batch_count: 0,
+        pipeline_fetch_batch_avg_ms: 0,
+        pipeline_fetch_batch_max_ms: 0,
+        pipeline_writer_tx_count: 0,
+        pipeline_writer_tx_avg_ms: 0,
+        pipeline_writer_tx_max_ms: 0,
+        pipeline_reorder_buffer_high_water: 0,
+        pipeline_staged_message_count: p.pipeline_staged_message_count,
+        pipeline_staged_delete_count: 0,
+        pipeline_staged_attachment_count: 0,
+        adaptive_pacing_enabled: true,
+        quota_units_budget_per_minute: 12_000,
+        message_fetch_concurrency: 4,
+        quota_units_cap_per_minute: 12_000,
+        message_fetch_concurrency_cap: 4,
+        starting_quota_units_per_minute: 12_000,
+        starting_message_fetch_concurrency: 4,
+        effective_quota_units_per_minute: 12_000,
+        effective_message_fetch_concurrency: 4,
+        adaptive_downshift_count: 0,
+        estimated_quota_units_reserved: p.estimated_quota_units_reserved,
+        http_attempt_count: 1,
+        retry_count: 0,
+        quota_pressure_retry_count: 0,
+        concurrency_pressure_retry_count: 0,
+        backend_retry_count: 0,
+        throttle_wait_count: 0,
+        throttle_wait_ms: 0,
+        retry_after_wait_ms: 0,
+        duration_ms: p.duration_ms,
+        pages_per_second: p.pages_per_second,
+        messages_per_second: p.messages_per_second,
+        error_message: None,
+    }
+}
+
 #[path = "search.rs"]
 mod search_orchestration;
 mod sync;
