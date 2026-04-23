@@ -1,4 +1,4 @@
-use super::incremental_sync::success_sync_state_update;
+use super::incremental_sync::success_sync_state_update_with_pipeline;
 use super::*;
 
 pub(super) fn full_sync_checkpoint_is_consistent(
@@ -56,7 +56,7 @@ pub(super) async fn finalize_full_sync_report(
         .writer
         .finalize_full_sync_from_stage(
             now_epoch_s,
-            success_sync_state_update(
+            success_sync_state_update_with_pipeline(
                 context.account,
                 request.bootstrap_query,
                 &finalize_input,
@@ -138,14 +138,16 @@ pub(super) async fn run_full_sync_processor(
 
     while let Some(page) = list_rx.recv().await {
         stats.on_list_dequeued();
-        let current_fetch_concurrency = fetch_concurrency.load(Ordering::Acquire);
-        while join_set.len() >= page_processing_concurrency_for_fetch(current_fetch_concurrency) {
+        while join_set.len()
+            >= page_processing_concurrency_for_fetch(fetch_concurrency.load(Ordering::Acquire))
+        {
             let result = join_set
                 .join_next()
                 .await
                 .context("full sync processor task set ended unexpectedly")?;
             result??;
         }
+        let current_fetch_concurrency = fetch_concurrency.load(Ordering::Acquire);
         let write_tx = write_tx.clone();
         let stats = stats.clone();
         let gmail_client = gmail_client.clone();
@@ -332,14 +334,16 @@ pub(super) async fn run_incremental_sync_processor(
 
     while let Some(page) = list_rx.recv().await {
         stats.on_list_dequeued();
-        let current_fetch_concurrency = fetch_concurrency.load(Ordering::Acquire);
-        while join_set.len() >= page_processing_concurrency_for_fetch(current_fetch_concurrency) {
+        while join_set.len()
+            >= page_processing_concurrency_for_fetch(fetch_concurrency.load(Ordering::Acquire))
+        {
             let result = join_set
                 .join_next()
                 .await
                 .context("incremental processor task set ended unexpectedly")?;
             result??;
         }
+        let current_fetch_concurrency = fetch_concurrency.load(Ordering::Acquire);
         let write_tx = write_tx.clone();
         let stats = stats.clone();
         let gmail_client = gmail_client.clone();

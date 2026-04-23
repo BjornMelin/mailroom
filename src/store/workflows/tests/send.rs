@@ -2,12 +2,8 @@ use super::*;
 
 #[test]
 fn mark_sent_reports_missing_workflow_for_unknown_thread() {
-    let repo_root = unique_temp_dir("mailroom-workflow-mark-sent-missing");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-mark-sent-missing");
 
     let error = mark_sent(
         &config_report.config.store.database_path,
@@ -29,12 +25,7 @@ fn mark_sent_reports_missing_workflow_for_unknown_thread() {
 
 #[test]
 fn ready_to_send_requires_current_draft_revision() {
-    let repo_root = unique_temp_dir("mailroom-workflow-ready-guard");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) = bootstrap_test_env("mailroom-workflow-ready-guard");
 
     set_triage_state(
         &config_report.config.store.database_path,
@@ -71,12 +62,8 @@ fn ready_to_send_requires_current_draft_revision() {
 
 #[test]
 fn ready_to_send_requires_synced_gmail_draft() {
-    let repo_root = unique_temp_dir("mailroom-workflow-ready-remote-guard");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-ready-remote-guard");
 
     seed_drafting_workflow(
         &config_report,
@@ -105,12 +92,8 @@ fn ready_to_send_requires_synced_gmail_draft() {
 
 #[test]
 fn ready_to_send_allows_existing_synced_draft() {
-    let repo_root = unique_temp_dir("mailroom-workflow-ready-allowed");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-ready-allowed");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-ready");
     set_remote_draft_state(
@@ -147,12 +130,7 @@ fn ready_to_send_allows_existing_synced_draft() {
 
 #[test]
 fn mark_sent_retires_local_and_remote_draft_state() {
-    let repo_root = unique_temp_dir("mailroom-workflow-sent");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) = bootstrap_test_env("mailroom-workflow-sent");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-sent");
     set_remote_draft_state(

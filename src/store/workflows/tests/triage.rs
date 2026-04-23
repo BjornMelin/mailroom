@@ -2,12 +2,7 @@ use super::*;
 
 #[test]
 fn set_triage_state_creates_workflow_and_event_log() {
-    let repo_root = unique_temp_dir("mailroom-workflow-triage");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) = bootstrap_test_env("mailroom-workflow-triage");
 
     let workflow = set_triage_state(
         &config_report.config.store.database_path,
@@ -71,12 +66,8 @@ fn set_triage_state_creates_workflow_and_event_log() {
 
 #[test]
 fn set_triage_state_preserves_existing_stage() {
-    let repo_root = unique_temp_dir("mailroom-workflow-triage-preserve-stage");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-triage-preserve-stage");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-1");
     set_remote_draft_state(
@@ -148,12 +139,8 @@ fn set_triage_state_preserves_existing_stage() {
 
 #[test]
 fn set_triage_state_preserves_newer_existing_snapshot_metadata() {
-    let repo_root = unique_temp_dir("mailroom-workflow-triage-preserve-snapshot");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-triage-preserve-snapshot");
 
     set_triage_state(
         &config_report.config.store.database_path,
@@ -206,12 +193,8 @@ fn set_triage_state_preserves_newer_existing_snapshot_metadata() {
 
 #[test]
 fn set_triage_state_preserves_existing_snapshot_metadata_on_equal_timestamp() {
-    let repo_root = unique_temp_dir("mailroom-workflow-triage-equal-snapshot");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-triage-equal-snapshot");
 
     set_triage_state(
         &config_report.config.store.database_path,

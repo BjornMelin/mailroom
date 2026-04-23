@@ -273,7 +273,7 @@ pub(super) fn stage_full_sync_page_chunk_and_maybe_update_checkpoint_with_connec
         let update = checkpoint_update.ok_or_else(|| {
             anyhow!("full sync page completion requires a checkpoint update payload")
         })?;
-        ensure_checkpoint_matches_account(account_id, update)?;
+        validate_checkpoint_fields(account_id, update)?;
         Some(update)
     } else {
         ensure!(

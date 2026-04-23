@@ -104,7 +104,7 @@ pub(super) async fn run_incremental_sync(
         };
         let sync_state = context
             .store_handle
-            .upsert_sync_state(success_sync_state_update(
+            .upsert_sync_state(success_sync_state_update_with_pipeline(
                 context.account,
                 bootstrap_query,
                 &finalize_input,
@@ -358,15 +358,6 @@ pub(super) async fn abort_pipeline_tasks(
         }
         let _ = processor_handle.await;
     }
-}
-
-pub(super) fn success_sync_state_update(
-    account: &AccountRecord,
-    bootstrap_query: &str,
-    input: &FinalizeSyncInput,
-    now_epoch_s: i64,
-) -> store::mailbox::SyncStateUpdate {
-    success_sync_state_update_with_pipeline(account, bootstrap_query, input, now_epoch_s)
 }
 
 pub(super) fn success_sync_state_update_with_pipeline(

@@ -35,6 +35,22 @@ fn seed_account(config_report: &crate::config::ConfigReport) -> accounts::Accoun
     .unwrap()
 }
 
+fn bootstrap_test_env(
+    prefix: &str,
+) -> (
+    TempDir,
+    crate::config::ConfigReport,
+    accounts::AccountRecord,
+) {
+    let repo_root = unique_temp_dir(prefix);
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+    (repo_root, config_report, account)
+}
+
 fn seed_drafting_workflow(
     config_report: &crate::config::ConfigReport,
     account_id: &str,

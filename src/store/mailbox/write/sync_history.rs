@@ -144,7 +144,7 @@ pub(super) fn finalize_incremental_from_stage_with_connection(
     Ok((record, deleted))
 }
 
-pub(super) fn ensure_checkpoint_matches_account(
+pub(super) fn validate_checkpoint_fields(
     account_id: &str,
     update: &FullSyncCheckpointUpdate,
 ) -> Result<()> {

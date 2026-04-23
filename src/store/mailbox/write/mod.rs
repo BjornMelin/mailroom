@@ -715,7 +715,7 @@ fn prepare_full_sync_checkpoint_with_connection(
     labels: &[GmailLabel],
     update: &FullSyncCheckpointUpdate,
 ) -> Result<FullSyncCheckpointRecord> {
-    ensure_checkpoint_matches_account(account_id, update)?;
+    validate_checkpoint_fields(account_id, update)?;
 
     let transaction = connection.transaction()?;
     clear_full_sync_checkpoint_in_transaction(&transaction, account_id)?;
@@ -732,7 +732,7 @@ fn update_full_sync_checkpoint_labels_with_connection(
     labels: &[GmailLabel],
     update: &FullSyncCheckpointUpdate,
 ) -> Result<FullSyncCheckpointRecord> {
-    ensure_checkpoint_matches_account(account_id, update)?;
+    validate_checkpoint_fields(account_id, update)?;
 
     let transaction = connection.transaction()?;
     cleanup_incomplete_full_sync_stage_pages_in_transaction(

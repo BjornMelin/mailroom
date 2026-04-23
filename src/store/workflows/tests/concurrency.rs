@@ -2,12 +2,8 @@ use super::*;
 
 #[test]
 fn persist_workflow_rejects_stale_updates() {
-    let repo_root = unique_temp_dir("mailroom-workflow-write-conflict");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-write-conflict");
 
     set_triage_state(
         &config_report.config.store.database_path,
@@ -67,12 +63,8 @@ fn persist_workflow_rejects_stale_updates() {
 
 #[test]
 fn set_remote_draft_state_rejects_stale_caller_version() {
-    let repo_root = unique_temp_dir("mailroom-workflow-remote-draft-version-conflict");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-remote-draft-version-conflict");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-1");
     let stale_workflow = get_workflow_detail(

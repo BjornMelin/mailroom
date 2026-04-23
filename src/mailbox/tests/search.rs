@@ -120,7 +120,12 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
-    seed_schema_v2_store_with_active_account(&config_report);
+    let seed_config_report = config_report.clone();
+    tokio::task::spawn_blocking(move || {
+        seed_schema_v2_store_with_active_account(&seed_config_report)
+    })
+    .await
+    .unwrap();
 
     let report = search(
         &config_report,

@@ -301,7 +301,18 @@ pub(super) fn reindex_message_search_for_account(
              gm.from_header,
              gm.recipient_headers,
              gm.snippet,
-             COALESCE(group_concat(gl.name, ' '), '')
+             COALESCE((
+                 SELECT group_concat(name, ' ')
+                 FROM (
+                     SELECT gl.name AS name
+                     FROM gmail_message_labels gml
+                     INNER JOIN gmail_labels gl
+                       ON gl.account_id = gm.account_id
+                      AND gl.label_id = gml.label_id
+                     WHERE gml.message_rowid = gm.message_rowid
+                     ORDER BY gl.name ASC
+                 )
+             ), '')
          FROM gmail_messages gm
          LEFT JOIN gmail_message_labels gml
            ON gml.message_rowid = gm.message_rowid

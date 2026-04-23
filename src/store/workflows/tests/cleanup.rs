@@ -2,12 +2,8 @@ use super::*;
 
 #[test]
 fn apply_cleanup_reports_missing_workflow_for_unknown_thread() {
-    let repo_root = unique_temp_dir("mailroom-workflow-apply-cleanup-missing");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-apply-cleanup-missing");
 
     let error = apply_cleanup(
         &config_report.config.store.database_path,
@@ -30,12 +26,7 @@ fn apply_cleanup_reports_missing_workflow_for_unknown_thread() {
 
 #[test]
 fn workflow_listing_orders_stage_then_bucket_and_cleanup_closes_flow() {
-    let repo_root = unique_temp_dir("mailroom-workflow-listing");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) = bootstrap_test_env("mailroom-workflow-listing");
 
     set_triage_state(
         &config_report.config.store.database_path,
@@ -153,12 +144,7 @@ fn workflow_listing_orders_stage_then_bucket_and_cleanup_closes_flow() {
 
 #[test]
 fn cleanup_marks_closed_while_preserving_draft_state_for_reconciliation() {
-    let repo_root = unique_temp_dir("mailroom-workflow-cleanup");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) = bootstrap_test_env("mailroom-workflow-cleanup");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-cleanup");
     set_remote_draft_state(

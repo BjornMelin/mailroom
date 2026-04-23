@@ -57,7 +57,10 @@ fn mailbox_message(
         account_id: account_id.to_owned(),
         message_id: message_id.to_owned(),
         thread_id: format!("thread-{message_id}"),
-        history_id: format!("history-{message_id}"),
+        history_id: format!(
+            "{}",
+            1_700_000_000_000u64 + message_id.bytes().map(u64::from).sum::<u64>()
+        ),
         internal_date_epoch_ms: 1_700_000_000_000,
         snippet: format!("snippet for {subject}"),
         subject: subject.to_owned(),
@@ -95,7 +98,7 @@ fn mailbox_message(
 fn full_sync_state(account_id: &str, epoch_s: i64) -> SyncStateUpdate {
     SyncStateUpdate {
         account_id: account_id.to_owned(),
-        cursor_history_id: Some(format!("cursor-{epoch_s}")),
+        cursor_history_id: Some(epoch_s.to_string()),
         bootstrap_query: String::from("newer_than:90d"),
         last_sync_mode: SyncMode::Full,
         last_sync_status: SyncStatus::Ok,
@@ -186,7 +189,7 @@ fn sample_sync_run_outcome(input: SampleSyncRunOutcome) -> SyncRunOutcomeInput {
         finished_at_epoch_s: input.finished_at_epoch_s,
         startup_seed_run_id: None,
         bootstrap_query: String::from("newer_than:90d"),
-        cursor_history_id: Some(String::from("cursor-1")),
+        cursor_history_id: Some(String::from("1")),
         fallback_from_history: false,
         resumed_from_checkpoint: false,
         pages_fetched: 1,

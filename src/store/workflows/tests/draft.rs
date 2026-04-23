@@ -1,13 +1,21 @@
 use super::*;
 
+fn workflow_event_payload(
+    detail: &crate::store::workflows::WorkflowDetail,
+    event_kind: &str,
+) -> serde_json::Value {
+    let event = detail
+        .events
+        .iter()
+        .find(|event| event.event_kind == event_kind)
+        .unwrap();
+    serde_json::from_str(&event.payload_json).unwrap()
+}
+
 #[test]
 fn retire_draft_state_reports_missing_workflow_for_unknown_thread() {
-    let repo_root = unique_temp_dir("mailroom-workflow-retire-draft-missing");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-retire-draft-missing");
 
     let error = retire_draft_state(
         &config_report.config.store.database_path,
@@ -28,12 +36,7 @@ fn retire_draft_state_reports_missing_workflow_for_unknown_thread() {
 
 #[test]
 fn upsert_draft_revision_persists_current_draft_and_attachments() {
-    let repo_root = unique_temp_dir("mailroom-workflow-draft");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (repo_root, config_report, account) = bootstrap_test_env("mailroom-workflow-draft");
 
     set_triage_state(
         &config_report.config.store.database_path,
@@ -156,12 +159,8 @@ fn upsert_draft_revision_persists_current_draft_and_attachments() {
 
 #[test]
 fn closed_stage_promotion_preserves_draft_state_until_remote_retirement() {
-    let repo_root = unique_temp_dir("mailroom-workflow-closed-promotion");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-closed-promotion");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-closed");
     set_remote_draft_state(
@@ -223,12 +222,8 @@ fn closed_stage_promotion_preserves_draft_state_until_remote_retirement() {
 
 #[test]
 fn retire_draft_state_clears_local_and_remote_draft_fields() {
-    let repo_root = unique_temp_dir("mailroom-workflow-retire-draft-state");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-retire-draft-state");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-retire");
     set_remote_draft_state(
@@ -244,6 +239,15 @@ fn retire_draft_state_clears_local_and_remote_draft_fields() {
         },
     )
     .unwrap();
+    let original_detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-retire",
+    )
+    .unwrap()
+    .unwrap();
+    let original_workflow = &original_detail.workflow;
 
     let workflow = retire_draft_state(
         &config_report.config.store.database_path,
@@ -271,22 +275,29 @@ fn retire_draft_state_clears_local_and_remote_draft_fields() {
     )
     .unwrap()
     .unwrap();
-    assert!(
-        detail
-            .events
-            .iter()
-            .any(|event| event.event_kind == "draft_state_retired")
+    let payload = workflow_event_payload(&detail, "draft_state_retired");
+    assert_eq!(
+        payload["previous_draft_revision_id"],
+        serde_json::json!(original_workflow.current_draft_revision_id)
+    );
+    assert_eq!(
+        payload["previous_gmail_draft_id"],
+        serde_json::json!(original_workflow.gmail_draft_id.as_deref())
+    );
+    assert_eq!(
+        payload["previous_gmail_draft_message_id"],
+        serde_json::json!(original_workflow.gmail_draft_message_id.as_deref())
+    );
+    assert_eq!(
+        payload["previous_gmail_draft_thread_id"],
+        serde_json::json!(original_workflow.gmail_draft_thread_id.as_deref())
     );
 }
 
 #[test]
 fn restore_draft_state_with_expected_version_records_restore_event() {
-    let repo_root = unique_temp_dir("mailroom-workflow-restore-draft-state");
-    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
-    paths.ensure_runtime_dirs().unwrap();
-    let config_report = resolve(&paths).unwrap();
-    init(&config_report).unwrap();
-    let account = seed_account(&config_report);
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-restore-draft-state");
 
     seed_drafting_workflow(&config_report, &account.account_id, "thread-restore");
     set_remote_draft_state(
@@ -364,16 +375,55 @@ fn restore_draft_state_with_expected_version_records_restore_event() {
     )
     .unwrap()
     .unwrap();
-    assert!(
-        detail
-            .events
-            .iter()
-            .any(|event| event.event_kind == "draft_state_retired")
+    let retired_payload = workflow_event_payload(&detail, "draft_state_retired");
+    assert_eq!(
+        retired_payload["previous_draft_revision_id"],
+        serde_json::json!(original_detail.workflow.current_draft_revision_id)
     );
-    assert!(
-        detail
-            .events
-            .iter()
-            .any(|event| event.event_kind == "draft_state_restored")
+    assert_eq!(
+        retired_payload["previous_gmail_draft_id"],
+        serde_json::json!(original_detail.workflow.gmail_draft_id.as_deref())
+    );
+    assert_eq!(
+        retired_payload["previous_gmail_draft_message_id"],
+        serde_json::json!(original_detail.workflow.gmail_draft_message_id.as_deref())
+    );
+    assert_eq!(
+        retired_payload["previous_gmail_draft_thread_id"],
+        serde_json::json!(original_detail.workflow.gmail_draft_thread_id.as_deref())
+    );
+
+    let restored_payload = workflow_event_payload(&detail, "draft_state_restored");
+    assert_eq!(
+        restored_payload["previous_draft_revision_id"],
+        serde_json::json!(retired_workflow.current_draft_revision_id)
+    );
+    assert_eq!(
+        restored_payload["previous_gmail_draft_id"],
+        serde_json::json!(retired_workflow.gmail_draft_id.as_deref())
+    );
+    assert_eq!(
+        restored_payload["previous_gmail_draft_message_id"],
+        serde_json::json!(retired_workflow.gmail_draft_message_id.as_deref())
+    );
+    assert_eq!(
+        restored_payload["previous_gmail_draft_thread_id"],
+        serde_json::json!(retired_workflow.gmail_draft_thread_id.as_deref())
+    );
+    assert_eq!(
+        restored_payload["restored_draft_revision_id"],
+        serde_json::json!(original_draft_revision_id)
+    );
+    assert_eq!(
+        restored_payload["restored_gmail_draft_id"],
+        serde_json::json!(Some("gmail-draft-5"))
+    );
+    assert_eq!(
+        restored_payload["restored_gmail_draft_message_id"],
+        serde_json::json!(Some("gmail-message-5"))
+    );
+    assert_eq!(
+        restored_payload["restored_gmail_draft_thread_id"],
+        serde_json::json!(Some("gmail-thread-5"))
     );
 }
