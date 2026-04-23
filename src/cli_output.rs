@@ -221,6 +221,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowServiceError::NoActiveAccount => {
                 return (ErrorCode::AuthRequired, "workflow.account.required");
             }
+            WorkflowServiceError::AuthenticatedAccountMismatch { .. } => {
+                return (ErrorCode::AuthRequired, "workflow.account.mismatch");
+            }
             WorkflowServiceError::ReplyRecipientUndetermined
             | WorkflowServiceError::ReplyDraftWithoutRecipients
             | WorkflowServiceError::DraftWithoutToRecipients
@@ -240,6 +243,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             }
             WorkflowServiceError::BlockingTask { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.blocking_join");
+            }
+            WorkflowServiceError::Time { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.time");
             }
             WorkflowServiceError::LabelCleanupInvariant => {
                 return (ErrorCode::InternalFailure, "workflow.invariant");
@@ -264,6 +270,12 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             WorkflowServiceError::AccountState { .. } => {
                 return (ErrorCode::StorageFailure, "workflow.account_state");
             }
+            WorkflowServiceError::GmailClientInit { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.gmail_client");
+            }
+            WorkflowServiceError::RepoRoot { .. } => {
+                return (ErrorCode::InternalFailure, "workflow.repo_root");
+            }
             WorkflowServiceError::MessageBuild { .. } => {
                 return (ErrorCode::InternalFailure, "workflow.message_build");
             }
@@ -273,8 +285,7 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             | WorkflowServiceError::MailboxRead(_)
             | WorkflowServiceError::ActiveAccountRefresh { .. }
             | WorkflowServiceError::Json(_)
-            | WorkflowServiceError::IntConversion(_)
-            | WorkflowServiceError::Unexpected(_) => {}
+            | WorkflowServiceError::IntConversion(_) => {}
         }
     }
 
@@ -855,6 +866,64 @@ mod tests {
         assert_eq!(value["error"]["code"], json!("storage_failure"));
         assert_eq!(value["error"]["kind"], json!("workflow.draft.reconcile"));
         assert_eq!(exit_code(&report), std::process::ExitCode::from(7));
+    }
+
+    #[test]
+    fn workflow_account_mismatch_maps_to_auth_required_code() {
+        let error = anyhow!(WorkflowServiceError::AuthenticatedAccountMismatch {
+            thread_id: String::from("thread-1"),
+            expected_account_id: String::from("gmail:other@example.com"),
+            actual_account_id: String::from("gmail:operator@example.com"),
+        });
+
+        let report = describe_error(&error, "workflow.cleanup");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("auth_required"));
+        assert_eq!(value["error"]["kind"], json!("workflow.account.mismatch"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(3));
+    }
+
+    #[test]
+    fn workflow_time_error_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::Time {
+            source: anyhow!("system time before unix epoch"),
+        });
+
+        let report = describe_error(&error, "workflow.snooze");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.time"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
+    fn workflow_gmail_client_error_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::GmailClientInit {
+            source: anyhow!("gmail client init failed"),
+        });
+
+        let report = describe_error(&error, "workflow.cleanup");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.gmail_client"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
+    fn workflow_repo_root_error_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::RepoRoot {
+            source: anyhow!("repo root lookup failed"),
+        });
+
+        let report = describe_error(&error, "workflow.draft.attach_remove");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.repo_root"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
     }
 
     #[test]
