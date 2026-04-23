@@ -241,6 +241,22 @@ pub(crate) fn record_attachment_export(
     let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
         .map_err(|source| MailboxWriteError::open_database(database_path, source))?;
     let transaction = connection.transaction()?;
+    let attachment_exists: i64 = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM gmail_message_attachments
+             WHERE account_id = ?1
+               AND attachment_key = ?2
+         )",
+        params![&event.account_id, &event.attachment_key],
+        |row| row.get(0),
+    )?;
+    if attachment_exists == 0 {
+        return Err(MailboxWriteError::AttachmentNotFound {
+            account_id: event.account_id.clone(),
+            attachment_key: event.attachment_key.clone(),
+        });
+    }
     transaction.execute(
         "INSERT INTO attachment_export_events (
              account_id,

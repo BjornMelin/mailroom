@@ -418,6 +418,10 @@ pub(crate) fn upsert_messages(
         .first()
         .map(|message| message.account_id.as_str())
         .unwrap_or("");
+    ensure!(
+        messages.is_empty() || !account_id.is_empty(),
+        "mailbox upsert requires a non-empty account_id when messages are provided"
+    );
     let updated = write_messages(&transaction, account_id, messages, updated_at_epoch_s, None)?;
     transaction.commit()?;
     Ok(updated)

@@ -35,6 +35,8 @@ pub(super) fn cleanup_incomplete_full_sync_stage_pages_in_transaction(
     account_id: &str,
     completed_page_count: i64,
 ) -> Result<()> {
+    // For resumable full syncs, staged pages at or beyond the completed-page checkpoint
+    // are considered in-progress and must be purged with any non-complete pages.
     transaction.execute(
         "DELETE FROM gmail_full_sync_stage_attachments
          WHERE account_id = ?1

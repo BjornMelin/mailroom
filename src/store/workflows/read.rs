@@ -36,10 +36,9 @@ pub(crate) fn get_workflow_detail(
 
     let mut connection = connection::open_read_only_for_diagnostics(database_path, busy_timeout_ms)
         .map_err(|source| WorkflowStoreReadError::open_database(database_path, source))?;
+    // Read workflow, draft, and events from one snapshot to avoid mixed-version details.
     let transaction = connection.transaction()?;
-    let detail = load_workflow_detail(&transaction, account_id, thread_id)?;
-    transaction.commit()?;
-    Ok(detail)
+    load_workflow_detail(&transaction, account_id, thread_id)
 }
 
 pub(crate) fn inspect_workflows(

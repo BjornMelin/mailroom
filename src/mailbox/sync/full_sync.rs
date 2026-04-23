@@ -24,7 +24,11 @@ impl MailboxWriterWorker {
                     writer
                 }
                 Err(error) => {
-                    let _ = ready_tx.send(Err(error));
+                    if let Err(ready_error) = ready_tx.send(Err(error))
+                        && let Err(open_error) = ready_error
+                    {
+                        return Err(open_error);
+                    }
                     return Ok(());
                 }
             };
@@ -274,8 +278,7 @@ pub(super) async fn run_full_sync(
     fallback_from_history: bool,
     failure_telemetry: &mut FullSyncFailureTelemetry,
 ) -> Result<SyncRunReport> {
-    let mut checkpoint =
-        initialize_full_sync_checkpoint(context, bootstrap_query, fallback_from_history).await?;
+    let mut checkpoint = initialize_full_sync_checkpoint(context, bootstrap_query).await?;
     let checkpoint_reused_pages =
         usize::try_from(checkpoint.record.pages_fetched).unwrap_or(usize::MAX);
     let checkpoint_reused_messages_upserted =

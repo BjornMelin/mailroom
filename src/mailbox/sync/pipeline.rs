@@ -138,9 +138,8 @@ pub(super) async fn run_full_sync_processor(
 
     while let Some(page) = list_rx.recv().await {
         stats.on_list_dequeued();
-        while join_set.len()
-            >= page_processing_concurrency_for_fetch(fetch_concurrency.load(Ordering::Acquire))
-        {
+        let current_fetch_concurrency = fetch_concurrency.load(Ordering::Acquire);
+        while join_set.len() >= page_processing_concurrency_for_fetch(current_fetch_concurrency) {
             let result = join_set
                 .join_next()
                 .await
@@ -152,15 +151,11 @@ pub(super) async fn run_full_sync_processor(
         let gmail_client = gmail_client.clone();
         let account_id = account_id.clone();
         let label_names_by_id = label_names_by_id.clone();
-        let fetch_concurrency = fetch_concurrency.clone();
         join_set.spawn(async move {
             let fetch_started = Instant::now();
-            let (catalogs, _) = fetch_message_catalogs(
-                gmail_client,
-                page.message_ids,
-                fetch_concurrency.load(Ordering::Acquire),
-            )
-            .await?;
+            let (catalogs, _) =
+                fetch_message_catalogs(gmail_client, page.message_ids, current_fetch_concurrency)
+                    .await?;
             stats.record_fetch_batch(fetch_started.elapsed());
             let mut cursor_history_id = None;
             for catalog in &catalogs {
@@ -337,9 +332,8 @@ pub(super) async fn run_incremental_sync_processor(
 
     while let Some(page) = list_rx.recv().await {
         stats.on_list_dequeued();
-        while join_set.len()
-            >= page_processing_concurrency_for_fetch(fetch_concurrency.load(Ordering::Acquire))
-        {
+        let current_fetch_concurrency = fetch_concurrency.load(Ordering::Acquire);
+        while join_set.len() >= page_processing_concurrency_for_fetch(current_fetch_concurrency) {
             let result = join_set
                 .join_next()
                 .await
@@ -351,15 +345,11 @@ pub(super) async fn run_incremental_sync_processor(
         let gmail_client = gmail_client.clone();
         let account_id = account_id.clone();
         let label_names_by_id = label_names_by_id.clone();
-        let fetch_concurrency = fetch_concurrency.clone();
         join_set.spawn(async move {
             let fetch_started = Instant::now();
-            let (catalogs, missing_message_ids) = fetch_message_catalogs(
-                gmail_client,
-                page.message_ids,
-                fetch_concurrency.load(Ordering::Acquire),
-            )
-            .await?;
+            let (catalogs, missing_message_ids) =
+                fetch_message_catalogs(gmail_client, page.message_ids, current_fetch_concurrency)
+                    .await?;
             stats.record_fetch_batch(fetch_started.elapsed());
             let (upserts, excluded_message_ids) =
                 build_incremental_changes(&account_id, catalogs, label_names_by_id.as_ref());

@@ -7,3 +7,10 @@ fn preserve_sync_error_returns_original_error_when_failure_persistence_also_fail
 
     assert_eq!(error.to_string(), "sync failed");
 }
+
+#[test]
+fn preserve_sync_error_returns_original_error_when_failure_persistence_succeeds() {
+    let error = preserve_sync_error(anyhow!("sync failed"), Ok(()));
+
+    assert_eq!(error.to_string(), "sync failed");
+}

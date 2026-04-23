@@ -139,7 +139,10 @@ async fn search_migrates_schema_v2_store_before_querying_mailbox_tables() {
     assert!(report.results.is_empty());
 
     let store_report = store::inspect(config_report).unwrap();
-    assert_eq!(store_report.schema_version, Some(16));
+    assert_eq!(
+        store_report.schema_version,
+        Some(i64::try_from(store_report.known_migrations).unwrap_or(i64::MAX))
+    );
     assert_eq!(store_report.pending_migrations, Some(0));
 }
 

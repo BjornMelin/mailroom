@@ -90,14 +90,8 @@ pub(super) fn list_sync_run_history_buckets_in_transaction(
         })
     })?;
 
-    let mut buckets = Vec::new();
-    for row in rows {
-        let bucket = row?;
-        if !buckets.contains(&bucket) {
-            buckets.push(bucket);
-        }
-    }
-    Ok(buckets)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub(super) fn delete_account_messages(

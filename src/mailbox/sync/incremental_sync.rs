@@ -584,7 +584,6 @@ pub(super) async fn maybe_seed_pacing_from_history(
 pub(super) async fn initialize_full_sync_checkpoint(
     context: &SyncExecutionContext<'_>,
     bootstrap_query: &str,
-    _fallback_from_history: bool,
 ) -> Result<FullSyncCheckpointState> {
     let labels_synced = i64::try_from(context.labels.len()).unwrap_or(i64::MAX);
     let checkpoint = context.store_handle.load_full_sync_checkpoint().await?;

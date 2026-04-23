@@ -229,7 +229,12 @@ pub async fn sync_run_with_options(
             report.regression_kind = summary.regression_kind;
             Ok(report)
         }
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(report), Err(error)) => {
+            Err(error.context(format!(
+                "sync succeeded (run_id={}, mode={}, pages_fetched={}, messages_upserted={}) but mailbox writer shutdown failed",
+                report.run_id, report.mode, report.pages_fetched, report.messages_upserted
+            )))
+        }
         (Err(sync_error), writer_shutdown_result) => {
             let pacing_persist_result =
                 persist_sync_pacing_failure(&store_handle, &account, &mut pacing, &gmail_client)

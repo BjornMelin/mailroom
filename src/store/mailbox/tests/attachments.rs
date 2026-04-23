@@ -272,6 +272,38 @@ fn set_attachment_vault_state_errors_when_attachment_key_is_missing() {
 }
 
 #[test]
+fn record_attachment_export_errors_when_attachment_key_is_missing() {
+    let repo_root = unique_temp_dir("mailroom-mailbox-attachment-export-missing");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+
+    let error = record_attachment_export(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &AttachmentExportEventInput {
+            account_id: String::from("gmail:operator@example.com"),
+            attachment_key: String::from("missing:1.2"),
+            message_id: String::from("m-1"),
+            thread_id: String::from("t-1"),
+            destination_path: String::from("/tmp/export/missing.pdf"),
+            content_hash: String::from("abc123"),
+            exported_at_epoch_s: 101,
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        MailboxWriteError::AttachmentNotFound {
+            account_id,
+            attachment_key
+        } if account_id == "gmail:operator@example.com" && attachment_key == "missing:1.2"
+    ));
+}
+
+#[test]
 fn attachment_vault_updates_are_account_scoped_for_shared_attachment_keys() {
     let repo_root = unique_temp_dir("mailroom-mailbox-attachment-vault-account-scope");
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
