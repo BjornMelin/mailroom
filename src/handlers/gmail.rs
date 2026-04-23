@@ -34,7 +34,7 @@ impl GmailLabelsReport {
             crate::cli_output::print_json_success(self)?;
         } else {
             for label in &self.labels {
-                println!("{} {} {}", label.id, label.name, label.label_type);
+                println!("{}\t{}\t{}", label.id, label.name, label.label_type);
             }
         }
         Ok(())

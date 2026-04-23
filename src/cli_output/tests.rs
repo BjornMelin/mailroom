@@ -617,6 +617,8 @@ fn automation_apply_auth_failure_uses_auth_exit_code_in_json_and_human_modes() {
     let manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
     let repo_root = TempDir::new().unwrap();
     std::fs::create_dir(repo_root.path().join(".git")).unwrap();
+    let config_dir = repo_root.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
 
     let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
@@ -702,6 +704,8 @@ fn automation_apply_auth_failure_uses_auth_exit_code_in_json_and_human_modes() {
             "--execute",
             "--json",
         ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env_remove("HOME")
         .current_dir(repo_root.path())
         .output()
         .unwrap();
@@ -724,6 +728,8 @@ fn automation_apply_auth_failure_uses_auth_exit_code_in_json_and_human_modes() {
             &detail.run.run_id.to_string(),
             "--execute",
         ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env_remove("HOME")
         .current_dir(repo_root.path())
         .output()
         .unwrap();

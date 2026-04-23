@@ -3,7 +3,26 @@ use super::{automation, mailbox, pending_migrations, workflows};
 use crate::config::ConfigReport;
 use anyhow::Result;
 use serde::Serialize;
+use std::fmt::Display;
 use std::io::{self, Write};
+
+fn write_kv<W: Write, V: Display>(writer: &mut W, key: &str, value: V) -> Result<()> {
+    writeln!(writer, "{key}={value}")?;
+    Ok(())
+}
+
+fn write_kv_opt<W: Write, T: Display>(
+    writer: &mut W,
+    key: &str,
+    value: Option<T>,
+    none_text: &str,
+) -> Result<()> {
+    match value {
+        Some(v) => writeln!(writer, "{key}={v}")?,
+        None => writeln!(writer, "{key}={none_text}")?,
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoreDoctorReport {
@@ -33,441 +52,395 @@ impl StoreDoctorReport {
     }
 
     fn write_human<W: Write>(&self, writer: &mut W) -> Result<()> {
-        writeln!(writer, "database_path={}", self.database_path.display())?;
-        writeln!(writer, "database_exists={}", self.database_exists)?;
-        writeln!(writer, "known_migrations={}", self.known_migrations)?;
-        writeln!(
+        write_kv(writer, "database_path", self.database_path.display())?;
+        write_kv(writer, "database_exists", self.database_exists)?;
+        write_kv(writer, "known_migrations", self.known_migrations)?;
+        write_kv(
             writer,
-            "user_config={}",
+            "user_config",
             self.config
                 .locations
                 .user_config_path
                 .as_ref()
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|| String::from("<unavailable>"))
+                .unwrap_or_else(|| String::from("<unavailable>")),
         )?;
-        writeln!(
+        write_kv(
             writer,
-            "user_config_exists={}",
-            self.config.locations.user_config_exists
+            "user_config_exists",
+            self.config.locations.user_config_exists,
         )?;
-        writeln!(
+        write_kv(
             writer,
-            "repo_config={}",
-            self.config.locations.repo_config_path.display()
+            "repo_config",
+            self.config.locations.repo_config_path.display(),
         )?;
-        writeln!(
+        write_kv(
             writer,
-            "repo_config_exists={}",
-            self.config.locations.repo_config_exists
+            "repo_config_exists",
+            self.config.locations.repo_config_exists,
         )?;
-        match self.schema_version {
-            Some(version) => writeln!(writer, "schema_version={version}")?,
-            None => writeln!(writer, "schema_version=<uninitialized>")?,
-        }
-        match self.pending_migrations {
-            Some(pending) => writeln!(writer, "pending_migrations={pending}")?,
-            None => writeln!(writer, "pending_migrations=<uninitialized>")?,
-        }
+        write_kv_opt(
+            writer,
+            "schema_version",
+            self.schema_version,
+            "<uninitialized>",
+        )?;
+        write_kv_opt(
+            writer,
+            "pending_migrations",
+            self.pending_migrations,
+            "<uninitialized>",
+        )?;
         if let Some(pragmas) = &self.pragmas {
             write_pragmas(writer, pragmas)?;
         }
         if let Some(mailbox) = &self.mailbox {
-            writeln!(writer, "mailbox_message_count={}", mailbox.message_count)?;
-            writeln!(writer, "mailbox_label_count={}", mailbox.label_count)?;
-            writeln!(
+            write_kv(writer, "mailbox_message_count", mailbox.message_count)?;
+            write_kv(writer, "mailbox_label_count", mailbox.label_count)?;
+            write_kv(
                 writer,
-                "mailbox_indexed_message_count={}",
-                mailbox.indexed_message_count
+                "mailbox_indexed_message_count",
+                mailbox.indexed_message_count,
             )?;
-            writeln!(
+            write_kv(writer, "mailbox_attachment_count", mailbox.attachment_count)?;
+            write_kv(
                 writer,
-                "mailbox_attachment_count={}",
-                mailbox.attachment_count
+                "mailbox_vaulted_attachment_count",
+                mailbox.vaulted_attachment_count,
             )?;
-            writeln!(
+            write_kv(
                 writer,
-                "mailbox_vaulted_attachment_count={}",
-                mailbox.vaulted_attachment_count
-            )?;
-            writeln!(
-                writer,
-                "mailbox_attachment_export_count={}",
-                mailbox.attachment_export_count
+                "mailbox_attachment_export_count",
+                mailbox.attachment_export_count,
             )?;
             match &mailbox.sync_state {
                 Some(sync_state) => {
-                    writeln!(
+                    write_kv(writer, "mailbox_sync_status", sync_state.last_sync_status)?;
+                    write_kv(writer, "mailbox_sync_mode", sync_state.last_sync_mode)?;
+                    write_kv(writer, "mailbox_sync_epoch_s", sync_state.last_sync_epoch_s)?;
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_status={}",
-                        sync_state.last_sync_status
+                        "mailbox_last_full_sync_success_epoch_s",
+                        sync_state.last_full_sync_success_epoch_s,
+                        "<none>",
                     )?;
-                    writeln!(writer, "mailbox_sync_mode={}", sync_state.last_sync_mode)?;
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_epoch_s={}",
-                        sync_state.last_sync_epoch_s
+                        "mailbox_last_incremental_sync_success_epoch_s",
+                        sync_state.last_incremental_sync_success_epoch_s,
+                        "<none>",
                     )?;
-                    match sync_state.last_full_sync_success_epoch_s {
-                        Some(epoch) => {
-                            writeln!(writer, "mailbox_last_full_sync_success_epoch_s={epoch}")?
-                        }
-                        None => writeln!(writer, "mailbox_last_full_sync_success_epoch_s=<none>")?,
-                    }
-                    match sync_state.last_incremental_sync_success_epoch_s {
-                        Some(epoch) => writeln!(
-                            writer,
-                            "mailbox_last_incremental_sync_success_epoch_s={epoch}"
-                        )?,
-                        None => writeln!(
-                            writer,
-                            "mailbox_last_incremental_sync_success_epoch_s=<none>"
-                        )?,
-                    }
-                    match &sync_state.cursor_history_id {
-                        Some(history_id) => {
-                            writeln!(writer, "mailbox_cursor_history_id={history_id}")?
-                        }
-                        None => writeln!(writer, "mailbox_cursor_history_id=<none>")?,
-                    }
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_pipeline_enabled={}",
-                        sync_state.pipeline_enabled
+                        "mailbox_cursor_history_id",
+                        sync_state.cursor_history_id.as_deref(),
+                        "<none>",
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_list_queue_high_water={}",
-                        sync_state.pipeline_list_queue_high_water
+                        "mailbox_sync_pipeline_enabled",
+                        sync_state.pipeline_enabled,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_write_queue_high_water={}",
-                        sync_state.pipeline_write_queue_high_water
+                        "mailbox_sync_pipeline_list_queue_high_water",
+                        sync_state.pipeline_list_queue_high_water,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_write_batch_count={}",
-                        sync_state.pipeline_write_batch_count
+                        "mailbox_sync_pipeline_write_queue_high_water",
+                        sync_state.pipeline_write_queue_high_water,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_writer_wait_ms={}",
-                        sync_state.pipeline_writer_wait_ms
+                        "mailbox_sync_pipeline_write_batch_count",
+                        sync_state.pipeline_write_batch_count,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_fetch_batch_count={}",
-                        sync_state.pipeline_fetch_batch_count
+                        "mailbox_sync_pipeline_writer_wait_ms",
+                        sync_state.pipeline_writer_wait_ms,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_fetch_batch_avg_ms={}",
-                        sync_state.pipeline_fetch_batch_avg_ms
+                        "mailbox_sync_pipeline_fetch_batch_count",
+                        sync_state.pipeline_fetch_batch_count,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_fetch_batch_max_ms={}",
-                        sync_state.pipeline_fetch_batch_max_ms
+                        "mailbox_sync_pipeline_fetch_batch_avg_ms",
+                        sync_state.pipeline_fetch_batch_avg_ms,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_writer_tx_count={}",
-                        sync_state.pipeline_writer_tx_count
+                        "mailbox_sync_pipeline_fetch_batch_max_ms",
+                        sync_state.pipeline_fetch_batch_max_ms,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_writer_tx_avg_ms={}",
-                        sync_state.pipeline_writer_tx_avg_ms
+                        "mailbox_sync_pipeline_writer_tx_count",
+                        sync_state.pipeline_writer_tx_count,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_writer_tx_max_ms={}",
-                        sync_state.pipeline_writer_tx_max_ms
+                        "mailbox_sync_pipeline_writer_tx_avg_ms",
+                        sync_state.pipeline_writer_tx_avg_ms,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_reorder_buffer_high_water={}",
-                        sync_state.pipeline_reorder_buffer_high_water
+                        "mailbox_sync_pipeline_writer_tx_max_ms",
+                        sync_state.pipeline_writer_tx_max_ms,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_staged_message_count={}",
-                        sync_state.pipeline_staged_message_count
+                        "mailbox_sync_pipeline_reorder_buffer_high_water",
+                        sync_state.pipeline_reorder_buffer_high_water,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_staged_delete_count={}",
-                        sync_state.pipeline_staged_delete_count
+                        "mailbox_sync_pipeline_staged_message_count",
+                        sync_state.pipeline_staged_message_count,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pipeline_staged_attachment_count={}",
-                        sync_state.pipeline_staged_attachment_count
+                        "mailbox_sync_pipeline_staged_delete_count",
+                        sync_state.pipeline_staged_delete_count,
+                    )?;
+                    write_kv(
+                        writer,
+                        "mailbox_sync_pipeline_staged_attachment_count",
+                        sync_state.pipeline_staged_attachment_count,
                     )?;
                 }
-                None => writeln!(writer, "mailbox_sync_status=<never-run>")?,
+                None => write_kv(writer, "mailbox_sync_status", "<never-run>")?,
             }
             match &mailbox.full_sync_checkpoint {
                 Some(checkpoint) => {
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_status={}",
-                        checkpoint.status
+                        "mailbox_full_sync_checkpoint_status",
+                        checkpoint.status,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_bootstrap_query={}",
-                        checkpoint.bootstrap_query
+                        "mailbox_full_sync_checkpoint_bootstrap_query",
+                        &checkpoint.bootstrap_query,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_pages_fetched={}",
-                        checkpoint.pages_fetched
+                        "mailbox_full_sync_checkpoint_pages_fetched",
+                        checkpoint.pages_fetched,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_messages_upserted={}",
-                        checkpoint.messages_upserted
+                        "mailbox_full_sync_checkpoint_messages_upserted",
+                        checkpoint.messages_upserted,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_staged_message_count={}",
-                        checkpoint.staged_message_count
+                        "mailbox_full_sync_checkpoint_staged_message_count",
+                        checkpoint.staged_message_count,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_next_page_token_present={}",
-                        checkpoint.next_page_token.is_some()
+                        "mailbox_full_sync_checkpoint_next_page_token_present",
+                        checkpoint.next_page_token.is_some(),
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_full_sync_checkpoint_updated_at_epoch_s={}",
-                        checkpoint.updated_at_epoch_s
+                        "mailbox_full_sync_checkpoint_updated_at_epoch_s",
+                        checkpoint.updated_at_epoch_s,
                     )?;
                 }
-                None => writeln!(writer, "mailbox_full_sync_checkpoint_status=<none>")?,
+                None => write_kv(writer, "mailbox_full_sync_checkpoint_status", "<none>")?,
             }
             match &mailbox.sync_pacing_state {
                 Some(pacing_state) => {
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pacing_learned_quota_units_per_minute={}",
-                        pacing_state.learned_quota_units_per_minute
+                        "mailbox_sync_pacing_learned_quota_units_per_minute",
+                        pacing_state.learned_quota_units_per_minute,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pacing_learned_message_fetch_concurrency={}",
-                        pacing_state.learned_message_fetch_concurrency
+                        "mailbox_sync_pacing_learned_message_fetch_concurrency",
+                        pacing_state.learned_message_fetch_concurrency,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_pacing_clean_run_streak={}",
-                        pacing_state.clean_run_streak
+                        "mailbox_sync_pacing_clean_run_streak",
+                        pacing_state.clean_run_streak,
                     )?;
-                    match pacing_state.last_pressure_kind {
-                        Some(kind) => {
-                            writeln!(writer, "mailbox_sync_pacing_last_pressure_kind={kind}")?
-                        }
-                        None => writeln!(writer, "mailbox_sync_pacing_last_pressure_kind=<none>")?,
-                    }
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_pacing_updated_at_epoch_s={}",
-                        pacing_state.updated_at_epoch_s
+                        "mailbox_sync_pacing_last_pressure_kind",
+                        pacing_state.last_pressure_kind,
+                        "<none>",
+                    )?;
+                    write_kv(
+                        writer,
+                        "mailbox_sync_pacing_updated_at_epoch_s",
+                        pacing_state.updated_at_epoch_s,
                     )?;
                 }
-                None => writeln!(
+                None => write_kv(
                     writer,
-                    "mailbox_sync_pacing_learned_quota_units_per_minute=<none>"
+                    "mailbox_sync_pacing_learned_quota_units_per_minute",
+                    "<none>",
                 )?,
             }
             match &mailbox.sync_run_summary {
                 Some(summary) => {
-                    writeln!(
+                    write_kv(writer, "mailbox_sync_run_summary_mode", summary.sync_mode)?;
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_mode={}",
-                        summary.sync_mode
+                        "mailbox_sync_run_summary_comparability_kind",
+                        summary.comparability_kind,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_comparability_kind={}",
-                        summary.comparability_kind
+                        "mailbox_sync_run_summary_comparability_key",
+                        &summary.comparability_key,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_comparability_key={}",
-                        summary.comparability_key
+                        "mailbox_sync_run_summary_comparability_label",
+                        &summary.comparability_label,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_comparability_label={}",
-                        summary.comparability_label
+                        "mailbox_sync_run_summary_latest_run_id",
+                        summary.latest_run_id,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_latest_run_id={}",
-                        summary.latest_run_id
+                        "mailbox_sync_run_summary_latest_status",
+                        summary.latest_status,
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_latest_status={}",
-                        summary.latest_status
+                        "mailbox_sync_run_summary_latest_finished_at_epoch_s",
+                        summary.latest_finished_at_epoch_s,
                     )?;
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_run_summary_latest_finished_at_epoch_s={}",
-                        summary.latest_finished_at_epoch_s
+                        "mailbox_sync_run_summary_best_clean_run_id",
+                        summary.best_clean_run_id,
+                        "<none>",
                     )?;
-                    match summary.best_clean_run_id {
-                        Some(run_id) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_run_id={run_id}"
-                        )?,
-                        None => {
-                            writeln!(writer, "mailbox_sync_run_summary_best_clean_run_id=<none>")?
-                        }
-                    }
-                    match summary.best_clean_quota_units_per_minute {
-                        Some(value) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_quota_units_per_minute={value}"
-                        )?,
-                        None => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_quota_units_per_minute=<none>"
-                        )?,
-                    }
-                    match summary.best_clean_message_fetch_concurrency {
-                        Some(value) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_message_fetch_concurrency={value}"
-                        )?,
-                        None => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_message_fetch_concurrency=<none>"
-                        )?,
-                    }
-                    match summary.best_clean_messages_per_second {
-                        Some(value) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_messages_per_second={value}"
-                        )?,
-                        None => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_messages_per_second=<none>"
-                        )?,
-                    }
-                    match summary.best_clean_duration_ms {
-                        Some(value) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_duration_ms={value}"
-                        )?,
-                        None => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_best_clean_duration_ms=<none>"
-                        )?,
-                    }
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_run_summary_recent_success_count={}",
-                        summary.recent_success_count
+                        "mailbox_sync_run_summary_best_clean_quota_units_per_minute",
+                        summary.best_clean_quota_units_per_minute,
+                        "<none>",
                     )?;
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_run_summary_recent_failure_count={}",
-                        summary.recent_failure_count
+                        "mailbox_sync_run_summary_best_clean_message_fetch_concurrency",
+                        summary.best_clean_message_fetch_concurrency,
+                        "<none>",
                     )?;
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_run_summary_recent_failure_streak={}",
-                        summary.recent_failure_streak
+                        "mailbox_sync_run_summary_best_clean_messages_per_second",
+                        summary.best_clean_messages_per_second,
+                        "<none>",
                     )?;
-                    writeln!(
+                    write_kv_opt(
                         writer,
-                        "mailbox_sync_run_summary_recent_clean_success_streak={}",
-                        summary.recent_clean_success_streak
+                        "mailbox_sync_run_summary_best_clean_duration_ms",
+                        summary.best_clean_duration_ms,
+                        "<none>",
                     )?;
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_regression_detected={}",
-                        summary.regression_detected
+                        "mailbox_sync_run_summary_recent_success_count",
+                        summary.recent_success_count,
                     )?;
-                    match summary.regression_kind {
-                        Some(kind) => {
-                            writeln!(writer, "mailbox_sync_run_summary_regression_kind={kind}")?
-                        }
-                        None => {
-                            writeln!(writer, "mailbox_sync_run_summary_regression_kind=<none>")?
-                        }
-                    }
-                    match summary.regression_run_id {
-                        Some(run_id) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_regression_run_id={run_id}"
-                        )?,
-                        None => {
-                            writeln!(writer, "mailbox_sync_run_summary_regression_run_id=<none>")?
-                        }
-                    }
-                    match &summary.regression_message {
-                        Some(message) => writeln!(
-                            writer,
-                            "mailbox_sync_run_summary_regression_message={message}"
-                        )?,
-                        None => {
-                            writeln!(writer, "mailbox_sync_run_summary_regression_message=<none>")?
-                        }
-                    }
-                    writeln!(
+                    write_kv(
                         writer,
-                        "mailbox_sync_run_summary_updated_at_epoch_s={}",
-                        summary.updated_at_epoch_s
+                        "mailbox_sync_run_summary_recent_failure_count",
+                        summary.recent_failure_count,
+                    )?;
+                    write_kv(
+                        writer,
+                        "mailbox_sync_run_summary_recent_failure_streak",
+                        summary.recent_failure_streak,
+                    )?;
+                    write_kv(
+                        writer,
+                        "mailbox_sync_run_summary_recent_clean_success_streak",
+                        summary.recent_clean_success_streak,
+                    )?;
+                    write_kv(
+                        writer,
+                        "mailbox_sync_run_summary_regression_detected",
+                        summary.regression_detected,
+                    )?;
+                    write_kv_opt(
+                        writer,
+                        "mailbox_sync_run_summary_regression_kind",
+                        summary.regression_kind,
+                        "<none>",
+                    )?;
+                    write_kv_opt(
+                        writer,
+                        "mailbox_sync_run_summary_regression_run_id",
+                        summary.regression_run_id,
+                        "<none>",
+                    )?;
+                    write_kv_opt(
+                        writer,
+                        "mailbox_sync_run_summary_regression_message",
+                        summary.regression_message.as_deref(),
+                        "<none>",
+                    )?;
+                    write_kv(
+                        writer,
+                        "mailbox_sync_run_summary_updated_at_epoch_s",
+                        summary.updated_at_epoch_s,
                     )?;
                 }
-                None => writeln!(writer, "mailbox_sync_run_summary_latest_run_id=<none>")?,
+                None => write_kv(writer, "mailbox_sync_run_summary_latest_run_id", "<none>")?,
             }
         }
         if let Some(workflows) = &self.workflows {
-            writeln!(writer, "workflow_count={}", workflows.workflow_count)?;
-            writeln!(
+            write_kv(writer, "workflow_count", workflows.workflow_count)?;
+            write_kv(writer, "workflow_open_count", workflows.open_workflow_count)?;
+            write_kv(
                 writer,
-                "workflow_open_count={}",
-                workflows.open_workflow_count
+                "workflow_draft_count",
+                workflows.draft_workflow_count,
             )?;
-            writeln!(
+            write_kv(writer, "workflow_event_count", workflows.event_count)?;
+            write_kv(
                 writer,
-                "workflow_draft_count={}",
-                workflows.draft_workflow_count
-            )?;
-            writeln!(writer, "workflow_event_count={}", workflows.event_count)?;
-            writeln!(
-                writer,
-                "workflow_draft_revision_count={}",
-                workflows.draft_revision_count
+                "workflow_draft_revision_count",
+                workflows.draft_revision_count,
             )?;
         }
         if let Some(automation) = &self.automation {
-            writeln!(writer, "automation_run_count={}", automation.run_count)?;
-            writeln!(
+            write_kv(writer, "automation_run_count", automation.run_count)?;
+            write_kv(
                 writer,
-                "automation_previewed_run_count={}",
-                automation.previewed_run_count
+                "automation_previewed_run_count",
+                automation.previewed_run_count,
             )?;
-            writeln!(
+            write_kv(
                 writer,
-                "automation_applied_run_count={}",
-                automation.applied_run_count
+                "automation_applied_run_count",
+                automation.applied_run_count,
             )?;
-            writeln!(
+            write_kv(
                 writer,
-                "automation_apply_failed_run_count={}",
-                automation.apply_failed_run_count
+                "automation_apply_failed_run_count",
+                automation.apply_failed_run_count,
             )?;
-            writeln!(
+            write_kv(
                 writer,
-                "automation_candidate_count={}",
-                automation.candidate_count
+                "automation_candidate_count",
+                automation.candidate_count,
             )?;
         }
 
@@ -528,13 +501,13 @@ pub(crate) fn print_pragmas(pragmas: &StorePragmas) -> Result<()> {
 }
 
 fn write_pragmas<W: Write>(writer: &mut W, pragmas: &StorePragmas) -> Result<()> {
-    writeln!(writer, "application_id={}", pragmas.application_id)?;
-    writeln!(writer, "user_version={}", pragmas.user_version)?;
-    writeln!(writer, "foreign_keys={}", pragmas.foreign_keys)?;
-    writeln!(writer, "trusted_schema={}", pragmas.trusted_schema)?;
-    writeln!(writer, "journal_mode={}", pragmas.journal_mode)?;
-    writeln!(writer, "synchronous={}", pragmas.synchronous)?;
-    writeln!(writer, "busy_timeout_ms={}", pragmas.busy_timeout_ms)?;
+    write_kv(writer, "application_id", pragmas.application_id)?;
+    write_kv(writer, "user_version", pragmas.user_version)?;
+    write_kv(writer, "foreign_keys", pragmas.foreign_keys)?;
+    write_kv(writer, "trusted_schema", pragmas.trusted_schema)?;
+    write_kv(writer, "journal_mode", &pragmas.journal_mode)?;
+    write_kv(writer, "synchronous", pragmas.synchronous)?;
+    write_kv(writer, "busy_timeout_ms", pragmas.busy_timeout_ms)?;
     Ok(())
 }
 

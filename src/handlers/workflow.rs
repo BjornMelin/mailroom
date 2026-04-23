@@ -113,7 +113,7 @@ pub(crate) async fn handle_draft_command(
             stdin,
             json,
         } => {
-            let body_text = resolve_draft_body_input(text, file, stdin)?;
+            let body_text = resolve_draft_body_input(text, file, stdin).await?;
             workflows::draft_body_set(&config_report, thread_id, body_text)
                 .await?
                 .print(json)?;
@@ -224,7 +224,7 @@ fn resolve_snooze_until(until: Option<String>, clear: bool) -> Result<Option<Str
     if clear { Ok(None) } else { Ok(until) }
 }
 
-fn resolve_draft_body_input(
+async fn resolve_draft_body_input(
     text: Option<String>,
     file: Option<PathBuf>,
     stdin: bool,
@@ -239,15 +239,21 @@ fn resolve_draft_body_input(
     }
 
     if let Some(file) = file {
-        return std::fs::read_to_string(&file)
-            .map_err(|source| CliInputError::DraftBodyFileRead { path: file, source }.into());
+        return Ok(tokio::task::spawn_blocking(move || {
+            std::fs::read_to_string(&file)
+                .map_err(|source| CliInputError::DraftBodyFileRead { path: file, source })
+        })
+        .await??);
     }
 
-    let mut buffer = String::new();
-    std::io::stdin()
-        .read_to_string(&mut buffer)
-        .map_err(|source| CliInputError::DraftBodyStdinRead { source })?;
-    Ok(buffer)
+    Ok(tokio::task::spawn_blocking(move || {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .map_err(|source| CliInputError::DraftBodyStdinRead { source })?;
+        Ok::<_, CliInputError>(buffer)
+    })
+    .await??)
 }
 
 #[cfg(test)]
@@ -270,9 +276,11 @@ mod tests {
         assert_eq!(error.to_string(), "use either --until or --clear, not both");
     }
 
-    #[test]
-    fn resolve_draft_body_input_requires_exactly_one_source() {
-        let error = resolve_draft_body_input(None, None, false).unwrap_err();
+    #[tokio::test]
+    async fn resolve_draft_body_input_requires_exactly_one_source() {
+        let error = resolve_draft_body_input(None, None, false)
+            .await
+            .unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -284,10 +292,12 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn resolve_draft_body_input_reports_file_read_as_typed_validation_error() {
+    #[tokio::test]
+    async fn resolve_draft_body_input_reports_file_read_as_typed_validation_error() {
         let missing_path = PathBuf::from("/definitely/missing/mailroom-draft-body.txt");
-        let error = resolve_draft_body_input(None, Some(missing_path.clone()), false).unwrap_err();
+        let error = resolve_draft_body_input(None, Some(missing_path.clone()), false)
+            .await
+            .unwrap_err();
 
         assert!(
             error

@@ -16,7 +16,12 @@ pub(crate) fn handle_config_command(
 pub(crate) fn handle_paths_command(paths: &workspace::WorkspacePaths, json: bool) -> Result<()> {
     match config::resolve(paths) {
         Ok(config_report) => configured_paths(&config_report)?.print(json)?,
-        Err(_) => paths.print(json)?,
+        Err(error) => {
+            eprintln!(
+                "warning: config::resolve failed for `mailroom paths`; falling back to repo-local paths: {error}\n{error:#?}"
+            );
+            paths.print(json)?;
+        }
     }
 
     Ok(())

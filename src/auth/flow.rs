@@ -382,7 +382,7 @@ async fn authenticate_with_refresh_token_override(
     let http_client = oauth_http_client(&config_report.config.gmail)?;
     let token = oauth_client
         .exchange_refresh_token(&oauth2::RefreshToken::new(
-            refresh_token.clone().expose_secret().to_owned(),
+            refresh_token.expose_secret().to_owned(),
         ))
         .request_async(&http_client)
         .await

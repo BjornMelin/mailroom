@@ -6,8 +6,7 @@ use rusqlite::Connection;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
 
 #[test]
 fn configure_busy_timeout_rejects_zero() {
@@ -22,8 +21,8 @@ fn migrations_validate_successfully() {
 
 #[test]
 fn store_init_creates_and_migrates_database() {
-    let repo_root = unique_temp_dir("mailroom-store-init");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-init").unwrap();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
 
@@ -65,14 +64,12 @@ fn store_init_creates_and_migrates_database() {
         )
         .unwrap();
     assert_eq!(substrate_tables, 20);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn store_doctor_reports_absent_database_without_creating_it() {
-    let repo_root = unique_temp_dir("mailroom-store-doctor");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-doctor").unwrap();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
 
     let report = inspect(resolve(&paths).unwrap()).unwrap();
@@ -80,14 +77,12 @@ fn store_doctor_reports_absent_database_without_creating_it() {
     assert!(!report.database_exists);
     assert!(report.pragmas.is_none());
     assert!(report.schema_version.is_none());
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn store_doctor_reports_persisted_drift_without_rewriting_it() {
-    let repo_root = unique_temp_dir("mailroom-store-doctor-drift");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-doctor-drift").unwrap();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
 
     let mut config_report = resolve(&paths).unwrap();
@@ -116,6 +111,12 @@ fn store_doctor_reports_persisted_drift_without_rewriting_it() {
     assert_eq!(pragmas.journal_mode, "delete");
     assert!(pragmas.foreign_keys);
     assert!(!pragmas.trusted_schema);
+    // The read-only diagnostics connection used by `inspect` applies its own
+    // runtime PRAGMAs, so `report.pragmas.synchronous` reflects that path
+    // (synchronous=1). The value persisted in the file from the earlier
+    // `pragma_update(..., "synchronous", "FULL")` is still 2, as read below via
+    // `Connection::open` and `pragma_query_value` on `init_report.database_path`.
+    // The test checks both and asserts the on-disk `synchronous` was not overwritten.
     assert_eq!(pragmas.synchronous, 1);
 
     let connection = Connection::open(&init_report.database_path).unwrap();
@@ -132,14 +133,12 @@ fn store_doctor_reports_persisted_drift_without_rewriting_it() {
     assert_eq!(application_id, 7);
     assert_eq!(journal_mode, "delete");
     assert_eq!(synchronous, 2);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn store_init_rejects_foreign_database_before_mutating_it() {
-    let repo_root = unique_temp_dir("mailroom-store-init-foreign");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-init-foreign").unwrap();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
 
     let config_report = resolve(&paths).unwrap();
@@ -168,8 +167,6 @@ fn store_init_rejects_foreign_database_before_mutating_it() {
 
     assert_eq!(application_id, 7);
     assert_eq!(user_version, 0);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
@@ -185,13 +182,14 @@ fn pending_migrations_errors_when_database_is_ahead() {
 #[cfg(unix)]
 #[test]
 fn store_doctor_can_inspect_read_only_database_copy() {
-    let repo_root = unique_temp_dir("mailroom-store-doctor-readonly");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-doctor-readonly").unwrap();
+    let repo_root_path = repo_root.path().to_path_buf();
+    let paths = WorkspacePaths::from_repo_root(repo_root_path.clone());
     paths.ensure_runtime_dirs().unwrap();
 
     let mut config_report = resolve(&paths).unwrap();
     let init_report = init(&config_report).unwrap();
-    let read_only_db = repo_root.join("readonly.sqlite3");
+    let read_only_db = repo_root_path.join("readonly.sqlite3");
 
     fs::copy(&init_report.database_path, &read_only_db).unwrap();
     fs::set_permissions(&read_only_db, fs::Permissions::from_mode(0o400)).unwrap();
@@ -206,19 +204,17 @@ fn store_doctor_can_inspect_read_only_database_copy() {
     assert!(pragmas.foreign_keys);
     assert!(!pragmas.trusted_schema);
     assert_eq!(pragmas.synchronous, 1);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
 fn harden_database_permissions_updates_sqlite_sidecars() {
-    let repo_root = unique_temp_dir("mailroom-store-permissions");
-    fs::create_dir_all(&repo_root).unwrap();
+    let repo_root = TempDir::with_prefix("mailroom-store-permissions").unwrap();
+    fs::create_dir_all(repo_root.path()).unwrap();
 
-    let database_path = repo_root.join("store.sqlite3");
-    let wal_path = repo_root.join("store.sqlite3-wal");
-    let shm_path = repo_root.join("store.sqlite3-shm");
+    let database_path = repo_root.path().join("store.sqlite3");
+    let wal_path = repo_root.path().join("store.sqlite3-wal");
+    let shm_path = repo_root.path().join("store.sqlite3-shm");
 
     fs::write(&database_path, b"").unwrap();
     fs::write(&wal_path, b"").unwrap();
@@ -237,16 +233,14 @@ fn harden_database_permissions_updates_sqlite_sidecars() {
     assert_eq!(database_mode, 0o600);
     assert_eq!(wal_mode, 0o600);
     assert_eq!(shm_mode, 0o600);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn migration_from_v6_backfills_attachment_account_scope_for_realistic_fixture() {
     const MESSAGE_COUNT_PER_ACCOUNT: usize = 160;
     const ATTACHMENTS_PER_MESSAGE: usize = 2;
-    let repo_root = unique_temp_dir("mailroom-store-migration-v6-backfill");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-migration-v6-backfill").unwrap();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
     init(&config_report).unwrap();
@@ -530,14 +524,12 @@ fn migration_from_v6_backfills_attachment_account_scope_for_realistic_fixture() 
         )
         .unwrap();
     assert_eq!(shared_key_count, 2);
-
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
 fn migration_v16_round_trip_rebuilds_and_preserves_sync_run_summaries() {
-    let repo_root = unique_temp_dir("mailroom-store-migration-v16-sync-history");
-    let paths = WorkspacePaths::from_repo_root(repo_root.clone());
+    let repo_root = TempDir::with_prefix("mailroom-store-migration-v16-sync-history").unwrap();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
     paths.ensure_runtime_dirs().unwrap();
     let config_report = resolve(&paths).unwrap();
     init(&config_report).unwrap();
@@ -747,13 +739,4 @@ fn migration_v16_round_trip_rebuilds_and_preserves_sync_run_summaries() {
     assert_eq!(large_best_clean_run_id, large_history.run_id);
 
     drop(connection);
-    fs::remove_dir_all(repo_root).unwrap();
-}
-
-fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()))
 }
