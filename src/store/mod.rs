@@ -88,8 +88,12 @@ fn harden_database_permissions(path: &Path) -> Result<()> {
 
     let mut candidate_paths = Vec::with_capacity(3);
     candidate_paths.push(path.to_path_buf());
-    candidate_paths.push(std::path::PathBuf::from(format!("{}-wal", path.display())));
-    candidate_paths.push(std::path::PathBuf::from(format!("{}-shm", path.display())));
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    candidate_paths.push(std::path::PathBuf::from(wal));
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    candidate_paths.push(std::path::PathBuf::from(shm));
 
     for candidate in candidate_paths {
         if candidate.exists() {

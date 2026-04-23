@@ -1,4 +1,4 @@
-use super::connection::{StorePragmas, read_pragmas};
+use super::connection::{StorePragmas, read_pragmas, write_pragmas};
 use super::{automation, mailbox, pending_migrations, workflows};
 use crate::config::ConfigReport;
 use anyhow::Result;
@@ -492,23 +492,6 @@ pub fn inspect(config_report: ConfigReport) -> Result<StoreDoctorReport> {
         workflows,
         automation,
     })
-}
-
-pub(crate) fn print_pragmas(pragmas: &StorePragmas) -> Result<()> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    write_pragmas(&mut stdout, pragmas)
-}
-
-fn write_pragmas<W: Write>(writer: &mut W, pragmas: &StorePragmas) -> Result<()> {
-    write_kv(writer, "application_id", pragmas.application_id)?;
-    write_kv(writer, "user_version", pragmas.user_version)?;
-    write_kv(writer, "foreign_keys", pragmas.foreign_keys)?;
-    write_kv(writer, "trusted_schema", pragmas.trusted_schema)?;
-    write_kv(writer, "journal_mode", &pragmas.journal_mode)?;
-    write_kv(writer, "synchronous", pragmas.synchronous)?;
-    write_kv(writer, "busy_timeout_ms", pragmas.busy_timeout_ms)?;
-    Ok(())
 }
 
 #[cfg(test)]

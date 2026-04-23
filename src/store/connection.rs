@@ -2,6 +2,7 @@ use super::SQLITE_APPLICATION_ID;
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use std::io::{self, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -41,7 +42,7 @@ impl StoreInitReport {
             println!("schema_version={}", self.schema_version);
             println!("known_migrations={}", self.known_migrations);
             println!("pending_migrations={}", self.pending_migrations);
-            crate::store::doctor::print_pragmas(&self.pragmas)?;
+            print_pragmas(&self.pragmas)?;
         }
 
         Ok(())
@@ -147,6 +148,23 @@ pub(super) fn read_pragmas(connection: &Connection) -> Result<StorePragmas> {
         synchronous,
         busy_timeout_ms,
     })
+}
+
+pub(crate) fn print_pragmas(pragmas: &StorePragmas) -> Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    write_pragmas(&mut stdout, pragmas)
+}
+
+pub(crate) fn write_pragmas<W: Write>(writer: &mut W, pragmas: &StorePragmas) -> Result<()> {
+    writeln!(writer, "application_id={}", pragmas.application_id)?;
+    writeln!(writer, "user_version={}", pragmas.user_version)?;
+    writeln!(writer, "foreign_keys={}", pragmas.foreign_keys)?;
+    writeln!(writer, "trusted_schema={}", pragmas.trusted_schema)?;
+    writeln!(writer, "journal_mode={}", pragmas.journal_mode)?;
+    writeln!(writer, "synchronous={}", pragmas.synchronous)?;
+    writeln!(writer, "busy_timeout_ms={}", pragmas.busy_timeout_ms)?;
+    Ok(())
 }
 
 fn create_flags() -> OpenFlags {

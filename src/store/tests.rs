@@ -210,8 +210,6 @@ fn store_doctor_can_inspect_read_only_database_copy() {
 #[test]
 fn harden_database_permissions_updates_sqlite_sidecars() {
     let repo_root = TempDir::with_prefix("mailroom-store-permissions").unwrap();
-    fs::create_dir_all(repo_root.path()).unwrap();
-
     let database_path = repo_root.path().join("store.sqlite3");
     let wal_path = repo_root.path().join("store.sqlite3-wal");
     let shm_path = repo_root.path().join("store.sqlite3-shm");
