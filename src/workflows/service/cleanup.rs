@@ -82,6 +82,13 @@ pub(crate) async fn cleanup_tracked_thread_for_automation(
         return Ok(false);
     };
 
+    if action == store::workflows::CleanupAction::Label
+        && add_label_names.is_empty()
+        && remove_label_names.is_empty()
+    {
+        return Err(WorkflowServiceError::CleanupLabelsRequired);
+    }
+
     let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
         Some(
             resolve_cleanup_label_ids(
@@ -193,6 +200,27 @@ async fn execute_cleanup_after_auth(
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
     let account_id = detail.workflow.account_id.clone();
     let thread_id = detail.workflow.thread_id.clone();
+    let needs_draft_retirement = detail.workflow.current_draft_revision_id.is_some()
+        || detail.workflow.gmail_draft_id.is_some();
+
+    match action {
+        store::workflows::CleanupAction::Archive => {
+            gmail_client
+                .modify_thread_labels(&thread_id, &[], &[String::from("INBOX")])
+                .await?;
+        }
+        store::workflows::CleanupAction::Trash => {
+            gmail_client.trash_thread(&thread_id).await?;
+        }
+        store::workflows::CleanupAction::Label => {
+            let (add_ids, remove_ids) = resolved_label_ids
+                .as_ref()
+                .ok_or(WorkflowServiceError::LabelCleanupInvariant)?;
+            gmail_client
+                .modify_thread_labels(&thread_id, add_ids, remove_ids)
+                .await?;
+        }
+    }
 
     let payload_json = serde_json::to_string(&serde_json::json!({
         "add_label_names": add_label_names,
@@ -221,27 +249,6 @@ async fn execute_cleanup_after_auth(
         "cleanup.apply",
     )
     .await?;
-
-    match action {
-        store::workflows::CleanupAction::Archive => {
-            gmail_client
-                .modify_thread_labels(&thread_id, &[], &[String::from("INBOX")])
-                .await?;
-        }
-        store::workflows::CleanupAction::Trash => {
-            gmail_client.trash_thread(&thread_id).await?;
-        }
-        store::workflows::CleanupAction::Label => {
-            let (add_ids, remove_ids) =
-                resolved_label_ids.ok_or(WorkflowServiceError::LabelCleanupInvariant)?;
-            gmail_client
-                .modify_thread_labels(&thread_id, &add_ids, &remove_ids)
-                .await?;
-        }
-    }
-
-    let needs_draft_retirement =
-        workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some();
     if needs_draft_retirement {
         workflow = retire_local_draft_then_delete_remote(
             config_report,

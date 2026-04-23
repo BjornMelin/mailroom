@@ -1226,6 +1226,71 @@ async fn workflow_commands_use_persisted_workflow_account_after_logout_without_s
 }
 
 #[tokio::test]
+async fn draft_start_rejects_cross_account_mutation_before_gmail_calls() {
+    let mock_server = MockServer::start().await;
+    mount_profile(&mock_server).await;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
+    init(&config_report).unwrap();
+    let other_account = accounts::upsert_active(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &accounts::UpsertAccountInput {
+            email_address: String::from("other@example.com"),
+            history_id: String::from("99"),
+            messages_total: 1,
+            threads_total: 1,
+            access_scope: String::from("scope:a"),
+            refreshed_at_epoch_s: 99,
+        },
+    )
+    .unwrap();
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &crate::store::workflows::SetTriageStateInput {
+            account_id: other_account.account_id,
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::NeedsReplySoon,
+            note: None,
+            snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                message_id: String::from("m-1"),
+                internal_date_epoch_ms: 100,
+                subject: String::from("Project"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Project status"),
+            },
+            updated_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+
+    let error = draft_start(&config_report, String::from("thread-1"), ReplyMode::Reply)
+        .await
+        .unwrap_err();
+    match error {
+        WorkflowServiceError::AuthenticatedAccountMismatch {
+            thread_id,
+            expected_account_id,
+            actual_account_id,
+        } => {
+            assert_eq!(thread_id, "thread-1");
+            assert_eq!(expected_account_id, "gmail:other@example.com");
+            assert_eq!(actual_account_id, "gmail:operator@example.com");
+        }
+        other => panic!("expected AuthenticatedAccountMismatch, got {other}"),
+    }
+
+    let requests = mock_server.received_requests().await.unwrap();
+    assert!(!requests.iter().any(|request| {
+        request.method.as_str() == "GET"
+            && request.url.path() == "/gmail/v1/users/me/threads/thread-1"
+    }));
+}
+
+#[tokio::test]
 async fn show_workflow_prefers_thread_owned_account_over_active_account() {
     let mock_server = MockServer::start().await;
     let temp_dir = TempDir::new().unwrap();
@@ -2298,12 +2363,9 @@ async fn cleanup_archive_keeps_local_remote_draft_state_when_cleanup_mutation_fa
     .unwrap();
     assert_eq!(
         detail.workflow.current_stage,
-        crate::store::workflows::WorkflowStage::Closed
+        crate::store::workflows::WorkflowStage::Drafting
     );
-    assert_eq!(
-        detail.workflow.last_cleanup_action,
-        Some(CleanupAction::Archive)
-    );
+    assert_eq!(detail.workflow.last_cleanup_action, None);
     assert_eq!(detail.workflow.gmail_draft_id.as_deref(), Some("draft-1"));
     assert!(detail.current_draft.is_some());
 
@@ -2525,6 +2587,50 @@ async fn cleanup_tracked_thread_for_automation_requires_gmail_auth_before_persis
         crate::store::workflows::WorkflowStage::Triage
     );
     assert_eq!(detail.workflow.last_cleanup_action, None);
+}
+
+#[tokio::test]
+async fn cleanup_tracked_thread_for_automation_rejects_empty_label_requests() {
+    let mock_server = MockServer::start().await;
+    let temp_dir = TempDir::new().unwrap();
+    let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_local_thread_snapshot(&config_report);
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &crate::store::workflows::SetTriageStateInput {
+            account_id: String::from("gmail:operator@example.com"),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::NeedsReplySoon,
+            note: None,
+            snapshot: crate::store::workflows::WorkflowMessageSnapshot {
+                message_id: String::from("m-1"),
+                internal_date_epoch_ms: 100,
+                subject: String::from("Project"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Project status"),
+            },
+            updated_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+    let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
+
+    let error = cleanup_tracked_thread_for_automation(
+        &config_report,
+        &gmail_client,
+        "gmail:operator@example.com",
+        "thread-1",
+        CleanupAction::Label,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, WorkflowServiceError::CleanupLabelsRequired));
+
+    let requests = mock_server.received_requests().await.unwrap();
+    assert!(requests.is_empty());
 }
 
 #[tokio::test]

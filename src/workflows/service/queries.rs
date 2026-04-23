@@ -214,6 +214,15 @@ pub(super) async fn resolve_mutating_workflow_account_id(
     config_report: &ConfigReport,
     thread_id: &str,
 ) -> WorkflowResult<String> {
+    Ok(resolve_mutating_active_account(config_report, thread_id)
+        .await?
+        .account_id)
+}
+
+pub(super) async fn resolve_mutating_active_account(
+    config_report: &ConfigReport,
+    thread_id: &str,
+) -> WorkflowResult<AccountRecord> {
     let active_account = resolve_active_account(config_report).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
@@ -242,7 +251,7 @@ pub(super) async fn resolve_mutating_workflow_account_id(
         });
     }
 
-    Ok(active_account.account_id)
+    Ok(active_account)
 }
 
 pub(super) fn resolve_workflow_account_id_blocking(

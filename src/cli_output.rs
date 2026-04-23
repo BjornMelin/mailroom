@@ -899,6 +899,34 @@ mod tests {
     }
 
     #[test]
+    fn workflow_gmail_client_error_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::GmailClientInit {
+            source: anyhow!("gmail client init failed"),
+        });
+
+        let report = describe_error(&error, "workflow.cleanup");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.gmail_client"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
+    fn workflow_repo_root_error_maps_to_internal_failure_code() {
+        let error = anyhow!(WorkflowServiceError::RepoRoot {
+            source: anyhow!("repo root lookup failed"),
+        });
+
+        let report = describe_error(&error, "workflow.draft.attach_remove");
+        let value = to_value(json_failure_value(&report)).unwrap();
+
+        assert_eq!(value["error"]["code"], json!("internal_failure"));
+        assert_eq!(value["error"]["kind"], json!("workflow.repo_root"));
+        assert_eq!(exit_code(&report), std::process::ExitCode::from(10));
+    }
+
+    #[test]
     fn workflow_store_write_conflict_maps_to_conflict_code() {
         let error = anyhow!(WorkflowStoreWriteError::Conflict {
             thread_id: String::from("thread-1"),

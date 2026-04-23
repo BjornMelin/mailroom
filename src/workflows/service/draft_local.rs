@@ -4,7 +4,7 @@ use super::draft_remote::{
 };
 use super::message_build::{build_raw_message, build_reply_recipients, normalize_reply_subject};
 use super::queries::{
-    action_report, best_effort_sync_report, latest_thread_message, resolve_active_account,
+    action_report, best_effort_sync_report, latest_thread_message, resolve_mutating_active_account,
     thread_message_by_id, workflow_detail, workflow_snapshot_from_message,
 };
 use super::{WorkflowResult, current_epoch_seconds, join_blocking};
@@ -41,7 +41,7 @@ pub async fn draft_start(
     reply_mode: store::workflows::ReplyMode,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account = resolve_active_account(config_report).await?;
+    let account = resolve_mutating_active_account(config_report, &thread_id).await?;
     let gmail_client = crate::gmail_client_for_config(config_report)
         .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
     let thread = gmail_client.get_thread_context(&thread_id).await?;
@@ -178,7 +178,7 @@ pub async fn draft_send(
     thread_id: String,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account = resolve_active_account(config_report).await?;
+    let account = resolve_mutating_active_account(config_report, &thread_id).await?;
     let detail = workflow_detail(config_report, &account.account_id, &thread_id).await?;
     let draft = detail
         .current_draft
@@ -250,7 +250,7 @@ where
     F: FnOnce(&mut DraftRevisionMutation) -> WorkflowResult<()>,
 {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account = resolve_active_account(config_report).await?;
+    let account = resolve_mutating_active_account(config_report, &thread_id).await?;
     let detail = workflow_detail(config_report, &account.account_id, &thread_id).await?;
     let current_draft =
         detail
