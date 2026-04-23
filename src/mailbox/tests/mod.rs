@@ -384,6 +384,11 @@ fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
         .unwrap();
     connection
         .execute_batch(include_str!(
+            "../../../migrations/07-account-scoped-attachment-keys/down.sql"
+        ))
+        .unwrap();
+    connection
+        .execute_batch(include_str!(
             "../../../migrations/06-attachment-catalog-export-foundation/down.sql"
         ))
         .unwrap();
