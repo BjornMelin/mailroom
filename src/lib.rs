@@ -88,12 +88,24 @@ async fn run_cli(cli: Cli) -> Result<()> {
     let paths = workspace::WorkspacePaths::from_repo_root(repo_root);
 
     match cli.command {
-        Commands::Audit { command } => handle_audit_command(&paths, command)?,
+        Commands::Audit { command } => {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || handle_audit_command(&paths, command)).await??;
+        }
         Commands::Auth { command } => handle_auth_command(&paths, command).await?,
         Commands::Account { command } => handle_account_command(&paths, command).await?,
-        Commands::Config { command } => handle_config_command(&paths, command)?,
-        Commands::Paths { json } => handle_paths_command(&paths, json)?,
-        Commands::Doctor { json } => handle_doctor_command(&paths, json)?,
+        Commands::Config { command } => {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || handle_config_command(&paths, command)).await??;
+        }
+        Commands::Paths { json } => {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || handle_paths_command(&paths, json)).await??;
+        }
+        Commands::Doctor { json } => {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || handle_doctor_command(&paths, json)).await??;
+        }
         Commands::Gmail { command } => handle_gmail_command(&paths, command).await?,
         Commands::Roadmap => print_roadmap(),
         Commands::Search(args) => handle_search_command(&paths, args).await?,
@@ -104,8 +116,15 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Triage { command } => handle_triage_command(&paths, command).await?,
         Commands::Draft { command } => handle_draft_command(&paths, command).await?,
         Commands::Cleanup { command } => handle_cleanup_command(&paths, command).await?,
-        Commands::Workspace { command } => handle_workspace_command(&paths, command)?,
-        Commands::Store { command } => handle_store_command(&paths, command)?,
+        Commands::Workspace { command } => {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || handle_workspace_command(&paths, command))
+                .await??;
+        }
+        Commands::Store { command } => {
+            let paths = paths.clone();
+            tokio::task::spawn_blocking(move || handle_store_command(&paths, command)).await??;
+        }
     }
 
     Ok(())

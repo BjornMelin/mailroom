@@ -240,7 +240,7 @@ pub async fn setup(
             )
         }
     };
-    let login = finalize_login(config_report, completed_login)?;
+    let login = finalize_login(config_report, completed_login).await?;
 
     Ok(SetupReport {
         imported_client,
@@ -255,7 +255,7 @@ pub async fn login(
 ) -> Result<LoginReport> {
     let completed_login =
         authenticate_with_client_override(config_report, None, no_browser, json).await?;
-    finalize_login(config_report, completed_login)
+    finalize_login(config_report, completed_login).await
 }
 
 pub fn status(config_report: &ConfigReport) -> Result<AuthStatusReport> {
@@ -429,7 +429,7 @@ where
     })
 }
 
-fn finalize_login(
+async fn finalize_login(
     config_report: &ConfigReport,
     completed_login: CompletedOAuthLogin,
 ) -> Result<LoginReport> {
@@ -441,7 +441,8 @@ fn finalize_login(
         &credential_store,
         &completed_login.credentials,
         &completed_login.account_input,
-    )?;
+    )
+    .await?;
 
     Ok(LoginReport {
         opened_browser: completed_login.opened_browser,
@@ -484,27 +485,38 @@ fn oauth_http_client(config: &GmailConfig) -> Result<reqwest::Client> {
         .context("failed to build OAuth reqwest client")
 }
 
-pub(super) fn persist_login_state(
+pub(super) async fn persist_login_state(
     config_report: &ConfigReport,
     workspace_paths: &WorkspacePaths,
     credential_store: &FileCredentialStore,
     credentials: &StoredCredentials,
     account_input: &UpsertAccountInput,
 ) -> Result<AccountRecord> {
-    workspace_paths.ensure_runtime_dirs()?;
-    let previous_credentials = credential_store.load()?;
-    credential_store.save(credentials)?;
-    match persist_active_account(config_report, account_input) {
-        Ok(account) => Ok(account),
-        Err(error) => {
-            rollback_credentials(credential_store, previous_credentials).with_context(|| {
-                format!(
-                    "failed to roll back credential state after login persistence error: {error}"
-                )
-            })?;
-            Err(error)
+    let config_report = config_report.clone();
+    let workspace_paths = workspace_paths.clone();
+    let credential_store = credential_store.clone();
+    let credentials = credentials.clone();
+    let account_input = account_input.clone();
+
+    let account = tokio::task::spawn_blocking(move || {
+        workspace_paths.ensure_runtime_dirs()?;
+        let previous_credentials = credential_store.load()?;
+        credential_store.save(&credentials)?;
+        match persist_active_account(&config_report, &account_input) {
+            Ok(account) => Ok(account),
+            Err(error) => {
+                rollback_credentials(&credential_store, previous_credentials).with_context(|| {
+                    format!(
+                        "failed to roll back credential state after login persistence error: {error}"
+                    )
+                })?;
+                Err(error)
+            }
         }
-    }
+    })
+    .await??;
+
+    Ok(account)
 }
 
 fn persist_active_account(

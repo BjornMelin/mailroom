@@ -7,7 +7,8 @@ pub(crate) async fn handle_auth_command(
     paths: &workspace::WorkspacePaths,
     command: AuthCommand,
 ) -> Result<()> {
-    let config_report = config::resolve(paths)?;
+    let paths = paths.clone();
+    let config_report = tokio::task::spawn_blocking(move || config::resolve(&paths)).await??;
 
     match command {
         AuthCommand::Setup {
@@ -20,8 +21,18 @@ pub(crate) async fn handle_auth_command(
         AuthCommand::Login { json, no_browser } => auth::login(&config_report, no_browser, json)
             .await?
             .print(json)?,
-        AuthCommand::Status { json } => auth::status(&config_report)?.print(json)?,
-        AuthCommand::Logout { json } => auth::logout(&config_report)?.print(json)?,
+        AuthCommand::Status { json } => {
+            let config_report = config_report.clone();
+            tokio::task::spawn_blocking(move || auth::status(&config_report))
+                .await??
+                .print(json)?;
+        }
+        AuthCommand::Logout { json } => {
+            let config_report = config_report.clone();
+            tokio::task::spawn_blocking(move || auth::logout(&config_report))
+                .await??
+                .print(json)?;
+        }
     }
 
     Ok(())

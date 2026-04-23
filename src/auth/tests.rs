@@ -330,8 +330,8 @@ fn setup_reuses_existing_imported_oauth_client_when_no_new_credentials_file_is_g
     assert!(matches!(setup_action, PreparedSetup::UseExisting));
 }
 
-#[test]
-fn persist_login_state_does_not_upsert_account_when_credential_save_fails() {
+#[tokio::test]
+async fn persist_login_state_does_not_upsert_account_when_credential_save_fails() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path().to_path_buf();
     let paths = WorkspacePaths::from_repo_root(repo_root);
@@ -367,14 +367,15 @@ fn persist_login_state_does_not_upsert_account_when_credential_save_fails() {
             refreshed_at_epoch_s: 100,
         },
     )
+    .await
     .unwrap_err();
 
     assert!(!error.to_string().is_empty());
     assert!(!config_report.config.store.database_path.exists());
 }
 
-#[test]
-fn persist_login_state_rolls_back_new_credentials_when_store_init_fails() {
+#[tokio::test]
+async fn persist_login_state_rolls_back_new_credentials_when_store_init_fails() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path().to_path_buf();
     let paths = WorkspacePaths::from_repo_root(repo_root);
@@ -410,6 +411,7 @@ fn persist_login_state_rolls_back_new_credentials_when_store_init_fails() {
             refreshed_at_epoch_s: 100,
         },
     )
+    .await
     .unwrap_err();
 
     assert!(!error.to_string().is_empty());
@@ -417,8 +419,8 @@ fn persist_login_state_rolls_back_new_credentials_when_store_init_fails() {
     assert!(config_report.config.store.database_path.is_dir());
 }
 
-#[test]
-fn persist_login_state_restores_previous_credentials_when_store_init_fails() {
+#[tokio::test]
+async fn persist_login_state_restores_previous_credentials_when_store_init_fails() {
     let temp_dir = TempDir::new().unwrap();
     let repo_root = temp_dir.path().to_path_buf();
     let paths = WorkspacePaths::from_repo_root(repo_root);
@@ -463,6 +465,7 @@ fn persist_login_state_restores_previous_credentials_when_store_init_fails() {
             refreshed_at_epoch_s: 100,
         },
     )
+    .await
     .unwrap_err();
 
     let restored = credential_store.load().unwrap().unwrap();

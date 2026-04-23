@@ -7,7 +7,8 @@ pub(crate) async fn handle_gmail_command(
     paths: &workspace::WorkspacePaths,
     command: GmailCommand,
 ) -> Result<()> {
-    let config_report = config::resolve(paths)?;
+    let paths = paths.clone();
+    let config_report = tokio::task::spawn_blocking(move || config::resolve(&paths)).await??;
 
     match command {
         GmailCommand::Labels {
