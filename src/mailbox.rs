@@ -8,12 +8,12 @@ mod pacing;
 mod pipeline;
 #[path = "mailbox/search.rs"]
 mod search;
-#[path = "mailbox/sync.rs"]
+#[path = "mailbox/sync/mod.rs"]
 mod sync;
 #[path = "mailbox/telemetry.rs"]
 mod telemetry;
 #[cfg(test)]
-#[path = "mailbox/tests.rs"]
+#[path = "mailbox/tests/mod.rs"]
 mod tests;
 #[path = "mailbox/util.rs"]
 mod util;
