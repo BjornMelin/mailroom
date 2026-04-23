@@ -21,6 +21,24 @@ struct SeededMailboxLabels {
     label_names_text: String,
 }
 
+fn inbox_seeded_labels() -> SeededMailboxLabels {
+    SeededMailboxLabels {
+        labels: vec![crate::gmail::GmailLabel {
+            id: String::from("INBOX"),
+            name: String::from("INBOX"),
+            label_type: String::from("system"),
+            message_list_visibility: None,
+            label_list_visibility: None,
+            messages_total: None,
+            messages_unread: None,
+            threads_total: None,
+            threads_unread: None,
+        }],
+        label_ids: vec![String::from("INBOX")],
+        label_names_text: String::from("INBOX"),
+    }
+}
+
 #[path = "search.rs"]
 mod search_orchestration;
 mod sync;
@@ -69,21 +87,7 @@ fn seed_existing_mailbox(
         message_id,
         subject,
         "newer_than:90d",
-        SeededMailboxLabels {
-            labels: vec![crate::gmail::GmailLabel {
-                id: String::from("INBOX"),
-                name: String::from("INBOX"),
-                label_type: String::from("system"),
-                message_list_visibility: None,
-                label_list_visibility: None,
-                messages_total: None,
-                messages_unread: None,
-                threads_total: None,
-                threads_unread: None,
-            }],
-            label_ids: vec![String::from("INBOX")],
-            label_names_text: String::from("INBOX"),
-        },
+        inbox_seeded_labels(),
     );
 }
 
@@ -100,21 +104,7 @@ fn seed_existing_mailbox_with_bootstrap_query(
         message_id,
         subject,
         bootstrap_query,
-        SeededMailboxLabels {
-            labels: vec![crate::gmail::GmailLabel {
-                id: String::from("INBOX"),
-                name: String::from("INBOX"),
-                label_type: String::from("system"),
-                message_list_visibility: None,
-                label_list_visibility: None,
-                messages_total: None,
-                messages_unread: None,
-                threads_total: None,
-                threads_unread: None,
-            }],
-            label_ids: vec![String::from("INBOX")],
-            label_names_text: String::from("INBOX"),
-        },
+        inbox_seeded_labels(),
     );
 }
 
@@ -341,75 +331,63 @@ fn seed_full_sync_checkpoint(config_report: &ConfigReport, seed: FullSyncCheckpo
 
 fn seed_schema_v2_store_with_active_account(config_report: &ConfigReport) {
     store::init(config_report).unwrap();
-    let connection = rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/15-sync-run-history/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/14-sync-pipeline-telemetry-and-page-manifests/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/13-bounded-sync-pipeline/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/12-sync-pacing-state-hardening/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/11-sync-pacing-state/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/10-full-sync-checkpoints/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/09-mailbox-full-sync-staging/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/08-automation-rules-and-bulk-actions/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/07-account-scoped-attachment-keys/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/06-attachment-catalog-export-foundation/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/05-workflow-version-cas/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/04-unified-thread-workflow/down.sql"
-        ))
-        .unwrap();
-    connection
-        .execute_batch(include_str!(
-            "../../../migrations/03-mailbox-sync-search-foundation/down.sql"
-        ))
-        .unwrap();
-    connection
-        .pragma_update(None, "user_version", 2_i64)
-        .unwrap();
+    let mut connection =
+        rusqlite::Connection::open(&config_report.config.store.database_path).unwrap();
+    let tx = connection.transaction().unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/15-sync-run-history/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/14-sync-pipeline-telemetry-and-page-manifests/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/13-bounded-sync-pipeline/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/12-sync-pacing-state-hardening/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/11-sync-pacing-state/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/10-full-sync-checkpoints/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/09-mailbox-full-sync-staging/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/08-automation-rules-and-bulk-actions/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/07-account-scoped-attachment-keys/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/06-attachment-catalog-export-foundation/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/05-workflow-version-cas/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/04-unified-thread-workflow/down.sql"
+    ))
+    .unwrap();
+    tx.execute_batch(include_str!(
+        "../../../migrations/03-mailbox-sync-search-foundation/down.sql"
+    ))
+    .unwrap();
+    tx.pragma_update(None, "user_version", 2_i64).unwrap();
+    tx.commit().unwrap();
 
     accounts::upsert_active(
         &config_report.config.store.database_path,
