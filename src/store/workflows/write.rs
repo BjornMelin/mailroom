@@ -373,12 +373,36 @@ pub(crate) fn retire_draft_state(
             thread_id: input.thread_id.clone(),
         })?;
     let expected_workflow_version = Some(workflow.workflow_version);
+    let previous_draft_revision_id = workflow.current_draft_revision_id;
+    let previous_gmail_draft_id = workflow.gmail_draft_id.clone();
+    let previous_gmail_draft_message_id = workflow.gmail_draft_message_id.clone();
+    let previous_gmail_draft_thread_id = workflow.gmail_draft_thread_id.clone();
 
     clear_draft_state(&mut workflow);
     workflow.last_remote_sync_epoch_s = Some(input.updated_at_epoch_s);
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
     let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
+    let payload_json = json!({
+        "previous_draft_revision_id": previous_draft_revision_id,
+        "previous_gmail_draft_id": previous_gmail_draft_id,
+        "previous_gmail_draft_message_id": previous_gmail_draft_message_id,
+        "previous_gmail_draft_thread_id": previous_gmail_draft_thread_id,
+    })
+    .to_string();
+    insert_event(
+        &transaction,
+        &workflow,
+        &WorkflowEventInsert {
+            event_kind: "draft_state_retired",
+            from_stage: Some(workflow.current_stage),
+            to_stage: Some(workflow.current_stage),
+            triage_bucket: workflow.triage_bucket,
+            note: None,
+            payload_json: &payload_json,
+            created_at_epoch_s: input.updated_at_epoch_s,
+        },
+    )?;
     transaction.commit()?;
     Ok(workflow)
 }
@@ -397,6 +421,10 @@ pub(crate) fn restore_draft_state_with_expected_version(
             thread_id: input.thread_id.clone(),
         })?;
     let expected_workflow_version = expected_workflow_version.or(Some(workflow.workflow_version));
+    let previous_draft_revision_id = workflow.current_draft_revision_id;
+    let previous_gmail_draft_id = workflow.gmail_draft_id.clone();
+    let previous_gmail_draft_message_id = workflow.gmail_draft_message_id.clone();
+    let previous_gmail_draft_thread_id = workflow.gmail_draft_thread_id.clone();
 
     workflow.current_draft_revision_id = input.current_draft_revision_id;
     workflow.gmail_draft_id = input.gmail_draft_id.clone();
@@ -406,6 +434,30 @@ pub(crate) fn restore_draft_state_with_expected_version(
     workflow.updated_at_epoch_s = input.updated_at_epoch_s;
 
     let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
+    let payload_json = json!({
+        "previous_draft_revision_id": previous_draft_revision_id,
+        "previous_gmail_draft_id": previous_gmail_draft_id,
+        "previous_gmail_draft_message_id": previous_gmail_draft_message_id,
+        "previous_gmail_draft_thread_id": previous_gmail_draft_thread_id,
+        "restored_draft_revision_id": input.current_draft_revision_id,
+        "restored_gmail_draft_id": input.gmail_draft_id,
+        "restored_gmail_draft_message_id": input.gmail_draft_message_id,
+        "restored_gmail_draft_thread_id": input.gmail_draft_thread_id,
+    })
+    .to_string();
+    insert_event(
+        &transaction,
+        &workflow,
+        &WorkflowEventInsert {
+            event_kind: "draft_state_restored",
+            from_stage: Some(workflow.current_stage),
+            to_stage: Some(workflow.current_stage),
+            triage_bucket: workflow.triage_bucket,
+            note: None,
+            payload_json: &payload_json,
+            created_at_epoch_s: input.updated_at_epoch_s,
+        },
+    )?;
     transaction.commit()?;
     Ok(workflow)
 }
@@ -455,7 +507,7 @@ fn apply_snapshot(workflow: &mut WorkflowRecord, snapshot: &WorkflowMessageSnaps
     // Keep newer stored snapshot fields when local mailbox state is stale.
     let should_replace_snapshot = workflow
         .latest_message_internal_date_epoch_ms
-        .is_none_or(|current| snapshot.internal_date_epoch_ms >= current);
+        .is_none_or(|current| snapshot.internal_date_epoch_ms > current);
 
     if should_replace_snapshot {
         workflow.latest_message_id = Some(snapshot.message_id.clone());

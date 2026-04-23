@@ -1,9 +1,10 @@
 use super::{
     ApplyCleanupInput, AttachmentInput, CleanupAction, MarkSentInput, PromoteWorkflowInput,
-    RemoteDraftStateInput, ReplyMode, RetireDraftStateInput, SetTriageStateInput, TriageBucket,
-    UpsertDraftRevisionInput, WorkflowListFilter, WorkflowMessageSnapshot, WorkflowRecord,
-    WorkflowStage, WorkflowStoreWriteError, apply_cleanup, get_workflow_detail, inspect_workflows,
-    list_workflows, mark_sent, retire_draft_state, set_remote_draft_state,
+    RemoteDraftStateInput, ReplyMode, RestoreDraftStateInput, RetireDraftStateInput,
+    SetTriageStateInput, TriageBucket, UpsertDraftRevisionInput, WorkflowListFilter,
+    WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage, WorkflowStoreWriteError, apply_cleanup,
+    get_workflow_detail, inspect_workflows, list_workflows, mark_sent,
+    restore_draft_state_with_expected_version, retire_draft_state, set_remote_draft_state,
     set_remote_draft_state_with_expected_version, set_triage_state, upsert_draft_revision,
     upsert_stage, write,
 };

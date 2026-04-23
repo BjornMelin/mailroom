@@ -203,3 +203,61 @@ fn set_triage_state_preserves_newer_existing_snapshot_metadata() {
         "Snippet for Current subject"
     );
 }
+
+#[test]
+fn set_triage_state_preserves_existing_snapshot_metadata_on_equal_timestamp() {
+    let repo_root = unique_temp_dir("mailroom-workflow-triage-equal-snapshot");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SetTriageStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::Urgent,
+            note: None,
+            snapshot: WorkflowMessageSnapshot {
+                message_id: String::from("message-new"),
+                internal_date_epoch_ms: 200,
+                subject: String::from("Current subject"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Snippet for Current subject"),
+            },
+            updated_at_epoch_s: 200,
+        },
+    )
+    .unwrap();
+
+    let workflow = set_triage_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SetTriageStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            triage_bucket: TriageBucket::Fyi,
+            note: Some(String::from("Re-triaged from cached snapshot")),
+            snapshot: WorkflowMessageSnapshot {
+                message_id: String::from("message-stale"),
+                internal_date_epoch_ms: 200,
+                subject: String::from("Stale subject"),
+                from_header: String::from("Alice <alice@example.com>"),
+                snippet: String::from("Snippet for Stale subject"),
+            },
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(workflow.triage_bucket, Some(TriageBucket::Fyi));
+    assert_eq!(workflow.latest_message_id.as_deref(), Some("message-new"));
+    assert_eq!(workflow.latest_message_subject, "Current subject");
+    assert_eq!(
+        workflow.latest_message_snippet,
+        "Snippet for Current subject"
+    );
+}

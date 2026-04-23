@@ -262,4 +262,118 @@ fn retire_draft_state_clears_local_and_remote_draft_fields() {
     assert_eq!(workflow.gmail_draft_message_id, None);
     assert_eq!(workflow.gmail_draft_thread_id, None);
     assert_eq!(workflow.last_remote_sync_epoch_s, Some(300));
+
+    let detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-retire",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        detail
+            .events
+            .iter()
+            .any(|event| event.event_kind == "draft_state_retired")
+    );
+}
+
+#[test]
+fn restore_draft_state_with_expected_version_records_restore_event() {
+    let repo_root = unique_temp_dir("mailroom-workflow-restore-draft-state");
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+
+    seed_drafting_workflow(&config_report, &account.account_id, "thread-restore");
+    set_remote_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RemoteDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-restore"),
+            gmail_draft_id: Some(String::from("gmail-draft-5")),
+            gmail_draft_message_id: Some(String::from("gmail-message-5")),
+            gmail_draft_thread_id: Some(String::from("gmail-thread-5")),
+            updated_at_epoch_s: 201,
+        },
+    )
+    .unwrap();
+    let original_detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-restore",
+    )
+    .unwrap()
+    .unwrap();
+    let original_draft_revision_id = original_detail.workflow.current_draft_revision_id;
+
+    let retired_workflow = retire_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RetireDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-restore"),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap();
+
+    let restored_workflow = restore_draft_state_with_expected_version(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RestoreDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-restore"),
+            current_draft_revision_id: original_draft_revision_id,
+            gmail_draft_id: Some(String::from("gmail-draft-5")),
+            gmail_draft_message_id: Some(String::from("gmail-message-5")),
+            gmail_draft_thread_id: Some(String::from("gmail-thread-5")),
+            updated_at_epoch_s: 350,
+        },
+        Some(retired_workflow.workflow_version),
+    )
+    .unwrap();
+
+    assert_eq!(
+        restored_workflow.current_draft_revision_id,
+        original_draft_revision_id
+    );
+    assert_eq!(
+        restored_workflow.gmail_draft_id.as_deref(),
+        Some("gmail-draft-5")
+    );
+    assert_eq!(
+        restored_workflow.gmail_draft_message_id.as_deref(),
+        Some("gmail-message-5")
+    );
+    assert_eq!(
+        restored_workflow.gmail_draft_thread_id.as_deref(),
+        Some("gmail-thread-5")
+    );
+
+    let detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-restore",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        detail
+            .events
+            .iter()
+            .any(|event| event.event_kind == "draft_state_retired")
+    );
+    assert!(
+        detail
+            .events
+            .iter()
+            .any(|event| event.event_kind == "draft_state_restored")
+    );
 }
