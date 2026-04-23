@@ -1,9 +1,52 @@
 use super::SQLITE_APPLICATION_ID;
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OpenFlags};
+use serde::Serialize;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StoreInitReport {
+    pub database_path: PathBuf,
+    pub database_previously_existed: bool,
+    pub schema_version: i64,
+    pub known_migrations: usize,
+    pub pending_migrations: usize,
+    pub pragmas: StorePragmas,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StorePragmas {
+    pub application_id: i64,
+    pub user_version: i64,
+    pub foreign_keys: bool,
+    pub trusted_schema: bool,
+    pub journal_mode: String,
+    pub synchronous: i64,
+    pub busy_timeout_ms: i64,
+}
+
+impl StoreInitReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        if json {
+            crate::cli_output::print_json_success(self)?;
+        } else {
+            println!("database_path={}", self.database_path.display());
+            println!(
+                "database_previously_existed={}",
+                self.database_previously_existed
+            );
+            println!("schema_version={}", self.schema_version);
+            println!("known_migrations={}", self.known_migrations);
+            println!("pending_migrations={}", self.pending_migrations);
+            crate::store::doctor::print_pragmas(&self.pragmas)?;
+        }
+
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum DatabaseOpenError {
@@ -45,7 +88,7 @@ pub fn open_existing(
     Ok(connection)
 }
 
-fn configure_busy_timeout(
+pub(super) fn configure_busy_timeout(
     connection: &Connection,
     busy_timeout_ms: u64,
 ) -> std::result::Result<(), DatabaseOpenError> {
@@ -84,6 +127,28 @@ pub fn configure_hardening_pragmas(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn read_pragmas(connection: &Connection) -> Result<StorePragmas> {
+    let application_id = connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let user_version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let foreign_keys =
+        connection.pragma_query_value::<i64, _>(None, "foreign_keys", |row| row.get(0))? != 0;
+    let trusted_schema =
+        connection.pragma_query_value::<i64, _>(None, "trusted_schema", |row| row.get(0))? != 0;
+    let journal_mode = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    let synchronous = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    let busy_timeout_ms = connection.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+
+    Ok(StorePragmas {
+        application_id,
+        user_version,
+        foreign_keys,
+        trusted_schema,
+        journal_mode,
+        synchronous,
+        busy_timeout_ms,
+    })
+}
+
 fn create_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
@@ -96,16 +161,4 @@ fn read_only_flags() -> OpenFlags {
 
 fn existing_flags() -> OpenFlags {
     OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX
-}
-
-#[cfg(test)]
-mod tests {
-    use super::configure_busy_timeout;
-    use rusqlite::Connection;
-
-    #[test]
-    fn configure_busy_timeout_rejects_zero() {
-        let connection = Connection::open_in_memory().unwrap();
-        assert!(configure_busy_timeout(&connection, 0).is_err());
-    }
 }
