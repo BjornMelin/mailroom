@@ -37,9 +37,6 @@ pub async fn cleanup_label(
     add_label_names: Vec<String>,
     remove_label_names: Vec<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
-    if add_label_names.is_empty() && remove_label_names.is_empty() {
-        return Err(WorkflowServiceError::CleanupLabelsRequired);
-    }
     cleanup_impl(
         config_report,
         thread_id,
@@ -67,6 +64,31 @@ pub async fn cleanup_trash(
     .await
 }
 
+async fn resolve_cleanup_label_ids_for_action(
+    config_report: &ConfigReport,
+    account_id: &str,
+    action: store::workflows::CleanupAction,
+    add_label_names: &[String],
+    remove_label_names: &[String],
+) -> WorkflowResult<Option<(Vec<String>, Vec<String>)>> {
+    if action != store::workflows::CleanupAction::Label {
+        return Ok(None);
+    }
+    if add_label_names.is_empty() && remove_label_names.is_empty() {
+        return Err(WorkflowServiceError::CleanupLabelsRequired);
+    }
+
+    Ok(Some(
+        resolve_cleanup_label_ids(
+            config_report,
+            account_id,
+            add_label_names,
+            remove_label_names,
+        )
+        .await?,
+    ))
+}
+
 pub(crate) async fn cleanup_tracked_thread_for_automation(
     config_report: &ConfigReport,
     gmail_client: &crate::gmail::GmailClient,
@@ -82,28 +104,14 @@ pub(crate) async fn cleanup_tracked_thread_for_automation(
         return Ok(false);
     };
 
-    if action == store::workflows::CleanupAction::Label
-        && add_label_names.is_empty()
-        && remove_label_names.is_empty()
-    {
-        return Err(WorkflowServiceError::CleanupLabelsRequired);
-    }
-
-    let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
-        Some(
-            resolve_cleanup_label_ids(
-                config_report,
-                account_id,
-                &add_label_names,
-                &remove_label_names,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-
-    gmail_client.get_profile_with_access_scope().await?;
+    let resolved_label_ids = resolve_cleanup_label_ids_for_action(
+        config_report,
+        account_id,
+        action,
+        &add_label_names,
+        &remove_label_names,
+    )
+    .await?;
     execute_cleanup_after_auth(
         config_report,
         gmail_client,
@@ -139,6 +147,15 @@ async fn cleanup_impl(
         remove_label_names: remove_label_names.clone(),
     };
 
+    let resolved_label_ids = resolve_cleanup_label_ids_for_action(
+        config_report,
+        &account_id,
+        action,
+        &add_label_names,
+        &remove_label_names,
+    )
+    .await?;
+
     if !execute {
         return Ok(WorkflowActionReport {
             action: WorkflowAction::CleanupPreview,
@@ -148,20 +165,6 @@ async fn cleanup_impl(
             sync_report: None,
         });
     }
-
-    let resolved_label_ids = if action == store::workflows::CleanupAction::Label {
-        Some(
-            resolve_cleanup_label_ids(
-                config_report,
-                &account_id,
-                &add_label_names,
-                &remove_label_names,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
 
     let gmail_client = crate::gmail_client_for_config(config_report)
         .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
@@ -198,10 +201,18 @@ async fn execute_cleanup_after_auth(
     remove_label_names: Vec<String>,
     resolved_label_ids: Option<(Vec<String>, Vec<String>)>,
 ) -> WorkflowResult<store::workflows::WorkflowRecord> {
-    let account_id = detail.workflow.account_id.clone();
     let thread_id = detail.workflow.thread_id.clone();
     let needs_draft_retirement = detail.workflow.current_draft_revision_id.is_some()
         || detail.workflow.gmail_draft_id.is_some();
+
+    let mut workflow = persist_cleanup_state(
+        config_report,
+        &detail.workflow,
+        action,
+        add_label_names,
+        remove_label_names,
+    )
+    .await?;
 
     match action {
         store::workflows::CleanupAction::Archive => {
@@ -222,6 +233,26 @@ async fn execute_cleanup_after_auth(
         }
     }
 
+    if needs_draft_retirement {
+        workflow = retire_local_draft_then_delete_remote(
+            config_report,
+            gmail_client,
+            workflow,
+            "cleanup.retire_draft_state",
+        )
+        .await?;
+    }
+
+    Ok(workflow)
+}
+
+async fn persist_cleanup_state(
+    config_report: &ConfigReport,
+    workflow: &store::workflows::WorkflowRecord,
+    action: store::workflows::CleanupAction,
+    add_label_names: Vec<String>,
+    remove_label_names: Vec<String>,
+) -> WorkflowResult<store::workflows::WorkflowRecord> {
     let payload_json = serde_json::to_string(&serde_json::json!({
         "add_label_names": add_label_names,
         "remove_label_names": remove_label_names,
@@ -229,10 +260,11 @@ async fn execute_cleanup_after_auth(
     }))?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
-    let cleanup_account_id = account_id.clone();
-    let cleanup_thread_id = thread_id.clone();
+    let cleanup_account_id = workflow.account_id.clone();
+    let cleanup_thread_id = workflow.thread_id.clone();
     let updated_at_epoch_s = current_epoch_seconds()?;
-    let mut workflow = join_blocking(
+
+    join_blocking(
         spawn_blocking(move || {
             store::workflows::apply_cleanup(
                 &database_path,
@@ -248,18 +280,7 @@ async fn execute_cleanup_after_auth(
         }),
         "cleanup.apply",
     )
-    .await?;
-    if needs_draft_retirement {
-        workflow = retire_local_draft_then_delete_remote(
-            config_report,
-            gmail_client,
-            workflow,
-            "cleanup.retire_draft_state",
-        )
-        .await?;
-    }
-
-    Ok(workflow)
+    .await
 }
 
 async fn resolve_cleanup_label_ids(

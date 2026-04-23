@@ -373,15 +373,8 @@ pub async fn promote_workflow(
     if to_stage == store::workflows::WorkflowStage::Closed
         && (workflow.current_draft_revision_id.is_some() || workflow.gmail_draft_id.is_some())
     {
-        let gmail_client = match promoted_close_gmail_client {
-            Some(gmail_client) => gmail_client,
-            None => {
-                let gmail_client = crate::gmail_client_for_config(config_report)
-                    .map_err(|source| WorkflowServiceError::GmailClientInit { source })?;
-                gmail_client.get_profile_with_access_scope().await?;
-                gmail_client
-            }
-        };
+        let gmail_client = promoted_close_gmail_client
+            .expect("promoted_close_gmail_client must be set when to_stage == Closed");
         workflow = retire_local_draft_then_delete_remote(
             config_report,
             &gmail_client,

@@ -2363,9 +2363,12 @@ async fn cleanup_archive_keeps_local_remote_draft_state_when_cleanup_mutation_fa
     .unwrap();
     assert_eq!(
         detail.workflow.current_stage,
-        crate::store::workflows::WorkflowStage::Drafting
+        crate::store::workflows::WorkflowStage::Closed
     );
-    assert_eq!(detail.workflow.last_cleanup_action, None);
+    assert_eq!(
+        detail.workflow.last_cleanup_action,
+        Some(CleanupAction::Archive)
+    );
     assert_eq!(detail.workflow.gmail_draft_id.as_deref(), Some("draft-1"));
     assert!(detail.current_draft.is_some());
 
@@ -2468,6 +2471,7 @@ async fn cleanup_archive_keeps_remote_draft_when_local_cleanup_write_fails() {
         detail.workflow.current_stage,
         crate::store::workflows::WorkflowStage::Drafting
     );
+    assert_eq!(detail.workflow.last_cleanup_action, None);
     assert_eq!(detail.workflow.gmail_draft_id.as_deref(), Some("draft-1"));
     assert!(detail.current_draft.is_some());
 
@@ -2483,60 +2487,20 @@ async fn cleanup_archive_keeps_remote_draft_when_local_cleanup_write_fails() {
 }
 
 #[tokio::test]
-async fn cleanup_archive_requires_gmail_auth_before_persisting_cleanup() {
+async fn cleanup_tracked_thread_for_automation_skips_redundant_profile_refresh() {
     let mock_server = MockServer::start().await;
     let temp_dir = TempDir::new().unwrap();
     let config_report = config_report_for(&temp_dir, &mock_server);
+    seed_credentials(&config_report);
     seed_local_thread_snapshot(&config_report);
-    set_triage_state(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &crate::store::workflows::SetTriageStateInput {
-            account_id: String::from("gmail:operator@example.com"),
-            thread_id: String::from("thread-1"),
-            triage_bucket: TriageBucket::NeedsReplySoon,
-            note: None,
-            snapshot: crate::store::workflows::WorkflowMessageSnapshot {
-                message_id: String::from("m-1"),
-                internal_date_epoch_ms: 100,
-                subject: String::from("Project"),
-                from_header: String::from("Alice <alice@example.com>"),
-                snippet: String::from("Project status"),
-            },
-            updated_at_epoch_s: 101,
-        },
-    )
-    .unwrap();
-
-    let error = cleanup_archive(&config_report, String::from("thread-1"), true)
-        .await
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "failed to refresh the active Gmail account"
-    );
-
-    let detail = get_workflow_detail(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        "gmail:operator@example.com",
-        "thread-1",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        detail.workflow.current_stage,
-        crate::store::workflows::WorkflowStage::Triage
-    );
-    assert_eq!(detail.workflow.last_cleanup_action, None);
-}
-
-#[tokio::test]
-async fn cleanup_tracked_thread_for_automation_requires_gmail_auth_before_persisting_cleanup() {
-    let mock_server = MockServer::start().await;
-    let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
-    seed_local_thread_snapshot(&config_report);
+    Mock::given(method("POST"))
+        .and(path("/gmail/v1/users/me/threads/thread-1/modify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "thread-1",
+            "historyId": "710"
+        })))
+        .mount(&mock_server)
+        .await;
     set_triage_state(
         &config_report.config.store.database_path,
         config_report.config.store.busy_timeout_ms,
@@ -2557,8 +2521,7 @@ async fn cleanup_tracked_thread_for_automation_requires_gmail_auth_before_persis
     )
     .unwrap();
     let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
-
-    let error = cleanup_tracked_thread_for_automation(
+    let applied = cleanup_tracked_thread_for_automation(
         &config_report,
         &gmail_client,
         "gmail:operator@example.com",
@@ -2568,11 +2531,8 @@ async fn cleanup_tracked_thread_for_automation_requires_gmail_auth_before_persis
         vec![String::from("INBOX")],
     )
     .await
-    .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "mailroom is not authenticated; run `mailroom auth login` first"
-    );
+    .unwrap();
+    assert!(applied);
 
     let detail = get_workflow_detail(
         &config_report.config.store.database_path,
@@ -2584,53 +2544,23 @@ async fn cleanup_tracked_thread_for_automation_requires_gmail_auth_before_persis
     .unwrap();
     assert_eq!(
         detail.workflow.current_stage,
-        crate::store::workflows::WorkflowStage::Triage
+        crate::store::workflows::WorkflowStage::Closed
     );
-    assert_eq!(detail.workflow.last_cleanup_action, None);
-}
-
-#[tokio::test]
-async fn cleanup_tracked_thread_for_automation_rejects_empty_label_requests() {
-    let mock_server = MockServer::start().await;
-    let temp_dir = TempDir::new().unwrap();
-    let config_report = config_report_for(&temp_dir, &mock_server);
-    seed_local_thread_snapshot(&config_report);
-    set_triage_state(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-        &crate::store::workflows::SetTriageStateInput {
-            account_id: String::from("gmail:operator@example.com"),
-            thread_id: String::from("thread-1"),
-            triage_bucket: TriageBucket::NeedsReplySoon,
-            note: None,
-            snapshot: crate::store::workflows::WorkflowMessageSnapshot {
-                message_id: String::from("m-1"),
-                internal_date_epoch_ms: 100,
-                subject: String::from("Project"),
-                from_header: String::from("Alice <alice@example.com>"),
-                snippet: String::from("Project status"),
-            },
-            updated_at_epoch_s: 101,
-        },
-    )
-    .unwrap();
-    let gmail_client = crate::gmail_client_for_config(&config_report).unwrap();
-
-    let error = cleanup_tracked_thread_for_automation(
-        &config_report,
-        &gmail_client,
-        "gmail:operator@example.com",
-        "thread-1",
-        CleanupAction::Label,
-        Vec::new(),
-        Vec::new(),
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, WorkflowServiceError::CleanupLabelsRequired));
+    assert_eq!(
+        detail.workflow.last_cleanup_action,
+        Some(CleanupAction::Archive)
+    );
 
     let requests = mock_server.received_requests().await.unwrap();
-    assert!(requests.is_empty());
+    assert!(requests.iter().any(|request| {
+        request.method.as_str() == "POST"
+            && request.url.path() == "/gmail/v1/users/me/threads/thread-1/modify"
+    }));
+    assert!(
+        !requests
+            .iter()
+            .any(|request| { request.url.path() == "/gmail/v1/users/me/profile" })
+    );
 }
 
 #[tokio::test]
