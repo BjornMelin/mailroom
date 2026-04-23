@@ -119,7 +119,11 @@ async fn cleanup_impl(
     remove_label_names: Vec<String>,
 ) -> WorkflowResult<WorkflowActionReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
-    let account_id = resolve_mutating_workflow_account_id(config_report, &thread_id).await?;
+    let account_id = if execute {
+        resolve_mutating_workflow_account_id(config_report, &thread_id).await?
+    } else {
+        super::queries::resolve_workflow_account_id(config_report, Some(&thread_id)).await?
+    };
     let detail = workflow_detail(config_report, &account_id, &thread_id).await?;
     let cleanup_preview = CleanupPreview {
         action,

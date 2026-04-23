@@ -1217,6 +1217,12 @@ async fn workflow_commands_use_persisted_workflow_account_after_logout_without_s
             .await
             .unwrap();
     assert_eq!(resolved_account_id, "gmail:operator@example.com");
+
+    let preview = cleanup_archive(&config_report, String::from("thread-1"), false)
+        .await
+        .unwrap();
+    assert_eq!(preview.workflow.thread_id, "thread-1");
+    assert!(!preview.cleanup_preview.as_ref().unwrap().execute);
 }
 
 #[tokio::test]
