@@ -1,5 +1,6 @@
 /target
 /.mailroom/
+/.codex/
 /.agents/
 /skills-lock.json
 /.env
