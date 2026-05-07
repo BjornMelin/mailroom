@@ -73,6 +73,7 @@ cargo run -- attachment fetch m-1:1.2 --json
 cargo run -- attachment export m-1:1.2 --json
 cargo run -- attachment export m-1:1.2 --to ./exports/statement.pdf --json
 cargo run -- automation rules validate --json
+cargo run -- automation rules suggest --json
 cargo run -- automation rollout --limit 10 --json
 cargo run -- automation run --json
 cargo run -- automation run --rule archive-newsletters --limit 25 --json
@@ -219,7 +220,7 @@ Advanced manual overrides still work:
 
 ## Near-term build plan
 
-1. Use the verification and hardening runbook to canonicalize labels, deepen the local audit corpus, and stage the first real personal ruleset.
+1. Use the verification and hardening runbook to canonicalize labels, deepen the local audit corpus, and generate disabled starter rules with `automation rules suggest`.
 2. Expand automation ergonomics only after a few low-surprise micro-batch archive/label runs land cleanly.
 3. Expand unsubscribe assistance only after the deeper sync proves out list-header coverage in the local cache.
 4. Build a TUI over the existing command core, audit surfaces, and SQLite workflow model.

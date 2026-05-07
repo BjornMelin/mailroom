@@ -1,10 +1,13 @@
+use super::headers::match_precedence_values;
 use super::model::{
     AutomationApplyReport, AutomationPruneReport, AutomationPruneRequest, AutomationPruneStatus,
     AutomationRolloutCandidateSummary, AutomationRolloutReport, AutomationRolloutRequest,
-    AutomationRule, AutomationRuleAction, AutomationRulesValidateReport,
-    AutomationRunPreviewReport, AutomationRunRequest, AutomationShowReport,
+    AutomationRule, AutomationRuleAction, AutomationRulesSuggestReport,
+    AutomationRulesSuggestRequest, AutomationRulesValidateReport, AutomationRunPreviewReport,
+    AutomationRunRequest, AutomationShowReport,
 };
 use super::rules::{ResolvedAutomationRules, resolve_rule_selection, validate_rule_file};
+use super::suggestions::suggest_rules_from_candidates;
 use crate::config::ConfigReport;
 use crate::gmail::GmailClient;
 use crate::store;
@@ -42,6 +45,14 @@ pub enum AutomationServiceError {
     InvalidRolloutLimit,
     #[error("automation prune --older-than-days must be greater than zero")]
     InvalidPruneWindow,
+    #[error("automation rules suggest --limit must be greater than zero")]
+    InvalidSuggestionLimit,
+    #[error("automation rules suggest --min-thread-count must be greater than zero")]
+    InvalidSuggestionMinThreadCount,
+    #[error("automation rules suggest --older-than-days must be greater than zero")]
+    InvalidSuggestionOlderThanDays,
+    #[error("automation rules suggest --sample-limit must be greater than zero")]
+    InvalidSuggestionSampleLimit,
     #[error("re-run with --execute to apply automation changes")]
     ExecuteRequired,
     #[error(
@@ -78,6 +89,11 @@ pub enum AutomationServiceError {
     },
     #[error("{message}")]
     RuleValidation { message: String },
+    #[error("failed to render suggested automation rule TOML: {source}")]
+    RuleTomlSerialize {
+        #[source]
+        source: toml::ser::Error,
+    },
     #[error("failed to join automation task: {source}")]
     TaskPanic {
         #[source]
@@ -113,6 +129,25 @@ pub enum AutomationServiceError {
 pub async fn validate_rules(config_report: &ConfigReport) -> Result<AutomationRulesValidateReport> {
     ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
     Ok(validate_rule_file(config_report).await?)
+}
+
+pub async fn suggest_rules(
+    config_report: &ConfigReport,
+    request: AutomationRulesSuggestRequest,
+) -> Result<AutomationRulesSuggestReport> {
+    validate_suggest_request(&request)?;
+    ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
+    init_store_task(config_report).await?;
+    let account_id = resolve_automation_account_id_task(config_report).await?;
+    let thread_candidates = list_latest_thread_candidates_task(config_report, &account_id).await?;
+    let now_epoch_ms = current_epoch_seconds()?.saturating_mul(1_000);
+    Ok(suggest_rules_from_candidates(
+        config_report,
+        account_id,
+        &thread_candidates,
+        &request,
+        now_epoch_ms,
+    )?)
 }
 
 pub async fn run_preview(
@@ -643,6 +678,24 @@ fn normalize_prune_statuses(statuses: Vec<AutomationPruneStatus>) -> Vec<Automat
     }
 }
 
+fn validate_suggest_request(
+    request: &AutomationRulesSuggestRequest,
+) -> Result<(), AutomationServiceError> {
+    if request.limit == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionLimit);
+    }
+    if request.min_thread_count == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionMinThreadCount);
+    }
+    if request.older_than_days == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionOlderThanDays);
+    }
+    if request.sample_limit == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionSampleLimit);
+    }
+    Ok(())
+}
+
 fn prune_status_to_run_status(status: AutomationPruneStatus) -> AutomationRunStatus {
     match status {
         AutomationPruneStatus::Previewed => AutomationRunStatus::Previewed,
@@ -854,7 +907,7 @@ fn match_rule(
         candidate.list_id_header.as_deref(),
         &rule.matcher.list_id_contains,
     )?;
-    let precedence_matches = match_optional_contains(
+    let precedence_matches = match_precedence_values(
         candidate.precedence_header.as_deref(),
         &rule.matcher.precedence,
     )?;
@@ -1379,6 +1432,31 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].rule_id, "high-priority");
         assert_eq!(selected[0].thread_id, "thread-old");
+    }
+
+    #[test]
+    fn build_run_candidates_matches_precedence_by_exact_token() {
+        let planned_rules = vec![planned_precedence_rule("bulk-precedence")];
+        let mut malformed_precedence =
+            thread_candidate("thread-notbulk", "message-notbulk", 100, "Digest");
+        malformed_precedence.precedence_header = Some(String::from("notbulk"));
+        let mut bulk_precedence = thread_candidate("thread-bulk", "message-bulk", 200, "Digest");
+        bulk_precedence.precedence_header = Some(String::from("x-priority; bulk"));
+
+        let selected = build_run_candidates(
+            &[malformed_precedence, bulk_precedence],
+            &planned_rules,
+            0,
+            10,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].rule_id, "bulk-precedence");
+        assert_eq!(selected[0].thread_id, "thread-bulk");
+        assert_eq!(
+            selected[0].reason.precedence_values,
+            vec![String::from("bulk")]
+        );
     }
 
     #[tokio::test]
@@ -2087,6 +2165,29 @@ kind = "archive"
             },
             action: AutomationActionSnapshot {
                 kind: action_kind,
+                add_label_ids: Vec::new(),
+                add_label_names: Vec::new(),
+                remove_label_ids: vec![String::from("INBOX")],
+                remove_label_names: vec![String::from("INBOX")],
+            },
+        }
+    }
+
+    fn planned_precedence_rule(id: &str) -> PlannedRule {
+        PlannedRule {
+            rule: AutomationRule {
+                id: String::from(id),
+                description: None,
+                enabled: true,
+                priority: 100,
+                matcher: AutomationMatchRule {
+                    precedence: vec![String::from("bulk")],
+                    ..AutomationMatchRule::default()
+                },
+                action: crate::automation::model::AutomationRuleAction::Archive,
+            },
+            action: AutomationActionSnapshot {
+                kind: AutomationActionKind::Archive,
                 add_label_ids: Vec::new(),
                 add_label_names: Vec::new(),
                 remove_label_ids: vec![String::from("INBOX")],

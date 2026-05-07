@@ -219,6 +219,12 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
                 json: *json,
                 operation: "automation.rules.validate",
             },
+            AutomationCommand::Rules {
+                command: AutomationRulesCommand::Suggest { json, .. },
+            } => CommandMetadata {
+                json: *json,
+                operation: "automation.rules.suggest",
+            },
             AutomationCommand::Run { json, .. } => CommandMetadata {
                 json: *json,
                 operation: "automation.run",

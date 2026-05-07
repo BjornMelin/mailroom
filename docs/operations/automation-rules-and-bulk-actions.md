@@ -7,6 +7,7 @@ This runbook covers Mailroom’s review-first automation surface.
 The current automation slice owns:
 
 - a local typed rules file at `.mailroom/automation.toml`
+- read-only starter rule suggestions from recurring local mailbox evidence
 - rule validation and preview snapshots
 - read-only rollout checks for first-wave micro-batch readiness
 - persisted automation runs and append-only run events
@@ -33,11 +34,14 @@ cargo run -- audit labels --json
 cp config/automation.example.toml .mailroom/automation.toml
 ```
 
-Automation commands require:
+Automation commands other than `automation rules suggest` require:
 
 - an authenticated active Gmail account
 - a locally synced mailbox
 - an existing `.mailroom/automation.toml` file
+
+`automation rules suggest` still requires an authenticated active account and
+local sync evidence, but it does not require an existing rules file.
 
 If you use label actions, the referenced label names must already exist in the
 local Gmail label cache. If you created labels recently, run `mailroom sync run`
@@ -50,6 +54,18 @@ Mailroom reads only one active rule file:
 - `.mailroom/automation.toml`
 
 Use `config/automation.example.toml` as the tracked template.
+
+You can generate disabled starter rules from recurring older `INBOX` list or
+bulk sender evidence in the local cache:
+
+```bash
+cargo run -- automation rules suggest --json
+cargo run -- automation rules suggest --limit 5 --min-thread-count 4 --older-than-days 21 --json
+```
+
+Suggestions are read-only. They do not write `.mailroom/automation.toml` and do
+not mutate Gmail. Review the disabled TOML snippets, copy only low-surprise
+rules into `.mailroom/automation.toml`, then enable one rule at a time.
 
 Supported match fields:
 
@@ -105,6 +121,12 @@ Validate the active file:
 
 ```bash
 cargo run -- automation rules validate --json
+```
+
+Generate disabled starter rules before editing the active file:
+
+```bash
+cargo run -- automation rules suggest --json
 ```
 
 Check first-wave rollout readiness without saving a run:

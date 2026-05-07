@@ -118,6 +118,10 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             AutomationServiceError::InvalidLimit
             | AutomationServiceError::InvalidRolloutLimit
             | AutomationServiceError::InvalidPruneWindow
+            | AutomationServiceError::InvalidSuggestionLimit
+            | AutomationServiceError::InvalidSuggestionMinThreadCount
+            | AutomationServiceError::InvalidSuggestionOlderThanDays
+            | AutomationServiceError::InvalidSuggestionSampleLimit
             | AutomationServiceError::ExecuteRequired
             | AutomationServiceError::RuleFileMissing { .. }
             | AutomationServiceError::RuleFileRead { .. }
@@ -133,6 +137,9 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
             }
             AutomationServiceError::TaskPanic { .. } => {
                 (ErrorCode::InternalFailure, "automation.task_panic")
+            }
+            AutomationServiceError::RuleTomlSerialize { .. } => {
+                (ErrorCode::InternalFailure, "automation.rule_toml")
             }
             AutomationServiceError::StoreInit { .. }
             | AutomationServiceError::MailboxRead { .. }
