@@ -10,14 +10,15 @@ pub(crate) use read::{
 pub(crate) use types::{
     AppendAutomationRunEventInput, AutomationActionKind, AutomationActionSnapshot,
     AutomationApplyStatus, AutomationDoctorReport, AutomationMatchReason,
-    AutomationRunCandidateRecord, AutomationRunDetail, AutomationRunEventRecord,
-    AutomationRunRecord, AutomationRunStatus, AutomationStoreReadError, AutomationStoreWriteError,
-    AutomationThreadCandidate, CandidateApplyResultInput, CreateAutomationRunInput,
-    FinalizeAutomationRunInput, NewAutomationRunCandidate,
+    AutomationPruneStoreReport, AutomationRunCandidateRecord, AutomationRunDetail,
+    AutomationRunEventRecord, AutomationRunRecord, AutomationRunStatus, AutomationStoreReadError,
+    AutomationStoreWriteError, AutomationThreadCandidate, CandidateApplyResultInput,
+    CreateAutomationRunInput, FinalizeAutomationRunInput, NewAutomationRunCandidate,
+    PruneAutomationRunsInput,
 };
 pub(crate) use write::{
     append_automation_run_event, claim_automation_run_for_apply, create_automation_run,
-    finalize_automation_run, record_candidate_apply_result,
+    finalize_automation_run, prune_automation_runs, record_candidate_apply_result,
 };
 
 fn is_missing_automation_table_error(error: &rusqlite::Error) -> bool {

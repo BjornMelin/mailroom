@@ -223,6 +223,10 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
                 json: *json,
                 operation: "automation.run",
             },
+            AutomationCommand::Rollout { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "automation.rollout",
+            },
             AutomationCommand::Show { json, .. } => CommandMetadata {
                 json: *json,
                 operation: "automation.show",
@@ -230,6 +234,10 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
             AutomationCommand::Apply { json, .. } => CommandMetadata {
                 json: *json,
                 operation: "automation.apply",
+            },
+            AutomationCommand::Prune { json, .. } => CommandMetadata {
+                json: *json,
+                operation: "automation.prune",
             },
         },
         Commands::Sync { command } => match command {

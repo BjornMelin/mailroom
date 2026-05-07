@@ -1,11 +1,11 @@
 use super::{
-    AppendAutomationRunEventInput, AutomationRunDetail, AutomationRunStatus,
-    AutomationStoreWriteError, CandidateApplyResultInput, CreateAutomationRunInput,
-    FinalizeAutomationRunInput,
+    AppendAutomationRunEventInput, AutomationPruneStoreReport, AutomationRunDetail,
+    AutomationRunStatus, AutomationStoreWriteError, CandidateApplyResultInput,
+    CreateAutomationRunInput, FinalizeAutomationRunInput, PruneAutomationRunsInput,
 };
 use crate::store::connection;
 use anyhow::Result;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter, types::Value};
 use std::path::Path;
 
 pub(crate) fn create_automation_run(
@@ -264,6 +264,76 @@ pub(crate) fn claim_automation_run_for_apply(
     }
     transaction.commit()?;
     Ok(())
+}
+
+pub(crate) fn prune_automation_runs(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    input: &PruneAutomationRunsInput,
+) -> Result<AutomationPruneStoreReport, AutomationStoreWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| AutomationStoreWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction()?;
+
+    if input.statuses.is_empty() {
+        transaction.commit()?;
+        return Ok(AutomationPruneStoreReport {
+            matched_run_count: 0,
+            matched_candidate_count: 0,
+            matched_event_count: 0,
+            deleted_run_count: 0,
+        });
+    }
+
+    let status_placeholders = vec!["?"; input.statuses.len()].join(", ");
+    let predicate =
+        format!("account_id = ? AND created_at_epoch_s < ? AND status IN ({status_placeholders})");
+    let params = prune_params(input);
+
+    let count_sql = format!(
+        "WITH matched_runs AS (
+             SELECT run_id
+             FROM automation_runs
+             WHERE {predicate}
+         )
+         SELECT
+             (SELECT COUNT(*) FROM matched_runs),
+             (SELECT COUNT(*) FROM automation_run_candidates
+              WHERE run_id IN (SELECT run_id FROM matched_runs)),
+             (SELECT COUNT(*) FROM automation_run_events
+              WHERE run_id IN (SELECT run_id FROM matched_runs))"
+    );
+    let mut report = transaction.query_row(&count_sql, params_from_iter(params.iter()), |row| {
+        Ok(AutomationPruneStoreReport {
+            matched_run_count: row.get(0)?,
+            matched_candidate_count: row.get(1)?,
+            matched_event_count: row.get(2)?,
+            deleted_run_count: 0,
+        })
+    })?;
+
+    if input.execute {
+        let delete_sql = format!("DELETE FROM automation_runs WHERE {predicate}");
+        let deleted_run_count =
+            transaction.execute(&delete_sql, params_from_iter(params.iter()))?;
+        report.deleted_run_count = i64::try_from(deleted_run_count).unwrap_or(i64::MAX);
+    }
+
+    transaction.commit()?;
+    Ok(report)
+}
+
+fn prune_params(input: &PruneAutomationRunsInput) -> Vec<Value> {
+    let mut values = Vec::with_capacity(input.statuses.len() + 2);
+    values.push(Value::Text(input.account_id.clone()));
+    values.push(Value::Integer(input.cutoff_epoch_s));
+    values.extend(
+        input
+            .statuses
+            .iter()
+            .map(|status| Value::Text(status.as_str().to_owned())),
+    );
+    values
 }
 
 pub(crate) fn append_automation_run_event(

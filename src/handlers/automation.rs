@@ -25,6 +25,16 @@ pub(crate) async fn handle_automation_command(
         )
         .await?
         .print(json)?,
+        AutomationCommand::Rollout {
+            rule_ids,
+            limit,
+            json,
+        } => automation::rollout(
+            &config_report,
+            automation::AutomationRolloutRequest { rule_ids, limit },
+        )
+        .await?
+        .print(json)?,
         AutomationCommand::Show { run_id, json } => automation::show_run(&config_report, run_id)
             .await?
             .print(json)?,
@@ -35,6 +45,21 @@ pub(crate) async fn handle_automation_command(
         } => automation::apply_run(&config_report, run_id, execute)
             .await?
             .print(json)?,
+        AutomationCommand::Prune {
+            older_than_days,
+            statuses,
+            execute,
+            json,
+        } => automation::prune_runs(
+            &config_report,
+            automation::AutomationPruneRequest {
+                older_than_days,
+                statuses: statuses.into_iter().map(Into::into).collect(),
+                execute,
+            },
+        )
+        .await?
+        .print(json)?,
     }
 
     Ok(())

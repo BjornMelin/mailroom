@@ -1,14 +1,47 @@
+use crate::audit::VerificationAuditReport;
 use crate::mailbox::SyncRunReport;
 use crate::store::automation::{AutomationActionKind, AutomationRunDetail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const DEFAULT_AUTOMATION_RUN_LIMIT: usize = 250;
+pub const DEFAULT_AUTOMATION_ROLLOUT_LIMIT: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct AutomationRunRequest {
     pub rule_ids: Vec<String>,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationRolloutRequest {
+    pub rule_ids: Vec<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationPruneRequest {
+    pub older_than_days: u32,
+    pub statuses: Vec<AutomationPruneStatus>,
+    pub execute: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationPruneStatus {
+    Previewed,
+    Applied,
+    ApplyFailed,
+}
+
+impl AutomationPruneStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Previewed => "previewed",
+            Self::Applied => "applied",
+            Self::ApplyFailed => "apply_failed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,6 +68,34 @@ pub struct AutomationRunPreviewReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AutomationRolloutReport {
+    pub verification: VerificationAuditReport,
+    pub rules: Option<AutomationRulesValidateReport>,
+    pub selected_rule_ids: Vec<String>,
+    pub selected_rule_count: usize,
+    pub candidate_count: usize,
+    pub candidates: Vec<AutomationRolloutCandidateSummary>,
+    pub blocked_rule_ids: Vec<String>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub command_plan: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationRolloutCandidateSummary {
+    pub rule_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    pub action_kind: String,
+    pub subject: String,
+    pub from_address: Option<String>,
+    pub label_names: Vec<String>,
+    pub has_list_unsubscribe: bool,
+    pub matched_predicates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AutomationShowReport {
     pub detail: AutomationRunDetail,
 }
@@ -46,6 +107,21 @@ pub struct AutomationApplyReport {
     pub applied_candidate_count: usize,
     pub failed_candidate_count: usize,
     pub sync_report: Option<SyncRunReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationPruneReport {
+    pub account_id: String,
+    pub execute: bool,
+    pub older_than_days: u32,
+    pub cutoff_epoch_s: i64,
+    pub statuses: Vec<String>,
+    pub matched_run_count: i64,
+    pub matched_candidate_count: i64,
+    pub matched_event_count: i64,
+    pub deleted_run_count: i64,
+    pub warnings: Vec<String>,
+    pub next_steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

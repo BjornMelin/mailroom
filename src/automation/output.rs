@@ -1,6 +1,6 @@
 use super::model::{
-    AutomationApplyReport, AutomationRulesValidateReport, AutomationRunPreviewReport,
-    AutomationShowReport,
+    AutomationApplyReport, AutomationPruneReport, AutomationRolloutReport,
+    AutomationRulesValidateReport, AutomationRunPreviewReport, AutomationShowReport,
 };
 use anyhow::Result;
 use std::io::{self, Write};
@@ -70,6 +70,79 @@ impl AutomationRunPreviewReport {
     }
 }
 
+impl AutomationRolloutReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
+    }
+
+    fn render_plain(&self) -> String {
+        let mut lines = vec![
+            String::from("operation=rollout"),
+            format!(
+                "account_id={}",
+                sanitize(self.verification.account_id.as_deref().unwrap_or("<none>"))
+            ),
+            format!("authenticated={}", self.verification.authenticated),
+            format!("rules_file_exists={}", self.verification.rules_file_exists),
+            format!("selected_rule_count={}", self.selected_rule_count),
+            format!(
+                "selected_rule_ids={}",
+                sanitize(&self.selected_rule_ids.join(","))
+            ),
+            format!("candidate_count={}", self.candidate_count),
+            format!("blocked_rule_count={}", self.blocked_rule_ids.len()),
+        ];
+        if !self.blocked_rule_ids.is_empty() {
+            lines.push(format!(
+                "blocked_rule_ids={}",
+                sanitize(&self.blocked_rule_ids.join(","))
+            ));
+        }
+        if !self.candidates.is_empty() {
+            lines.push(String::from("results_format=tsv"));
+            lines.push(String::from(
+                "rule_id\tthread_id\tmessage_id\taction\thas_unsubscribe\tfrom_address\tsubject\tlabels\tmatched_predicates",
+            ));
+            lines.extend(self.candidates.iter().map(|candidate| {
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    sanitize(&candidate.rule_id),
+                    sanitize(&candidate.thread_id),
+                    sanitize(&candidate.message_id),
+                    sanitize(&candidate.action_kind),
+                    candidate.has_list_unsubscribe,
+                    sanitize(candidate.from_address.as_deref().unwrap_or_default()),
+                    sanitize(&candidate.subject),
+                    sanitize(&candidate.label_names.join(" | ")),
+                    sanitize(&candidate.matched_predicates.join(", ")),
+                )
+            }));
+        }
+        for blocker in &self.blockers {
+            lines.push(format!("blocker={}", sanitize(blocker)));
+        }
+        for warning in &self.warnings {
+            lines.push(format!("warning={}", sanitize(warning)));
+        }
+        for next_step in &self.next_steps {
+            lines.push(format!("next_step={}", sanitize(next_step)));
+        }
+        for command in &self.command_plan {
+            lines.push(format!("command={}", sanitize(command)));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {
+        if json {
+            crate::cli_output::write_json_success(writer, self)?;
+        } else {
+            writer.write_all(self.render_plain().as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
 impl AutomationShowReport {
     pub fn print(&self, json: bool) -> Result<()> {
         route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
@@ -77,6 +150,43 @@ impl AutomationShowReport {
 
     fn render_plain(&self) -> String {
         render_run_detail("show", &self.detail)
+    }
+
+    fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {
+        if json {
+            crate::cli_output::write_json_success(writer, self)?;
+        } else {
+            writer.write_all(self.render_plain().as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+impl AutomationPruneReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
+    }
+
+    fn render_plain(&self) -> String {
+        let mut lines = vec![
+            String::from("operation=prune"),
+            format!("account_id={}", sanitize(&self.account_id)),
+            format!("execute={}", self.execute),
+            format!("older_than_days={}", self.older_than_days),
+            format!("cutoff_epoch_s={}", self.cutoff_epoch_s),
+            format!("statuses={}", sanitize(&self.statuses.join(","))),
+            format!("matched_run_count={}", self.matched_run_count),
+            format!("matched_candidate_count={}", self.matched_candidate_count),
+            format!("matched_event_count={}", self.matched_event_count),
+            format!("deleted_run_count={}", self.deleted_run_count),
+        ];
+        for warning in &self.warnings {
+            lines.push(format!("warning={}", sanitize(warning)));
+        }
+        for next_step in &self.next_steps {
+            lines.push(format!("next_step={}", sanitize(next_step)));
+        }
+        lines.join("\n") + "\n"
     }
 
     fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {

@@ -73,10 +73,12 @@ cargo run -- attachment fetch m-1:1.2 --json
 cargo run -- attachment export m-1:1.2 --json
 cargo run -- attachment export m-1:1.2 --to ./exports/statement.pdf --json
 cargo run -- automation rules validate --json
+cargo run -- automation rollout --limit 10 --json
 cargo run -- automation run --json
 cargo run -- automation run --rule archive-newsletters --limit 25 --json
 cargo run -- automation show 42 --json
 cargo run -- automation apply 42 --execute --json
+cargo run -- automation prune --older-than-days 30 --json
 cargo run -- workflow list --json
 cargo run -- workflow show thread-123 --json
 cargo run -- triage set thread-123 --bucket urgent --note "reply today" --json

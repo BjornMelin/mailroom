@@ -280,6 +280,18 @@ pub enum AutomationCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Check first-wave rollout readiness and preview matching candidates without persisting a run
+    Rollout {
+        /// Restrict the rollout check to one or more specific rule IDs
+        #[arg(long = "rule")]
+        rule_ids: Vec<String>,
+        /// Maximum number of thread candidates to preview
+        #[arg(long, default_value_t = crate::automation::DEFAULT_AUTOMATION_ROLLOUT_LIMIT)]
+        limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect a persisted automation review snapshot
     Show {
         /// Numeric automation run ID
@@ -299,6 +311,38 @@ pub enum AutomationCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Prune stale local automation review snapshots after a dry-run review
+    Prune {
+        /// Delete snapshots older than this many days
+        #[arg(long)]
+        older_than_days: u32,
+        /// Restrict pruning to one or more terminal snapshot statuses
+        #[arg(long = "status", value_enum)]
+        statuses: Vec<AutomationPruneStatusArg>,
+        /// Execute the local snapshot deletion
+        #[arg(long)]
+        execute: bool,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AutomationPruneStatusArg {
+    Previewed,
+    Applied,
+    ApplyFailed,
+}
+
+impl From<AutomationPruneStatusArg> for crate::automation::AutomationPruneStatus {
+    fn from(value: AutomationPruneStatusArg) -> Self {
+        match value {
+            AutomationPruneStatusArg::Previewed => Self::Previewed,
+            AutomationPruneStatusArg::Applied => Self::Applied,
+            AutomationPruneStatusArg::ApplyFailed => Self::ApplyFailed,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
