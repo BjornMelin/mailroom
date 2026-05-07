@@ -201,10 +201,7 @@ async fn load_snapshot(
 
     let (doctor, verification) = match report_task.await {
         Ok(reports) => reports,
-        Err(error) => (
-            Err(format!("diagnostic task failed: {error}")),
-            Err(format!("verification task failed: {error}")),
-        ),
+        Err(error) => failed_diagnostic_reports(error),
     };
 
     let workflows = crate::workflows::list_workflows_read_only(config_report, None, None)
@@ -226,6 +223,18 @@ async fn load_snapshot(
         workflows,
         automation,
     }
+}
+
+fn failed_diagnostic_reports(
+    error: impl std::fmt::Display,
+) -> (
+    std::result::Result<DoctorReport, String>,
+    std::result::Result<audit::VerificationAuditReport, String>,
+) {
+    (
+        Err(format!("diagnostic task failed: {error}")),
+        Err(format!("verification task failed: {error}")),
+    )
 }
 
 async fn handle_key(
@@ -726,10 +735,15 @@ fn error_chain(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, load_snapshot, truncate};
+    use super::{
+        Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, failed_diagnostic_reports, load_snapshot, render,
+        truncate,
+    };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
     use crate::workspace::WorkspacePaths;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use tempfile::TempDir;
 
     #[test]
@@ -758,6 +772,64 @@ mod tests {
         assert_eq!(app.view, View::Dashboard);
     }
 
+    #[test]
+    fn failed_diagnostic_reports_preserve_task_failure_context() {
+        let (doctor, verification) = failed_diagnostic_reports("worker panicked");
+
+        assert_eq!(
+            doctor.unwrap_err(),
+            "diagnostic task failed: worker panicked"
+        );
+        assert_eq!(
+            verification.unwrap_err(),
+            "verification task failed: worker panicked"
+        );
+    }
+
+    #[test]
+    fn dashboard_renders_snapshot_errors() {
+        let mut app = TuiApp::new(empty_snapshot(), None);
+        app.snapshot.doctor = Err(String::from("doctor failed"));
+        app.snapshot.verification = Err(String::from("verification failed"));
+
+        let output = render_app(&app);
+
+        assert!(output.contains("error: doctor failed"));
+        assert!(output.contains("error: verification failed"));
+    }
+
+    #[test]
+    fn search_renders_search_errors() {
+        let mut app = TuiApp::new(empty_snapshot(), Some(String::from("invoice")));
+        app.search_report = Some(Err(String::from("search failed")));
+
+        let output = render_app(&app);
+
+        assert!(output.contains("error: search failed"));
+    }
+
+    #[test]
+    fn workflows_render_report_errors() {
+        let mut app = TuiApp::new(empty_snapshot(), None);
+        app.view = View::Workflows;
+        app.snapshot.workflows = Err(String::from("workflow report failed"));
+
+        let output = render_app(&app);
+
+        assert!(output.contains("error: workflow report failed"));
+    }
+
+    #[test]
+    fn automation_renders_report_errors() {
+        let mut app = TuiApp::new(empty_snapshot(), None);
+        app.view = View::Automation;
+        app.snapshot.automation = Err(String::from("automation report failed"));
+
+        let output = render_app(&app);
+
+        assert!(output.contains("error: automation report failed"));
+    }
+
     #[tokio::test]
     async fn snapshot_load_does_not_create_runtime_state() {
         let temp_dir = TempDir::new().unwrap();
@@ -769,6 +841,7 @@ mod tests {
 
         assert!(snapshot.doctor.is_ok());
         assert!(snapshot.verification.is_ok());
+        assert!(snapshot.workflows.is_err());
         assert!(!paths.runtime_root.exists());
     }
 
@@ -803,5 +876,18 @@ mod tests {
             workflows: Err(String::from("not loaded")),
             automation: Err(String::from("not loaded")),
         }
+    }
+
+    fn render_app(app: &TuiApp) -> String {
+        let backend = TestBackend::new(96, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
     }
 }
