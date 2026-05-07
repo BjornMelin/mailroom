@@ -353,6 +353,24 @@ pub enum AutomationRulesCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Suggest disabled starter rules from recurring local mailbox evidence
+    Suggest {
+        /// Maximum number of starter rules to suggest
+        #[arg(long, default_value_t = crate::automation::DEFAULT_AUTOMATION_SUGGESTION_LIMIT)]
+        limit: usize,
+        /// Minimum recurring thread count required before suggesting a rule
+        #[arg(long, default_value_t = crate::automation::DEFAULT_AUTOMATION_SUGGESTION_MIN_THREAD_COUNT)]
+        min_thread_count: usize,
+        /// Only suggest rules for threads at least this old
+        #[arg(long, default_value_t = crate::automation::DEFAULT_AUTOMATION_SUGGESTION_OLDER_THAN_DAYS)]
+        older_than_days: u32,
+        /// Maximum sample threads to include per suggestion
+        #[arg(long, default_value_t = crate::automation::DEFAULT_AUTOMATION_SUGGESTION_SAMPLE_LIMIT)]
+        sample_limit: usize,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

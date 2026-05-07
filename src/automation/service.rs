@@ -1,10 +1,12 @@
 use super::model::{
     AutomationApplyReport, AutomationPruneReport, AutomationPruneRequest, AutomationPruneStatus,
     AutomationRolloutCandidateSummary, AutomationRolloutReport, AutomationRolloutRequest,
-    AutomationRule, AutomationRuleAction, AutomationRulesValidateReport,
-    AutomationRunPreviewReport, AutomationRunRequest, AutomationShowReport,
+    AutomationRule, AutomationRuleAction, AutomationRulesSuggestReport,
+    AutomationRulesSuggestRequest, AutomationRulesValidateReport, AutomationRunPreviewReport,
+    AutomationRunRequest, AutomationShowReport,
 };
 use super::rules::{ResolvedAutomationRules, resolve_rule_selection, validate_rule_file};
+use super::suggestions::suggest_rules_from_candidates;
 use crate::config::ConfigReport;
 use crate::gmail::GmailClient;
 use crate::store;
@@ -42,6 +44,14 @@ pub enum AutomationServiceError {
     InvalidRolloutLimit,
     #[error("automation prune --older-than-days must be greater than zero")]
     InvalidPruneWindow,
+    #[error("automation rules suggest --limit must be greater than zero")]
+    InvalidSuggestionLimit,
+    #[error("automation rules suggest --min-thread-count must be greater than zero")]
+    InvalidSuggestionMinThreadCount,
+    #[error("automation rules suggest --older-than-days must be greater than zero")]
+    InvalidSuggestionOlderThanDays,
+    #[error("automation rules suggest --sample-limit must be greater than zero")]
+    InvalidSuggestionSampleLimit,
     #[error("re-run with --execute to apply automation changes")]
     ExecuteRequired,
     #[error(
@@ -78,6 +88,11 @@ pub enum AutomationServiceError {
     },
     #[error("{message}")]
     RuleValidation { message: String },
+    #[error("failed to render suggested automation rule TOML: {source}")]
+    RuleTomlSerialize {
+        #[source]
+        source: toml::ser::Error,
+    },
     #[error("failed to join automation task: {source}")]
     TaskPanic {
         #[source]
@@ -113,6 +128,25 @@ pub enum AutomationServiceError {
 pub async fn validate_rules(config_report: &ConfigReport) -> Result<AutomationRulesValidateReport> {
     ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
     Ok(validate_rule_file(config_report).await?)
+}
+
+pub async fn suggest_rules(
+    config_report: &ConfigReport,
+    request: AutomationRulesSuggestRequest,
+) -> Result<AutomationRulesSuggestReport> {
+    validate_suggest_request(&request)?;
+    ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
+    init_store_task(config_report).await?;
+    let account_id = resolve_automation_account_id_task(config_report).await?;
+    let thread_candidates = list_latest_thread_candidates_task(config_report, &account_id).await?;
+    let now_epoch_ms = current_epoch_seconds()?.saturating_mul(1_000);
+    Ok(suggest_rules_from_candidates(
+        config_report,
+        account_id,
+        &thread_candidates,
+        &request,
+        now_epoch_ms,
+    )?)
 }
 
 pub async fn run_preview(
@@ -641,6 +675,24 @@ fn normalize_prune_statuses(statuses: Vec<AutomationPruneStatus>) -> Vec<Automat
         }
         normalized
     }
+}
+
+fn validate_suggest_request(
+    request: &AutomationRulesSuggestRequest,
+) -> Result<(), AutomationServiceError> {
+    if request.limit == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionLimit);
+    }
+    if request.min_thread_count == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionMinThreadCount);
+    }
+    if request.older_than_days == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionOlderThanDays);
+    }
+    if request.sample_limit == 0 {
+        return Err(AutomationServiceError::InvalidSuggestionSampleLimit);
+    }
+    Ok(())
 }
 
 fn prune_status_to_run_status(status: AutomationPruneStatus) -> AutomationRunStatus {

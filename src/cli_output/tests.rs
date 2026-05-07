@@ -180,6 +180,95 @@ fn automation_prune_validation_maps_to_validation_failed_code() {
 }
 
 #[test]
+fn automation_rules_suggest_validation_maps_to_validation_failed_code() {
+    let error = anyhow!(AutomationServiceError::InvalidSuggestionLimit);
+
+    let report = describe_error(&error, "automation.rules.suggest");
+    let value = to_value(json_failure_value(&report)).unwrap();
+
+    assert_eq!(value["error"]["code"], json!("validation_failed"));
+    assert_eq!(value["error"]["kind"], json!("automation.validation"));
+    assert_eq!(
+        value["error"]["operation"],
+        json!("automation.rules.suggest")
+    );
+    assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+}
+
+#[test]
+fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo"));
+    let manifest_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+    let repo_root = TempDir::new().unwrap();
+    std::fs::create_dir(repo_root.path().join(".git")).unwrap();
+    let config_dir = repo_root.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let json_output = Command::new(&cargo)
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            &manifest_path,
+            "--",
+            "automation",
+            "rules",
+            "suggest",
+            "--limit",
+            "0",
+            "--json",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env_remove("HOME")
+        .current_dir(repo_root.path())
+        .output()
+        .unwrap();
+    assert_eq!(json_output.status.code(), Some(2));
+    assert!(json_output.stderr.is_empty());
+
+    let json_stdout = String::from_utf8(json_output.stdout).unwrap();
+    let json_value: serde_json::Value = serde_json::from_str(&json_stdout).unwrap();
+    assert_eq!(json_value["success"], json!(false));
+    assert_eq!(json_value["error"]["code"], json!("validation_failed"));
+    assert_eq!(
+        json_value["error"]["operation"],
+        json!("automation.rules.suggest")
+    );
+    assert!(
+        json_value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--limit")
+    );
+
+    let human_output = Command::new(&cargo)
+        .args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            &manifest_path,
+            "--",
+            "automation",
+            "rules",
+            "suggest",
+            "--limit",
+            "0",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env_remove("HOME")
+        .current_dir(repo_root.path())
+        .output()
+        .unwrap();
+    assert_eq!(human_output.status.code(), Some(2));
+    assert!(human_output.stdout.is_empty());
+    let human_stderr = String::from_utf8(human_output.stderr).unwrap();
+    assert!(human_stderr.contains("automation rules suggest --limit"));
+}
+
+#[test]
 fn attachment_file_errors_map_to_validation_failed_code() {
     let error = anyhow!(WorkflowServiceError::AttachmentRead {
         path: String::from("/tmp/report.pdf"),

@@ -61,6 +61,7 @@ The attachment catalog/export foundation is now in place too:
 The review-first automation slice is now in place too:
 
 - typed TOML rules under `.mailroom/automation.toml`
+- disabled starter rule suggestions from recurring local mailbox evidence
 - persisted automation run snapshots and append-only run events
 - thread-first archive, label, and trash bulk actions gated behind `--execute`
 - unsubscribe assistance through list headers in candidate inspection output

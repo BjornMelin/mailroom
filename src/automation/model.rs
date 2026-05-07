@@ -6,6 +6,10 @@ use std::path::PathBuf;
 
 pub const DEFAULT_AUTOMATION_RUN_LIMIT: usize = 250;
 pub const DEFAULT_AUTOMATION_ROLLOUT_LIMIT: usize = 10;
+pub const DEFAULT_AUTOMATION_SUGGESTION_LIMIT: usize = 10;
+pub const DEFAULT_AUTOMATION_SUGGESTION_MIN_THREAD_COUNT: usize = 3;
+pub const DEFAULT_AUTOMATION_SUGGESTION_OLDER_THAN_DAYS: u32 = 14;
+pub const DEFAULT_AUTOMATION_SUGGESTION_SAMPLE_LIMIT: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct AutomationRunRequest {
@@ -24,6 +28,14 @@ pub struct AutomationPruneRequest {
     pub older_than_days: u32,
     pub statuses: Vec<AutomationPruneStatus>,
     pub execute: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomationRulesSuggestRequest {
+    pub limit: usize,
+    pub min_thread_count: usize,
+    pub older_than_days: u32,
+    pub sample_limit: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +63,44 @@ pub struct AutomationRulesValidateReport {
     pub rule_count: usize,
     pub enabled_rule_count: usize,
     pub rules: Vec<AutomationRuleSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationRulesSuggestReport {
+    pub account_id: String,
+    pub rules_path: PathBuf,
+    pub inspected_thread_count: usize,
+    pub eligible_thread_count: usize,
+    pub suggestion_count: usize,
+    pub min_thread_count: usize,
+    pub older_than_days: u32,
+    pub suggestions: Vec<AutomationRuleSuggestion>,
+    pub warnings: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub command_plan: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationRuleSuggestion {
+    pub rule_id: String,
+    pub description: String,
+    pub confidence: String,
+    pub source: String,
+    pub matched_thread_count: usize,
+    pub match_fields: Vec<String>,
+    pub sample_threads: Vec<AutomationRuleSuggestionSample>,
+    pub rule: AutomationRule,
+    pub toml: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationRuleSuggestionSample {
+    pub thread_id: String,
+    pub message_id: String,
+    pub subject: String,
+    pub from_address: Option<String>,
+    pub list_id_header: Option<String>,
+    pub internal_date_epoch_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

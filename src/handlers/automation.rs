@@ -15,6 +15,26 @@ pub(crate) async fn handle_automation_command(
         } => automation::validate_rules(&config_report)
             .await?
             .print(json)?,
+        AutomationCommand::Rules {
+            command:
+                AutomationRulesCommand::Suggest {
+                    limit,
+                    min_thread_count,
+                    older_than_days,
+                    sample_limit,
+                    json,
+                },
+        } => automation::suggest_rules(
+            &config_report,
+            automation::AutomationRulesSuggestRequest {
+                limit,
+                min_thread_count,
+                older_than_days,
+                sample_limit,
+            },
+        )
+        .await?
+        .print(json)?,
         AutomationCommand::Run {
             rule_ids,
             limit,

@@ -159,6 +159,7 @@ Validate the rules file and preview a bounded run:
 
 ```bash
 cp config/automation.example.toml .mailroom/automation.toml
+cargo run -- automation rules suggest --json
 $EDITOR .mailroom/automation.toml
 
 cargo run -- automation rules validate --json

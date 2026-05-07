@@ -1,6 +1,7 @@
 use super::model::{
     AutomationApplyReport, AutomationPruneReport, AutomationRolloutReport,
-    AutomationRulesValidateReport, AutomationRunPreviewReport, AutomationShowReport,
+    AutomationRulesSuggestReport, AutomationRulesValidateReport, AutomationRunPreviewReport,
+    AutomationShowReport,
 };
 use anyhow::Result;
 use std::io::{self, Write};
@@ -38,6 +39,75 @@ impl AutomationRulesValidateReport {
                 sanitize(rule.description.as_deref().unwrap_or_default()),
             )
         }));
+        lines.join("\n") + "\n"
+    }
+
+    fn write<W: Write>(&self, json: bool, writer: &mut W) -> Result<()> {
+        if json {
+            crate::cli_output::write_json_success(writer, self)?;
+        } else {
+            writer.write_all(self.render_plain().as_bytes())?;
+        }
+        Ok(())
+    }
+}
+
+impl AutomationRulesSuggestReport {
+    pub fn print(&self, json: bool) -> Result<()> {
+        route_output_to_stdout(json, |json, stdout| self.write(json, stdout))
+    }
+
+    fn render_plain(&self) -> String {
+        let mut lines = vec![
+            String::from("operation=rules_suggest"),
+            format!("account_id={}", sanitize(&self.account_id)),
+            format!(
+                "rules_path={}",
+                sanitize(&self.rules_path.display().to_string())
+            ),
+            format!("inspected_thread_count={}", self.inspected_thread_count),
+            format!("eligible_thread_count={}", self.eligible_thread_count),
+            format!("suggestion_count={}", self.suggestion_count),
+            format!("min_thread_count={}", self.min_thread_count),
+            format!("older_than_days={}", self.older_than_days),
+        ];
+        if !self.suggestions.is_empty() {
+            lines.push(String::from("suggestions_format=tsv"));
+            lines.push(String::from(
+                "rule_id\tconfidence\tmatched_thread_count\tsource\tmatch_fields\tsample_subjects",
+            ));
+            lines.extend(self.suggestions.iter().map(|suggestion| {
+                let sample_subjects = suggestion
+                    .sample_threads
+                    .iter()
+                    .map(|sample| sample.subject.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    sanitize(&suggestion.rule_id),
+                    sanitize(&suggestion.confidence),
+                    suggestion.matched_thread_count,
+                    sanitize(&suggestion.source),
+                    sanitize(&suggestion.match_fields.join(", ")),
+                    sanitize(&sample_subjects),
+                )
+            }));
+            lines.push(String::from("toml_snippets_format=toml"));
+            for suggestion in &self.suggestions {
+                lines.push(format!("# rule_id={}", sanitize(&suggestion.rule_id)));
+                lines.push(suggestion.toml.trim_end().to_owned());
+            }
+        }
+        for warning in &self.warnings {
+            lines.push(format!("warning={}", sanitize(warning)));
+        }
+        for next_step in &self.next_steps {
+            lines.push(format!("next_step={}", sanitize(next_step)));
+        }
+        for command in &self.command_plan {
+            lines.push(format!("command={}", sanitize(command)));
+        }
         lines.join("\n") + "\n"
     }
 
