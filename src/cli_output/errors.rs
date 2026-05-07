@@ -116,6 +116,8 @@ fn classify_error(error: &AnyhowError) -> (ErrorCode, &'static str) {
                 (ErrorCode::Conflict, "automation.apply.in_progress")
             }
             AutomationServiceError::InvalidLimit
+            | AutomationServiceError::InvalidRolloutLimit
+            | AutomationServiceError::InvalidPruneWindow
             | AutomationServiceError::ExecuteRequired
             | AutomationServiceError::RuleFileMissing { .. }
             | AutomationServiceError::RuleFileRead { .. }

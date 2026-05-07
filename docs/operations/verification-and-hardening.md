@@ -162,12 +162,16 @@ cp config/automation.example.toml .mailroom/automation.toml
 $EDITOR .mailroom/automation.toml
 
 cargo run -- automation rules validate --json
+cargo run -- automation rollout --limit 10 --json
 cargo run -- automation run --limit 10 --json
 cargo run -- automation show <run-id> --json
 ```
 
 Inspect:
 
+- `blockers`
+- `warnings`
+- preview-only `candidates`
 - `selected_rule_ids`
 - `candidate_count`
 - `candidate_details`
@@ -181,6 +185,7 @@ If the preview is surprising, fix the rules before any live apply.
 Start with micro-batches only:
 
 ```bash
+cargo run -- automation rollout --rule <rule-id> --limit 10 --json
 cargo run -- automation run --rule <rule-id> --limit 10 --json
 cargo run -- automation show <run-id> --json
 cargo run -- automation apply <run-id> --execute --json
@@ -230,7 +235,9 @@ cargo run -- audit labels --json
 cargo run -- audit verification --json
 cargo run -- sync run --profile deep-audit --json
 cargo run -- automation rules validate --json
+cargo run -- automation rollout --limit 10 --json
 cargo run -- automation run --limit 10 --json
 cargo run -- automation show <run-id> --json
 cargo run -- automation apply <run-id> --execute --json
+cargo run -- automation prune --older-than-days 30 --json
 ```

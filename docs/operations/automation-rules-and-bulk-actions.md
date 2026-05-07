@@ -8,7 +8,9 @@ The current automation slice owns:
 
 - a local typed rules file at `.mailroom/automation.toml`
 - rule validation and preview snapshots
+- read-only rollout checks for first-wave micro-batch readiness
 - persisted automation runs and append-only run events
+- stale local snapshot pruning after dry-run review
 - reviewed thread-first bulk actions for archive, label, and trash
 - unsubscribe assistance through visible list headers in the review output
 
@@ -105,6 +107,13 @@ Validate the active file:
 cargo run -- automation rules validate --json
 ```
 
+Check first-wave rollout readiness without saving a run:
+
+```bash
+cargo run -- automation rollout --limit 10 --json
+cargo run -- automation rollout --rule archive-newsletters --limit 10 --json
+```
+
 Create a review snapshot across all enabled rules:
 
 ```bash
@@ -137,6 +146,17 @@ cargo run -- automation apply 42 --execute --json
 
 Without `--execute`, `automation apply` returns a validation-style error and
 does not mutate Gmail.
+
+Prune stale local review snapshots after inspecting the dry-run counts:
+
+```bash
+cargo run -- automation prune --older-than-days 30 --json
+cargo run -- automation prune --older-than-days 30 --status previewed --execute --json
+cargo run -- automation prune --older-than-days 90 --status applied --status apply-failed --json
+```
+
+`automation prune` deletes only local SQLite automation snapshot rows. It never
+mutates Gmail and it never targets in-progress `applying` runs.
 
 ## Output model
 
@@ -180,9 +200,20 @@ The JSON payload also includes header-derived unsubscribe hints:
 - `precedence_header`
 - `auto_submitted_header`
 
+`automation rollout` returns the same standard JSON envelope with:
+
+- `verification` readiness from `audit verification`
+- optional `rules` validation detail
+- preview-only candidate summaries
+- blockers, warnings, next steps, and exact follow-up commands
+
+Missing or invalid rules are reported as rollout blockers rather than as a
+persisted run.
+
 ## Safety model
 
 - `automation run` is preview-only and only writes a local snapshot
+- `automation rollout` is read-only and writes no automation snapshot
 - `automation apply` mutates Gmail only when `--execute` is present
 - `automation apply --execute` requires working Gmail auth up front and aborts
   before persisting apply results if credentials are missing, expired, or point
@@ -191,6 +222,8 @@ The JSON payload also includes header-derived unsubscribe hints:
 - thread mutations reuse the same Gmail thread cleanup path as the manual
   cleanup commands
 - successful apply runs trigger a best-effort mailbox resync afterward
+- `automation prune` is dry-run by default and deletes only local snapshot
+  history when `--execute` is present
 
 If a run applies zero candidates, Mailroom records the run transition locally
 but does not issue Gmail mutations.
@@ -215,10 +248,13 @@ This slice adds:
 
 1. Sync local mailbox metadata.
 2. Validate the active rules file.
-3. Run a preview snapshot.
-4. Inspect the saved run by ID.
-5. Apply only the reviewed run with `--execute`.
-6. Re-run sync or `doctor` if you want to inspect the reconciled local state.
+3. Run `automation rollout --limit 10` to check readiness and preview matching
+   candidates without saving a run.
+4. Run a preview snapshot.
+5. Inspect the saved run by ID.
+6. Apply only the reviewed run with `--execute`.
+7. Re-run sync or `doctor` if you want to inspect the reconciled local state.
+8. Periodically prune stale preview snapshots after a dry-run count review.
 
 For the real-mailbox hardening sequence, do not jump straight from rule editing
 to `automation apply --execute`. Follow

@@ -2,9 +2,10 @@ use super::{
     AppendAutomationRunEventInput, AutomationActionKind, AutomationActionSnapshot,
     AutomationApplyStatus, AutomationMatchReason, AutomationRunStatus, AutomationStoreWriteError,
     CandidateApplyResultInput, CreateAutomationRunInput, FinalizeAutomationRunInput,
-    NewAutomationRunCandidate, append_automation_run_event, claim_automation_run_for_apply,
-    create_automation_run, finalize_automation_run, get_automation_run_detail, inspect_automation,
-    list_latest_thread_candidates, record_candidate_apply_result,
+    NewAutomationRunCandidate, PruneAutomationRunsInput, append_automation_run_event,
+    claim_automation_run_for_apply, create_automation_run, finalize_automation_run,
+    get_automation_run_detail, inspect_automation, list_latest_thread_candidates,
+    prune_automation_runs, record_candidate_apply_result,
 };
 use crate::config::resolve;
 use crate::store::{accounts, init, mailbox};
@@ -97,6 +98,168 @@ fn create_automation_run_persists_detail_and_doctor_counts() {
     assert_eq!(doctor.run_count, 1);
     assert_eq!(doctor.previewed_run_count, 0);
     assert_eq!(doctor.applied_run_count, 1);
+    assert_eq!(doctor.candidate_count, 1);
+}
+
+#[test]
+fn prune_automation_runs_dry_run_reports_without_deleting() {
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+    let old_run = create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("old"),
+            selected_rule_ids: vec![String::from("archive-old")],
+            created_at_epoch_s: 100,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+    create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("new"),
+            selected_rule_ids: vec![String::from("archive-new")],
+            created_at_epoch_s: 1_000,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+
+    let report = prune_automation_runs(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &PruneAutomationRunsInput {
+            account_id: account.account_id,
+            cutoff_epoch_s: 500,
+            statuses: vec![AutomationRunStatus::Previewed],
+            execute: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.matched_run_count, 1);
+    assert_eq!(report.matched_candidate_count, 1);
+    assert_eq!(report.matched_event_count, 1);
+    assert_eq!(report.deleted_run_count, 0);
+    assert!(
+        get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            old_run.run.run_id,
+        )
+        .unwrap()
+        .is_some()
+    );
+    let doctor = inspect_automation(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(doctor.run_count, 2);
+}
+
+#[test]
+fn prune_automation_runs_execute_deletes_runs_and_cascades_detail() {
+    let repo_root = temp_repo_root();
+    let paths = WorkspacePaths::from_repo_root(repo_root.path().to_path_buf());
+    paths.ensure_runtime_dirs().unwrap();
+    let config_report = resolve(&paths).unwrap();
+    init(&config_report).unwrap();
+    let account = seed_account(&config_report);
+    let old_run = create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("old"),
+            selected_rule_ids: vec![String::from("archive-old")],
+            created_at_epoch_s: 100,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+    let applying_run = create_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &CreateAutomationRunInput {
+            account_id: account.account_id.clone(),
+            rule_file_path: String::from(".mailroom/automation.toml"),
+            rule_file_hash: String::from("applying"),
+            selected_rule_ids: vec![String::from("archive-applying")],
+            created_at_epoch_s: 100,
+            candidates: vec![sample_candidate()],
+        },
+    )
+    .unwrap();
+    finalize_automation_run(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &FinalizeAutomationRunInput {
+            run_id: applying_run.run.run_id,
+            status: AutomationRunStatus::Applying,
+            applied_at_epoch_s: 101,
+        },
+    )
+    .unwrap();
+
+    let report = prune_automation_runs(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &PruneAutomationRunsInput {
+            account_id: account.account_id,
+            cutoff_epoch_s: 500,
+            statuses: vec![
+                AutomationRunStatus::Previewed,
+                AutomationRunStatus::Applied,
+                AutomationRunStatus::ApplyFailed,
+            ],
+            execute: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.matched_run_count, 1);
+    assert_eq!(report.matched_candidate_count, 1);
+    assert_eq!(report.matched_event_count, 1);
+    assert_eq!(report.deleted_run_count, 1);
+    assert!(
+        get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            old_run.run.run_id,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        get_automation_run_detail(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+            applying_run.run.run_id,
+        )
+        .unwrap()
+        .is_some()
+    );
+    let doctor = inspect_automation(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(doctor.run_count, 1);
     assert_eq!(doctor.candidate_count, 1);
 }
 

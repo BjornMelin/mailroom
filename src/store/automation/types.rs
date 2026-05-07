@@ -273,6 +273,22 @@ pub(crate) struct FinalizeAutomationRunInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PruneAutomationRunsInput {
+    pub(crate) account_id: String,
+    pub(crate) cutoff_epoch_s: i64,
+    pub(crate) statuses: Vec<AutomationRunStatus>,
+    pub(crate) execute: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AutomationPruneStoreReport {
+    pub(crate) matched_run_count: i64,
+    pub(crate) matched_candidate_count: i64,
+    pub(crate) matched_event_count: i64,
+    pub(crate) deleted_run_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AutomationDoctorReport {
     pub(crate) run_count: i64,
     pub(crate) previewed_run_count: i64,

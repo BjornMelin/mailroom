@@ -1,5 +1,7 @@
 use super::model::{
-    AutomationApplyReport, AutomationRule, AutomationRuleAction, AutomationRulesValidateReport,
+    AutomationApplyReport, AutomationPruneReport, AutomationPruneRequest, AutomationPruneStatus,
+    AutomationRolloutCandidateSummary, AutomationRolloutReport, AutomationRolloutRequest,
+    AutomationRule, AutomationRuleAction, AutomationRulesValidateReport,
     AutomationRunPreviewReport, AutomationRunRequest, AutomationShowReport,
 };
 use super::rules::{ResolvedAutomationRules, resolve_rule_selection, validate_rule_file};
@@ -11,6 +13,7 @@ use crate::store::automation::{
     AutomationApplyStatus, AutomationMatchReason, AutomationRunCandidateRecord,
     AutomationRunStatus, AutomationThreadCandidate, CandidateApplyResultInput,
     CreateAutomationRunInput, FinalizeAutomationRunInput, NewAutomationRunCandidate,
+    PruneAutomationRunsInput,
 };
 use crate::time::current_epoch_seconds;
 use anyhow::Result;
@@ -25,6 +28,7 @@ use tokio::sync::Semaphore;
 use tokio::task::{JoinSet, spawn_blocking};
 
 const AUTOMATION_APPLY_CONCURRENCY: usize = 4;
+const SECONDS_PER_DAY: i64 = 86_400;
 
 #[derive(Debug, Error)]
 pub enum AutomationServiceError {
@@ -34,6 +38,10 @@ pub enum AutomationServiceError {
     NoActiveAccount,
     #[error("automation run limit must be greater than zero")]
     InvalidLimit,
+    #[error("automation rollout limit must be greater than zero")]
+    InvalidRolloutLimit,
+    #[error("automation prune --older-than-days must be greater than zero")]
+    InvalidPruneWindow,
     #[error("re-run with --execute to apply automation changes")]
     ExecuteRequired,
     #[error(
@@ -150,10 +158,153 @@ pub async fn run_preview(
     Ok(AutomationRunPreviewReport { detail })
 }
 
+pub async fn rollout(
+    config_report: &ConfigReport,
+    request: AutomationRolloutRequest,
+) -> Result<AutomationRolloutReport> {
+    if request.limit == 0 {
+        return Err(AutomationServiceError::InvalidRolloutLimit.into());
+    }
+
+    ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
+    init_store_task(config_report).await?;
+
+    let verification = verification_audit_task(config_report).await?;
+    let mut blockers = Vec::new();
+    let mut warnings = verification.warnings.clone();
+    let mut selected_rule_ids = Vec::new();
+    let mut blocked_rule_ids = Vec::new();
+    let mut candidates = Vec::new();
+
+    let rules = match validate_rule_file(config_report).await {
+        Ok(report) => Some(report),
+        Err(error) => {
+            blockers.push(format!("automation rules are not ready: {error}"));
+            None
+        }
+    };
+
+    if rules.is_some() {
+        match resolve_rollout_candidates(config_report, &request).await {
+            Ok(selection) => {
+                selected_rule_ids = selection.selected_rule_ids;
+                blocked_rule_ids = selection.blocked_rule_ids;
+                candidates = selection.candidates;
+            }
+            Err(error) if is_rollout_blocker(&error) => {
+                blockers.push(error.to_string());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if !blocked_rule_ids.is_empty() {
+        blockers.push(format!(
+            "first-wave automation rollout excludes trash rules; remove or disable: {}",
+            blocked_rule_ids.join(", ")
+        ));
+        candidates.clear();
+    }
+    if candidates.is_empty() && blockers.is_empty() {
+        warnings.push(String::from(
+            "Selected rules did not match any local thread candidates; inspect the synced cache and rule predicates before applying.",
+        ));
+    }
+
+    let command_plan = rollout_command_plan(&selected_rule_ids, request.limit);
+    let mut next_steps = verification.next_steps.clone();
+    if blockers.is_empty() {
+        next_steps.push(String::from(
+            "Persist a review snapshot with the matching automation run command, inspect it with automation show, then apply only a reviewed micro-batch.",
+        ));
+    } else {
+        next_steps.push(String::from(
+            "Clear rollout blockers before creating a persistent automation run.",
+        ));
+    }
+
+    Ok(AutomationRolloutReport {
+        verification,
+        rules,
+        selected_rule_count: selected_rule_ids.len(),
+        selected_rule_ids,
+        candidate_count: candidates.len(),
+        candidates,
+        blocked_rule_ids,
+        blockers,
+        warnings,
+        next_steps,
+        command_plan,
+    })
+}
+
 pub async fn show_run(config_report: &ConfigReport, run_id: i64) -> Result<AutomationShowReport> {
     init_store_task(config_report).await?;
     let detail = load_run_detail_task(config_report, run_id).await?;
     Ok(AutomationShowReport { detail })
+}
+
+pub async fn prune_runs(
+    config_report: &ConfigReport,
+    request: AutomationPruneRequest,
+) -> Result<AutomationPruneReport> {
+    if request.older_than_days == 0 {
+        return Err(AutomationServiceError::InvalidPruneWindow.into());
+    }
+
+    ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
+    init_store_task(config_report).await?;
+    let account_id = resolve_automation_account_id_task(config_report).await?;
+    let statuses = normalize_prune_statuses(request.statuses);
+    let cutoff_epoch_s = current_epoch_seconds()?
+        .saturating_sub(i64::from(request.older_than_days) * SECONDS_PER_DAY);
+    let store_report = prune_automation_runs_task(
+        config_report,
+        &PruneAutomationRunsInput {
+            account_id: account_id.clone(),
+            cutoff_epoch_s,
+            statuses: statuses
+                .iter()
+                .copied()
+                .map(prune_status_to_run_status)
+                .collect(),
+            execute: request.execute,
+        },
+    )
+    .await?;
+
+    let mut warnings = Vec::new();
+    if !request.execute {
+        warnings.push(String::from(
+            "Dry run only; rerun with --execute to delete matched local automation snapshots.",
+        ));
+    }
+    let next_steps = if request.execute {
+        vec![String::from(
+            "Run `cargo run -- doctor --json` if you want to inspect updated local automation counts.",
+        )]
+    } else {
+        vec![String::from(
+            "Rerun the same prune command with --execute after reviewing the matched counts.",
+        )]
+    };
+
+    Ok(AutomationPruneReport {
+        account_id,
+        execute: request.execute,
+        older_than_days: request.older_than_days,
+        cutoff_epoch_s,
+        statuses: statuses
+            .iter()
+            .map(|status| status.as_str().to_owned())
+            .collect(),
+        matched_run_count: store_report.matched_run_count,
+        matched_candidate_count: store_report.matched_candidate_count,
+        matched_event_count: store_report.matched_event_count,
+        deleted_run_count: store_report.deleted_run_count,
+        warnings,
+        next_steps,
+    })
 }
 
 pub async fn apply_run(
@@ -351,6 +502,162 @@ struct ApplyOutcome {
     status: AutomationApplyStatus,
     applied_at_epoch_s: i64,
     apply_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct RolloutSelection {
+    selected_rule_ids: Vec<String>,
+    blocked_rule_ids: Vec<String>,
+    candidates: Vec<AutomationRolloutCandidateSummary>,
+}
+
+async fn resolve_rollout_candidates(
+    config_report: &ConfigReport,
+    request: &AutomationRolloutRequest,
+) -> Result<RolloutSelection> {
+    let account_id = resolve_automation_account_id_task(config_report).await?;
+    let resolved_rules = resolve_rule_selection(config_report, &request.rule_ids).await?;
+    let selected_rule_ids = resolved_rules
+        .rules
+        .iter()
+        .map(|rule| rule.id.clone())
+        .collect::<Vec<_>>();
+    let blocked_rule_ids = resolved_rules
+        .rules
+        .iter()
+        .filter(|rule| rule.action_kind() == AutomationActionKind::Trash)
+        .map(|rule| rule.id.clone())
+        .collect::<Vec<_>>();
+    if !blocked_rule_ids.is_empty() {
+        return Ok(RolloutSelection {
+            selected_rule_ids,
+            blocked_rule_ids,
+            candidates: Vec::new(),
+        });
+    }
+
+    let planned_rules =
+        resolve_rule_actions_task(config_report, &account_id, &resolved_rules).await?;
+    let thread_candidates = list_latest_thread_candidates_task(config_report, &account_id).await?;
+    let now_epoch_ms = current_epoch_seconds()?.saturating_mul(1_000);
+    let candidates = build_run_candidates(
+        &thread_candidates,
+        &planned_rules,
+        now_epoch_ms,
+        request.limit,
+    )
+    .iter()
+    .map(rollout_candidate_summary)
+    .collect();
+
+    Ok(RolloutSelection {
+        selected_rule_ids,
+        blocked_rule_ids,
+        candidates,
+    })
+}
+
+fn is_rollout_blocker(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<AutomationServiceError>(),
+        Some(
+            AutomationServiceError::NoActiveAccount
+                | AutomationServiceError::RuleFileMissing { .. }
+                | AutomationServiceError::RuleFileRead { .. }
+                | AutomationServiceError::RuleFileParse { .. }
+                | AutomationServiceError::RuleValidation { .. }
+        )
+    )
+}
+
+fn rollout_candidate_summary(
+    candidate: &NewAutomationRunCandidate,
+) -> AutomationRolloutCandidateSummary {
+    AutomationRolloutCandidateSummary {
+        rule_id: candidate.rule_id.clone(),
+        thread_id: candidate.thread_id.clone(),
+        message_id: candidate.message_id.clone(),
+        action_kind: candidate.action.kind.as_str().to_owned(),
+        subject: candidate.subject.clone(),
+        from_address: candidate.from_address.clone(),
+        label_names: candidate.label_names.clone(),
+        has_list_unsubscribe: candidate.has_list_unsubscribe,
+        matched_predicates: match_reason_tokens(&candidate.reason),
+    }
+}
+
+fn match_reason_tokens(reason: &AutomationMatchReason) -> Vec<String> {
+    let mut predicates = Vec::new();
+    if let Some(from_address) = &reason.from_address {
+        predicates.push(format!("from={from_address}"));
+    }
+    if !reason.subject_terms.is_empty() {
+        predicates.push(format!("subject~{}", reason.subject_terms.join("|")));
+    }
+    if !reason.label_names.is_empty() {
+        predicates.push(format!("label_any={}", reason.label_names.join("|")));
+    }
+    if let Some(days) = reason.older_than_days {
+        predicates.push(format!("older_than_days={days}"));
+    }
+    if let Some(has_attachments) = reason.has_attachments {
+        predicates.push(format!("has_attachments={has_attachments}"));
+    }
+    if let Some(has_list_unsubscribe) = reason.has_list_unsubscribe {
+        predicates.push(format!("has_list_unsubscribe={has_list_unsubscribe}"));
+    }
+    if !reason.list_id_terms.is_empty() {
+        predicates.push(format!("list_id~{}", reason.list_id_terms.join("|")));
+    }
+    if !reason.precedence_values.is_empty() {
+        predicates.push(format!("precedence={}", reason.precedence_values.join("|")));
+    }
+    predicates
+}
+
+fn rollout_command_plan(selected_rule_ids: &[String], limit: usize) -> Vec<String> {
+    let selected_rules = selected_rule_ids
+        .iter()
+        .map(|rule_id| format!(" --rule {rule_id}"))
+        .collect::<String>();
+    vec![
+        String::from("cargo run -- automation rules validate --json"),
+        format!("cargo run -- automation run{selected_rules} --limit {limit} --json"),
+        String::from("cargo run -- automation show <run-id> --json"),
+        String::from("cargo run -- automation apply <run-id> --execute --json"),
+        String::from("cargo run -- audit verification --json"),
+    ]
+}
+
+fn normalize_prune_statuses(statuses: Vec<AutomationPruneStatus>) -> Vec<AutomationPruneStatus> {
+    if statuses.is_empty() {
+        vec![AutomationPruneStatus::Previewed]
+    } else {
+        let mut normalized = Vec::new();
+        for status in statuses {
+            if !normalized.contains(&status) {
+                normalized.push(status);
+            }
+        }
+        normalized
+    }
+}
+
+fn prune_status_to_run_status(status: AutomationPruneStatus) -> AutomationRunStatus {
+    match status {
+        AutomationPruneStatus::Previewed => AutomationRunStatus::Previewed,
+        AutomationPruneStatus::Applied => AutomationRunStatus::Applied,
+        AutomationPruneStatus::ApplyFailed => AutomationRunStatus::ApplyFailed,
+    }
+}
+
+async fn verification_audit_task(
+    config_report: &ConfigReport,
+) -> Result<crate::audit::VerificationAuditReport> {
+    let config_report = config_report.clone();
+    spawn_blocking(move || crate::audit::verification(&config_report))
+        .await
+        .map_err(|source| AutomationServiceError::TaskPanic { source })?
 }
 
 async fn acquire_apply_run_lock_task(
@@ -947,6 +1254,22 @@ async fn finalize_run_task(
     Ok(())
 }
 
+async fn prune_automation_runs_task(
+    config_report: &ConfigReport,
+    input: &PruneAutomationRunsInput,
+) -> Result<store::automation::AutomationPruneStoreReport> {
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let input = input.clone();
+    spawn_blocking(move || {
+        store::automation::prune_automation_runs(&database_path, busy_timeout_ms, &input)
+    })
+    .await
+    .map_err(|source| AutomationServiceError::TaskPanic { source })?
+    .map_err(|source| AutomationServiceError::AutomationWrite { source })
+    .map_err(Into::into)
+}
+
 async fn append_run_event_task(
     config_report: &ConfigReport,
     input: &AppendAutomationRunEventInput,
@@ -1015,10 +1338,10 @@ fn configured_paths(config_report: &ConfigReport) -> Result<crate::workspace::Wo
 mod tests {
     use super::{
         AutomationServiceError, PlannedRule, acquire_apply_run_lock_blocking, apply_run,
-        automation_apply_lock_path, build_run_candidates, gmail_account_id_for_email,
+        automation_apply_lock_path, build_run_candidates, gmail_account_id_for_email, rollout,
     };
     use crate::auth::file_store::{CredentialStore, FileCredentialStore, StoredCredentials};
-    use crate::automation::model::{AutomationMatchRule, AutomationRule};
+    use crate::automation::model::{AutomationMatchRule, AutomationRolloutRequest, AutomationRule};
     use crate::config::{ConfigReport, resolve};
     use crate::gmail::GmailLabel;
     use crate::store;
@@ -1035,6 +1358,7 @@ mod tests {
     };
     use crate::workspace::WorkspacePaths;
     use secrecy::SecretString;
+    use std::fs;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1055,6 +1379,132 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].rule_id, "high-priority");
         assert_eq!(selected[0].thread_id, "thread-old");
+    }
+
+    #[tokio::test]
+    async fn rollout_reports_missing_rules_without_persisting_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, None);
+        store::init(&config_report).unwrap();
+        seed_account(&config_report);
+
+        let report = rollout(
+            &config_report,
+            AutomationRolloutRequest {
+                rule_ids: Vec::new(),
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(report.rules.is_none());
+        assert_eq!(report.candidate_count, 0);
+        assert!(report.blockers.iter().any(|blocker| {
+            blocker.contains("automation rules are not ready")
+                && blocker.contains("automation rules file is missing")
+        }));
+        let doctor = store::automation::inspect_automation(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doctor.run_count, 0);
+    }
+
+    #[tokio::test]
+    async fn rollout_blocks_trash_rules_for_first_wave() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, None);
+        store::init(&config_report).unwrap();
+        seed_account(&config_report);
+        write_rules(
+            &config_report,
+            r#"
+[[rules]]
+id = "trash-digest"
+priority = 100
+
+[rules.match]
+from_address = "digest@example.com"
+
+[rules.action]
+kind = "trash"
+"#,
+        );
+
+        let report = rollout(
+            &config_report,
+            AutomationRolloutRequest {
+                rule_ids: Vec::new(),
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.selected_rule_ids, vec![String::from("trash-digest")]);
+        assert_eq!(report.blocked_rule_ids, vec![String::from("trash-digest")]);
+        assert_eq!(report.candidate_count, 0);
+        assert!(report.blockers.iter().any(|blocker| {
+            blocker.contains("first-wave automation rollout excludes trash rules")
+        }));
+        let doctor = store::automation::inspect_automation(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doctor.run_count, 0);
+    }
+
+    #[tokio::test]
+    async fn rollout_previews_candidates_without_persisting_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_report = config_report_for(&temp_dir, None);
+        seed_local_thread_snapshot(&config_report, "thread-1", "m-1", 100, "Daily digest");
+        write_rules(
+            &config_report,
+            r#"
+[[rules]]
+id = "archive-digest"
+priority = 100
+
+[rules.match]
+from_address = "alice@example.com"
+label_any = ["INBOX"]
+
+[rules.action]
+kind = "archive"
+"#,
+        );
+
+        let report = rollout(
+            &config_report,
+            AutomationRolloutRequest {
+                rule_ids: Vec::new(),
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(report.blockers.is_empty());
+        assert_eq!(
+            report.selected_rule_ids,
+            vec![String::from("archive-digest")]
+        );
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.candidates[0].thread_id, "thread-1");
+        assert_eq!(report.candidates[0].action_kind, "archive");
+        let doctor = store::automation::inspect_automation(
+            &config_report.config.store.database_path,
+            config_report.config.store.busy_timeout_ms,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(doctor.run_count, 0);
     }
 
     #[tokio::test]
@@ -1721,6 +2171,18 @@ mod tests {
             config_report.config.gmail.client_secret = Some(String::from("client-secret"));
         }
         config_report
+    }
+
+    fn write_rules(config_report: &ConfigReport, contents: &str) {
+        fs::write(
+            config_report
+                .config
+                .workspace
+                .runtime_root
+                .join("automation.toml"),
+            contents,
+        )
+        .unwrap();
     }
 
     fn seed_credentials(config_report: &ConfigReport) {

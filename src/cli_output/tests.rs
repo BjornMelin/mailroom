@@ -167,6 +167,19 @@ fn automation_apply_in_progress_maps_to_conflict_code() {
 }
 
 #[test]
+fn automation_prune_validation_maps_to_validation_failed_code() {
+    let error = anyhow!(AutomationServiceError::InvalidPruneWindow);
+
+    let report = describe_error(&error, "automation.prune");
+    let value = to_value(json_failure_value(&report)).unwrap();
+
+    assert_eq!(value["error"]["code"], json!("validation_failed"));
+    assert_eq!(value["error"]["kind"], json!("automation.validation"));
+    assert_eq!(value["error"]["operation"], json!("automation.prune"));
+    assert_eq!(exit_code(&report), std::process::ExitCode::from(2));
+}
+
+#[test]
 fn attachment_file_errors_map_to_validation_failed_code() {
     let error = anyhow!(WorkflowServiceError::AttachmentRead {
         path: String::from("/tmp/report.pdf"),
