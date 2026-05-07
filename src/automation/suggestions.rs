@@ -383,12 +383,12 @@ fn has_list_unsubscribe(candidate: &AutomationThreadCandidate) -> bool {
 }
 
 fn normalized_list_id(header: Option<&str>) -> Option<String> {
-    let value = header?
-        .trim()
-        .trim_start_matches('<')
-        .trim_end_matches('>')
-        .trim()
-        .to_ascii_lowercase();
+    let header = header?.trim();
+    let identifier = match (header.rfind('<'), header.rfind('>')) {
+        (Some(start), Some(end)) if start < end => &header[start + 1..end],
+        _ => header.trim_start_matches('<').trim_end_matches('>'),
+    };
+    let value = identifier.trim().to_ascii_lowercase();
     (!value.is_empty()).then_some(value)
 }
 
@@ -481,6 +481,40 @@ mod tests {
         assert!(suggestion.toml.contains("enabled = false"));
         assert!(suggestion.toml.contains("[rules.match]"));
         toml::from_str::<crate::automation::model::AutomationRuleSet>(&suggestion.toml).unwrap();
+    }
+
+    #[test]
+    fn list_suggestions_group_by_angle_bracket_identifier() {
+        let (_repo_root, config_report) = config_report();
+        let mut request = request();
+        request.min_thread_count = 2;
+        let candidates = vec![
+            list_candidate_with_header("Digest <digest.example.com>", "thread-1", "message-1", 100),
+            list_candidate_with_header(
+                "Daily Digest <digest.example.com>",
+                "thread-2",
+                "message-2",
+                200,
+            ),
+        ];
+
+        let report = suggest_rules_from_candidates(
+            &config_report,
+            String::from("gmail:operator@example.com"),
+            &candidates,
+            &request,
+            2_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(report.suggestion_count, 1);
+        let suggestion = &report.suggestions[0];
+        assert_eq!(suggestion.rule_id, "archive-list-digest-example-com");
+        assert_eq!(suggestion.matched_thread_count, 2);
+        assert_eq!(
+            suggestion.rule.matcher.list_id_contains,
+            vec![String::from("digest.example.com")]
+        );
     }
 
     #[test]
@@ -732,8 +766,22 @@ mod tests {
         message_id: &str,
         internal_date_epoch_ms: i64,
     ) -> AutomationThreadCandidate {
+        list_candidate_with_header(
+            &format!("<{list_id}>"),
+            thread_id,
+            message_id,
+            internal_date_epoch_ms,
+        )
+    }
+
+    fn list_candidate_with_header(
+        list_id_header: &str,
+        thread_id: &str,
+        message_id: &str,
+        internal_date_epoch_ms: i64,
+    ) -> AutomationThreadCandidate {
         candidate(thread_id, message_id, internal_date_epoch_ms, |candidate| {
-            candidate.list_id_header = Some(format!("<{list_id}>"));
+            candidate.list_id_header = Some(list_id_header.to_owned());
             candidate.list_unsubscribe_header =
                 Some(String::from("<mailto:unsubscribe@example.com>"));
         })
