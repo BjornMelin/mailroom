@@ -1,3 +1,4 @@
+use super::headers::match_precedence_values;
 use super::model::{
     AutomationApplyReport, AutomationPruneReport, AutomationPruneRequest, AutomationPruneStatus,
     AutomationRolloutCandidateSummary, AutomationRolloutReport, AutomationRolloutRequest,
@@ -906,7 +907,7 @@ fn match_rule(
         candidate.list_id_header.as_deref(),
         &rule.matcher.list_id_contains,
     )?;
-    let precedence_matches = match_optional_contains(
+    let precedence_matches = match_precedence_values(
         candidate.precedence_header.as_deref(),
         &rule.matcher.precedence,
     )?;
@@ -1431,6 +1432,31 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].rule_id, "high-priority");
         assert_eq!(selected[0].thread_id, "thread-old");
+    }
+
+    #[test]
+    fn build_run_candidates_matches_precedence_by_exact_token() {
+        let planned_rules = vec![planned_precedence_rule("bulk-precedence")];
+        let mut malformed_precedence =
+            thread_candidate("thread-notbulk", "message-notbulk", 100, "Digest");
+        malformed_precedence.precedence_header = Some(String::from("notbulk"));
+        let mut bulk_precedence = thread_candidate("thread-bulk", "message-bulk", 200, "Digest");
+        bulk_precedence.precedence_header = Some(String::from("x-priority; bulk"));
+
+        let selected = build_run_candidates(
+            &[malformed_precedence, bulk_precedence],
+            &planned_rules,
+            0,
+            10,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].rule_id, "bulk-precedence");
+        assert_eq!(selected[0].thread_id, "thread-bulk");
+        assert_eq!(
+            selected[0].reason.precedence_values,
+            vec![String::from("bulk")]
+        );
     }
 
     #[tokio::test]
@@ -2139,6 +2165,29 @@ kind = "archive"
             },
             action: AutomationActionSnapshot {
                 kind: action_kind,
+                add_label_ids: Vec::new(),
+                add_label_names: Vec::new(),
+                remove_label_ids: vec![String::from("INBOX")],
+                remove_label_names: vec![String::from("INBOX")],
+            },
+        }
+    }
+
+    fn planned_precedence_rule(id: &str) -> PlannedRule {
+        PlannedRule {
+            rule: AutomationRule {
+                id: String::from(id),
+                description: None,
+                enabled: true,
+                priority: 100,
+                matcher: AutomationMatchRule {
+                    precedence: vec![String::from("bulk")],
+                    ..AutomationMatchRule::default()
+                },
+                action: crate::automation::model::AutomationRuleAction::Archive,
+            },
+            action: AutomationActionSnapshot {
+                kind: AutomationActionKind::Archive,
                 add_label_ids: Vec::new(),
                 add_label_names: Vec::new(),
                 remove_label_ids: vec![String::from("INBOX")],

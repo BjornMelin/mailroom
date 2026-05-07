@@ -1,4 +1,5 @@
 use super::AutomationServiceError;
+use super::headers::normalized_precedence;
 use super::model::{
     AutomationMatchRule, AutomationRule, AutomationRuleAction, AutomationRuleSet,
     AutomationRuleSuggestion, AutomationRuleSuggestionSample, AutomationRulesSuggestReport,
@@ -396,18 +397,6 @@ fn normalized_from_address(from_address: Option<&str>) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn normalized_precedence(header: Option<&str>) -> Option<String> {
-    let value = header?.trim().to_ascii_lowercase();
-    let tokens: Vec<&str> = value
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
-    ["bulk", "list", "junk"]
-        .iter()
-        .find(|expected| tokens.contains(expected))
-        .map(|matched| (*matched).to_owned())
-}
-
 fn slugify(value: &str) -> String {
     let mut slug = String::new();
     let mut previous_was_dash = false;
@@ -444,7 +433,7 @@ fn slugify(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_precedence, slugify, suggest_rules_from_candidates};
+    use super::{slugify, suggest_rules_from_candidates};
     use crate::automation::model::AutomationRulesSuggestRequest;
     use crate::config::resolve;
     use crate::store::automation::AutomationThreadCandidate;
@@ -698,20 +687,6 @@ mod tests {
             report.suggestions[0].sample_threads[0].thread_id,
             "thread-a-new"
         );
-    }
-
-    #[test]
-    fn normalized_precedence_requires_exact_tokens() {
-        assert_eq!(
-            normalized_precedence(Some("bulk")),
-            Some(String::from("bulk"))
-        );
-        assert_eq!(
-            normalized_precedence(Some("x-priority; list")),
-            Some(String::from("list"))
-        );
-        assert_eq!(normalized_precedence(Some("notbulk")), None);
-        assert_eq!(normalized_precedence(Some("xlistx")), None);
     }
 
     #[test]
