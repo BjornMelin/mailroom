@@ -31,7 +31,7 @@ tokio = { version = "1.52.0", features = ["io-util", "macros", "net", "rt-multi-
 toml = "0.9.8"
 url = "2.5.8"
 webbrowser = "1.2.0"
-ratatui = { version = "0.30.0", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30.0", default-features = false, features = ["crossterm_0_29"] }
 crossterm = "0.29.0"
 
 [dev-dependencies]

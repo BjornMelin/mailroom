@@ -6,7 +6,8 @@ use anyhow::{Result, anyhow};
 use tokio::task::spawn_blocking;
 
 pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Result<SearchReport> {
-    store::init(config_report)?;
+    let init_config = config_report.clone();
+    spawn_blocking(move || store::init(&init_config)).await??;
     search_read_only(config_report, request).await
 }
 

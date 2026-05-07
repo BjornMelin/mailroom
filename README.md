@@ -229,6 +229,6 @@ Advanced manual overrides still work:
 ## Near-term build plan
 
 1. Use the verification and hardening runbook to canonicalize labels, deepen the local audit corpus, and generate disabled starter rules with `automation rules suggest`.
-2. Expand the TUI from read-only inspection into explicit workflow, draft, cleanup, and automation action flows with confirmation screens.
-3. Expand automation ergonomics only after a few low-surprise micro-batch archive/label runs land cleanly.
-4. Expand unsubscribe assistance only after the deeper sync proves out list-header coverage in the local cache.
+2. Turn the TUI from read-only inspection into explicit workflow, draft, cleanup, and automation action flows with confirmation screens.
+3. Improve automation ergonomics only after a few low-surprise micro-batch archive/label runs land cleanly.
+4. Add unsubscribe assistance only after the deeper sync proves out list-header coverage in the local cache.
