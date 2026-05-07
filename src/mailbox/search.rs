@@ -37,10 +37,10 @@ pub async fn search_read_only(
         return Err(anyhow!("search limit must be greater than zero"));
     }
     let report_terms = terms.clone();
-    let account_id = resolve_search_account_id(config_report)?;
     let label = request.label.clone();
     let from_address = request.from_address.clone();
     let results = spawn_blocking(move || {
+        let account_id = resolve_search_account_id(&database_path, busy_timeout_ms)?;
         store::mailbox::search_messages(
             &database_path,
             busy_timeout_ms,
@@ -68,18 +68,16 @@ pub async fn search_read_only(
     })
 }
 
-fn resolve_search_account_id(config_report: &ConfigReport) -> Result<String> {
-    if let Some(active_account) = store::accounts::get_active(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-    )? {
+fn resolve_search_account_id(
+    database_path: &std::path::Path,
+    busy_timeout_ms: u64,
+) -> Result<String> {
+    if let Some(active_account) = store::accounts::get_active(database_path, busy_timeout_ms)? {
         return Ok(active_account.account_id);
     }
 
-    if let Some(mailbox) = store::mailbox::inspect_mailbox(
-        &config_report.config.store.database_path,
-        config_report.config.store.busy_timeout_ms,
-    )? && let Some(sync_state) = mailbox.sync_state
+    if let Some(mailbox) = store::mailbox::inspect_mailbox(database_path, busy_timeout_ms)?
+        && let Some(sync_state) = mailbox.sync_state
     {
         return Ok(sync_state.account_id);
     }
