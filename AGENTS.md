@@ -36,6 +36,7 @@ Local contract for `mailroom`.
 - Add new dependencies only when they earn their keep for the current milestone.
 - Preserve structured output for agent and shell workflows.
 - Prefer read-only audit and verification commands before broad mailbox mutations or high-volume automation apply runs.
+- Keep TUI work as a thin shell over existing services and reports; do not duplicate Gmail, workflow, automation, or store ownership in UI code.
 - If a plugin-assisted Codex workflow exists for an operation, document it alongside native commands rather than pretending the repo already implements it.
 
 ## Error handling
