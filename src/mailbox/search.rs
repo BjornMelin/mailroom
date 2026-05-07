@@ -7,7 +7,13 @@ use tokio::task::spawn_blocking;
 
 pub async fn search(config_report: &ConfigReport, request: SearchRequest) -> Result<SearchReport> {
     store::init(config_report)?;
+    search_read_only(config_report, request).await
+}
 
+pub async fn search_read_only(
+    config_report: &ConfigReport,
+    request: SearchRequest,
+) -> Result<SearchReport> {
     let after_epoch_ms = request
         .after
         .as_deref()

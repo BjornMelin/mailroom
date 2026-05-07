@@ -15,5 +15,6 @@ pub use model::{
 };
 pub(crate) use service::AutomationServiceError;
 pub use service::{
-    apply_run, prune_runs, rollout, run_preview, show_run, suggest_rules, validate_rules,
+    apply_run, prune_runs, rollout, rollout_read_only, run_preview, show_run, suggest_rules,
+    validate_rules,
 };

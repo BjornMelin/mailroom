@@ -18,6 +18,14 @@ pub async fn list_workflows(
     triage_bucket: Option<store::workflows::TriageBucket>,
 ) -> WorkflowResult<WorkflowListReport> {
     store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
+    list_workflows_read_only(config_report, stage, triage_bucket).await
+}
+
+pub async fn list_workflows_read_only(
+    config_report: &ConfigReport,
+    stage: Option<store::workflows::WorkflowStage>,
+    triage_bucket: Option<store::workflows::TriageBucket>,
+) -> WorkflowResult<WorkflowListReport> {
     let account_id = resolve_workflow_account_id(config_report, None).await?;
     let database_path = config_report.config.store.database_path.clone();
     let busy_timeout_ms = config_report.config.store.busy_timeout_ms;

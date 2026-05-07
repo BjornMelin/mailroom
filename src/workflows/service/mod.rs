@@ -13,7 +13,10 @@ pub use draft_local::{
     draft_attach_add, draft_attach_remove, draft_body_set, draft_send, draft_start,
 };
 pub(crate) use error::WorkflowServiceError;
-pub use queries::{list_workflows, promote_workflow, set_triage, show_workflow, snooze_workflow};
+pub use queries::{
+    list_workflows, list_workflows_read_only, promote_workflow, set_triage, show_workflow,
+    snooze_workflow,
+};
 
 use error::WorkflowResult;
 

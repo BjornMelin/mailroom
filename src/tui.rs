@@ -4,7 +4,7 @@ use crate::doctor::DoctorReport;
 use crate::mailbox::{self, SearchReport, SearchRequest};
 use crate::workflows::WorkflowListReport;
 use crate::{audit, workspace};
-use anyhow::Result;
+use anyhow::Result as AnyhowResult;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -28,7 +28,7 @@ pub async fn run(
     paths: &workspace::WorkspacePaths,
     config_report: ConfigReport,
     initial_search: Option<String>,
-) -> Result<()> {
+) -> AnyhowResult<()> {
     let snapshot = load_snapshot(paths, &config_report).await;
     let mut app = TuiApp::new(snapshot, initial_search);
     if app.has_search_input() {
@@ -72,7 +72,7 @@ struct TuiApp {
     snapshot: Snapshot,
     search_input: String,
     search_editing: bool,
-    search_report: Option<Result<SearchReport, String>>,
+    search_report: Option<std::result::Result<SearchReport, String>>,
     status: String,
 }
 
@@ -116,7 +116,7 @@ impl TuiApp {
             before: None,
             limit: TUI_SEARCH_LIMIT,
         };
-        match mailbox::search(config_report, request).await {
+        match mailbox::search_read_only(config_report, request).await {
             Ok(report) => {
                 let count = report.results.len();
                 self.search_report = Some(Ok(report));
@@ -149,10 +149,10 @@ impl TuiApp {
 
 #[derive(Debug, Clone)]
 struct Snapshot {
-    doctor: Result<DoctorReport, String>,
-    verification: Result<audit::VerificationAuditReport, String>,
-    workflows: Result<WorkflowListReport, String>,
-    automation: Result<automation::AutomationRolloutReport, String>,
+    doctor: std::result::Result<DoctorReport, String>,
+    verification: std::result::Result<audit::VerificationAuditReport, String>,
+    workflows: std::result::Result<WorkflowListReport, String>,
+    automation: std::result::Result<automation::AutomationRolloutReport, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,10 +207,10 @@ async fn load_snapshot(
         ),
     };
 
-    let workflows = crate::workflows::list_workflows(config_report, None, None)
+    let workflows = crate::workflows::list_workflows_read_only(config_report, None, None)
         .await
         .map_err(|error| error.to_string());
-    let automation = automation::rollout(
+    let automation = automation::rollout_read_only(
         config_report,
         AutomationRolloutRequest {
             rule_ids: Vec::new(),
@@ -233,7 +233,7 @@ async fn handle_key(
     app: &mut TuiApp,
     paths: &workspace::WorkspacePaths,
     config_report: &ConfigReport,
-) -> Result<bool> {
+) -> AnyhowResult<bool> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return Ok(true);
     }
@@ -290,7 +290,7 @@ async fn handle_search_key(
     key: KeyEvent,
     app: &mut TuiApp,
     config_report: &ConfigReport,
-) -> Result<bool> {
+) -> AnyhowResult<bool> {
     match key.code {
         KeyCode::Esc => {
             app.search_editing = false;
@@ -726,7 +726,11 @@ fn error_chain(error: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, TuiApp, View, truncate};
+    use super::{Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, load_snapshot, truncate};
+    use crate::config;
+    use crate::mailbox::{self, SearchRequest};
+    use crate::workspace::WorkspacePaths;
+    use tempfile::TempDir;
 
     #[test]
     fn truncate_preserves_short_values() {
@@ -752,6 +756,44 @@ mod tests {
         assert_eq!(app.view, View::Help);
         app.next_view();
         assert_eq!(app.view, View::Dashboard);
+    }
+
+    #[tokio::test]
+    async fn snapshot_load_does_not_create_runtime_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+
+        assert!(!paths.runtime_root.exists());
+        let snapshot = load_snapshot(&paths, &config_report).await;
+
+        assert!(snapshot.doctor.is_ok());
+        assert!(snapshot.verification.is_ok());
+        assert!(!paths.runtime_root.exists());
+    }
+
+    #[tokio::test]
+    async fn search_read_only_does_not_create_runtime_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+
+        let error = mailbox::search_read_only(
+            &config_report,
+            SearchRequest {
+                terms: String::from("invoice"),
+                label: None,
+                from_address: None,
+                after: None,
+                before: None,
+                limit: TUI_SEARCH_LIMIT,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no active Gmail account"));
+        assert!(!paths.runtime_root.exists());
     }
 
     fn empty_snapshot() -> Snapshot {

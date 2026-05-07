@@ -4,7 +4,8 @@
 
 It is designed for fast inspection after `workspace init`, auth setup, and a
 local sync. It does not replace the CLI JSON contract; it renders the same
-underlying service reports for human operation.
+underlying read-only reports for human operation and avoids store initialization
+or migration side effects while launching.
 
 ## Run
 
@@ -22,7 +23,7 @@ cargo run -- tui --search "project alpha"
 
 - Dashboard: workspace, database, auth, account, mailbox count, and readiness
   flags from `doctor` plus `audit verification`.
-- Search: local SQLite FTS search through the same service as `mailroom search`.
+- Search: local SQLite FTS search through the mailbox read model.
 - Workflows: read-only `workflow list` queue overview.
 - Automation: read-only `automation rollout` readiness and candidate preview.
 - Help: key bindings and safety posture.

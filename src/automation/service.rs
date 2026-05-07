@@ -197,13 +197,24 @@ pub async fn rollout(
     config_report: &ConfigReport,
     request: AutomationRolloutRequest,
 ) -> Result<AutomationRolloutReport> {
-    if request.limit == 0 {
-        return Err(AutomationServiceError::InvalidRolloutLimit.into());
-    }
-
+    validate_rollout_request(&request)?;
     ensure_runtime_dirs_task(configured_paths(config_report)?).await?;
     init_store_task(config_report).await?;
+    build_rollout_report(config_report, request).await
+}
 
+pub async fn rollout_read_only(
+    config_report: &ConfigReport,
+    request: AutomationRolloutRequest,
+) -> Result<AutomationRolloutReport> {
+    validate_rollout_request(&request)?;
+    build_rollout_report(config_report, request).await
+}
+
+async fn build_rollout_report(
+    config_report: &ConfigReport,
+    request: AutomationRolloutRequest,
+) -> Result<AutomationRolloutReport> {
     let verification = verification_audit_task(config_report).await?;
     let mut blockers = Vec::new();
     let mut warnings = verification.warnings.clone();
@@ -271,6 +282,13 @@ pub async fn rollout(
         next_steps,
         command_plan,
     })
+}
+
+fn validate_rollout_request(request: &AutomationRolloutRequest) -> Result<()> {
+    if request.limit == 0 {
+        return Err(AutomationServiceError::InvalidRolloutLimit.into());
+    }
+    Ok(())
 }
 
 pub async fn show_run(config_report: &ConfigReport, run_id: i64) -> Result<AutomationShowReport> {
