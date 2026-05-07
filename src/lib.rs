@@ -11,6 +11,7 @@ mod handlers;
 mod mailbox;
 mod store;
 mod time;
+mod tui;
 mod workflows;
 mod workspace;
 
@@ -20,14 +21,14 @@ use cli::{
     AccountCommand, AttachmentCommand, AuditCommand, AuthCommand, AutomationCommand,
     AutomationRulesCommand, CleanupCommand, Cli, Commands, ConfigCommand, DraftAttachmentCommand,
     DraftCommand, GmailCommand, GmailLabelsCommand, StoreCommand, SyncCommand, SyncPerfCommand,
-    TriageCommand, WorkflowCommand,
+    TriageCommand, TuiArgs, WorkflowCommand,
 };
 use handlers::{
     handle_account_command, handle_attachment_command, handle_audit_command, handle_auth_command,
     handle_automation_command, handle_cleanup_command, handle_config_command,
     handle_doctor_command, handle_draft_command, handle_gmail_command, handle_paths_command,
     handle_search_command, handle_store_command, handle_sync_command, handle_triage_command,
-    handle_workflow_command, handle_workspace_command,
+    handle_tui_command, handle_workflow_command, handle_workspace_command,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -109,6 +110,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Gmail { command } => handle_gmail_command(&paths, command).await?,
         Commands::Roadmap => print_roadmap(),
         Commands::Search(args) => handle_search_command(&paths, args).await?,
+        Commands::Tui(args) => handle_tui_command(&paths, args).await?,
         Commands::Attachment { command } => handle_attachment_command(&paths, command).await?,
         Commands::Automation { command } => handle_automation_command(&paths, command).await?,
         Commands::Sync { command } => handle_sync_command(&paths, command).await?,
@@ -193,6 +195,10 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
         Commands::Search(args) => CommandMetadata {
             json: args.json,
             operation: "search.run",
+        },
+        Commands::Tui(TuiArgs { .. }) => CommandMetadata {
+            json: false,
+            operation: "tui.run",
         },
         Commands::Attachment { command } => match command {
             AttachmentCommand::List { json, .. } => CommandMetadata {
@@ -359,10 +365,11 @@ fn command_metadata(command: &Commands) -> CommandMetadata {
 
 fn print_roadmap() {
     println!(
-        "v1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export\n\
+        "v1 milestone: search + thread workflow + draft/send + reviewed cleanup + controlled attachment export + review-first automation + read-only TUI\n\
          docs: docs/roadmap/v1-search-triage-draft-queue.md\n\
          architecture: docs/architecture/system-overview.md\n\
          hardening: docs/operations/verification-and-hardening.md\n\
+         tui: docs/operations/tui-operator-shell.md\n\
          plugin-assisted ops: docs/operations/plugin-assisted-workflows.md"
     );
 }
