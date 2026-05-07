@@ -59,14 +59,20 @@ impl SuggestionKind {
 struct SuggestionKey {
     kind: SuggestionKind,
     value: String,
+    evidence: SuggestionEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SuggestionEvidence {
+    ListId,
+    ListUnsubscribe,
+    Precedence(String),
 }
 
 #[derive(Debug, Clone)]
 struct SuggestionGroup {
     key: SuggestionKey,
     matched_thread_count: usize,
-    all_have_list_unsubscribe: bool,
-    precedence_values: BTreeSet<String>,
     samples: Vec<AutomationRuleSuggestionSample>,
 }
 
@@ -92,6 +98,7 @@ pub(crate) fn suggest_rules_from_candidates(
             .then_with(|| left.rule_id.cmp(&right.rule_id))
     });
     suggestions.truncate(request.limit);
+    deduplicate_rule_ids(&mut suggestions)?;
 
     let mut warnings = Vec::new();
     if inspected_thread_count == 0 {
@@ -157,8 +164,6 @@ fn group_candidates(
             continue;
         };
         eligible_thread_count += 1;
-        let has_unsubscribe = has_list_unsubscribe(candidate);
-        let precedence = normalized_precedence(candidate.precedence_header.as_deref());
         let sample = AutomationRuleSuggestionSample {
             thread_id: candidate.thread_id.clone(),
             message_id: candidate.message_id.clone(),
@@ -173,15 +178,9 @@ fn group_candidates(
             .or_insert_with(|| SuggestionGroup {
                 key,
                 matched_thread_count: 0,
-                all_have_list_unsubscribe: true,
-                precedence_values: BTreeSet::new(),
                 samples: Vec::new(),
             });
         group.matched_thread_count += 1;
-        group.all_have_list_unsubscribe &= has_unsubscribe;
-        if let Some(precedence) = precedence {
-            group.precedence_values.insert(precedence);
-        }
         if group.samples.len() < request.sample_limit {
             group.samples.push(sample);
         }
@@ -204,12 +203,22 @@ fn suggestion_key(candidate: &AutomationThreadCandidate) -> Option<SuggestionKey
         return Some(SuggestionKey {
             kind: SuggestionKind::ListId,
             value: list_id,
+            evidence: SuggestionEvidence::ListId,
         });
     }
 
-    normalized_from_address(candidate.from_address.as_deref()).map(|from_address| SuggestionKey {
+    let from_address = normalized_from_address(candidate.from_address.as_deref())?;
+    if has_list_unsubscribe(candidate) {
+        return Some(SuggestionKey {
+            kind: SuggestionKind::Sender,
+            value: from_address,
+            evidence: SuggestionEvidence::ListUnsubscribe,
+        });
+    }
+    normalized_precedence(candidate.precedence_header.as_deref()).map(|precedence| SuggestionKey {
         kind: SuggestionKind::Sender,
         value: from_address,
+        evidence: SuggestionEvidence::Precedence(precedence),
     })
 }
 
@@ -246,13 +255,16 @@ fn build_suggestion(
         SuggestionKind::Sender => {
             matcher.from_address = Some(group.key.value.clone());
             match_fields.push(format!("from_address={}", group.key.value));
-            if group.all_have_list_unsubscribe {
-                matcher.has_list_unsubscribe = Some(true);
-                match_fields.push(String::from("has_list_unsubscribe=true"));
-            }
-            if !group.precedence_values.is_empty() {
-                matcher.precedence = group.precedence_values.iter().cloned().collect();
-                match_fields.push(format!("precedence={}", matcher.precedence.join("|")));
+            match &group.key.evidence {
+                SuggestionEvidence::ListId => {}
+                SuggestionEvidence::ListUnsubscribe => {
+                    matcher.has_list_unsubscribe = Some(true);
+                    match_fields.push(String::from("has_list_unsubscribe=true"));
+                }
+                SuggestionEvidence::Precedence(precedence) => {
+                    matcher.precedence = vec![precedence.clone()];
+                    match_fields.push(format!("precedence={precedence}"));
+                }
             }
         }
     }
@@ -265,10 +277,7 @@ fn build_suggestion(
         matcher,
         action: AutomationRuleAction::Archive,
     };
-    let toml = toml::to_string_pretty(&AutomationRuleSet {
-        rules: vec![rule.clone()],
-    })
-    .map_err(|source| AutomationServiceError::RuleTomlSerialize { source })?;
+    let toml = render_rule_toml(&rule)?;
 
     Ok(AutomationRuleSuggestion {
         rule_id,
@@ -281,6 +290,34 @@ fn build_suggestion(
         rule,
         toml,
     })
+}
+
+fn deduplicate_rule_ids(
+    suggestions: &mut [AutomationRuleSuggestion],
+) -> Result<(), AutomationServiceError> {
+    let mut used_rule_ids = BTreeSet::new();
+    for suggestion in suggestions {
+        let base_rule_id = suggestion.rule_id.clone();
+        let mut candidate_rule_id = base_rule_id.clone();
+        let mut suffix = 2usize;
+        while !used_rule_ids.insert(candidate_rule_id.clone()) {
+            candidate_rule_id = format!("{base_rule_id}-{suffix}");
+            suffix += 1;
+        }
+        if candidate_rule_id != suggestion.rule_id {
+            suggestion.rule_id = candidate_rule_id.clone();
+            suggestion.rule.id = candidate_rule_id;
+            suggestion.toml = render_rule_toml(&suggestion.rule)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_rule_toml(rule: &AutomationRule) -> Result<String, AutomationServiceError> {
+    toml::to_string_pretty(&AutomationRuleSet {
+        rules: vec![rule.clone()],
+    })
+    .map_err(|source| AutomationServiceError::RuleTomlSerialize { source })
 }
 
 fn suggestion_rank(suggestion: &AutomationRuleSuggestion) -> (usize, usize, i64) {
@@ -457,6 +494,93 @@ mod tests {
     }
 
     #[test]
+    fn sender_suggestions_keep_counted_evidence_aligned_with_matcher() {
+        let (_repo_root, config_report) = config_report();
+        let mut request = request();
+        request.min_thread_count = 2;
+        let candidates = vec![
+            sender_unsubscribe_candidate("thread-u1", "message-u1", 100),
+            sender_unsubscribe_candidate("thread-u2", "message-u2", 200),
+            sender_candidate("thread-p1", "message-p1", 300),
+            sender_candidate("thread-p2", "message-p2", 400),
+        ];
+
+        let report = suggest_rules_from_candidates(
+            &config_report,
+            String::from("gmail:operator@example.com"),
+            &candidates,
+            &request,
+            2_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(report.suggestion_count, 2);
+        let unsubscribe_suggestion = report
+            .suggestions
+            .iter()
+            .find(|suggestion| {
+                suggestion.rule.matcher.has_list_unsubscribe == Some(true)
+                    && suggestion.rule.matcher.precedence.is_empty()
+            })
+            .expect("unsubscribe-backed sender suggestion");
+        assert_eq!(unsubscribe_suggestion.matched_thread_count, 2);
+
+        let precedence_suggestion = report
+            .suggestions
+            .iter()
+            .find(|suggestion| {
+                suggestion.rule.matcher.has_list_unsubscribe.is_none()
+                    && suggestion.rule.matcher.precedence == vec![String::from("bulk")]
+            })
+            .expect("precedence-backed sender suggestion");
+        assert_eq!(precedence_suggestion.matched_thread_count, 2);
+    }
+
+    #[test]
+    fn deduplicates_rule_ids_after_slug_collisions() {
+        let (_repo_root, config_report) = config_report();
+        let mut request = request();
+        request.min_thread_count = 1;
+        let candidates = vec![
+            sender_collision_candidate("foo_bar@example.com", "thread-1", "message-1", 300),
+            sender_collision_candidate("foo-bar@example.com", "thread-2", "message-2", 100),
+        ];
+
+        let report = suggest_rules_from_candidates(
+            &config_report,
+            String::from("gmail:operator@example.com"),
+            &candidates,
+            &request,
+            2_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "archive-sender-foo-bar-example-com",
+                "archive-sender-foo-bar-example-com-2",
+            ]
+        );
+        let suffix_suggestion = &report.suggestions[1];
+        assert_eq!(
+            suffix_suggestion.rule.id,
+            "archive-sender-foo-bar-example-com-2"
+        );
+        assert!(
+            suffix_suggestion
+                .toml
+                .contains("id = \"archive-sender-foo-bar-example-com-2\"")
+        );
+        toml::from_str::<crate::automation::model::AutomationRuleSet>(&suffix_suggestion.toml)
+            .unwrap();
+    }
+
+    #[test]
     fn ignores_new_threads_non_inbox_threads_and_small_groups() {
         let (_repo_root, config_report) = config_report();
         let mut request = request();
@@ -568,6 +692,32 @@ mod tests {
         candidate(thread_id, message_id, internal_date_epoch_ms, |candidate| {
             candidate.from_header = String::from("Notices <notices@example.com>");
             candidate.from_address = Some(String::from("notices@example.com"));
+            candidate.precedence_header = Some(String::from("bulk"));
+        })
+    }
+
+    fn sender_unsubscribe_candidate(
+        thread_id: &str,
+        message_id: &str,
+        internal_date_epoch_ms: i64,
+    ) -> AutomationThreadCandidate {
+        candidate(thread_id, message_id, internal_date_epoch_ms, |candidate| {
+            candidate.from_header = String::from("Notices <notices@example.com>");
+            candidate.from_address = Some(String::from("notices@example.com"));
+            candidate.list_unsubscribe_header =
+                Some(String::from("<mailto:unsubscribe@example.com>"));
+        })
+    }
+
+    fn sender_collision_candidate(
+        from_address: &str,
+        thread_id: &str,
+        message_id: &str,
+        internal_date_epoch_ms: i64,
+    ) -> AutomationThreadCandidate {
+        candidate(thread_id, message_id, internal_date_epoch_ms, |candidate| {
+            candidate.from_header = format!("Sender <{from_address}>");
+            candidate.from_address = Some(from_address.to_owned());
             candidate.precedence_header = Some(String::from("bulk"));
         })
     }
