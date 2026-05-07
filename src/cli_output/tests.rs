@@ -197,6 +197,25 @@ fn automation_rules_suggest_validation_maps_to_validation_failed_code() {
 
 #[test]
 fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
+    assert_automation_rules_suggest_flag_rejected("--limit");
+}
+
+#[test]
+fn automation_rules_suggest_zero_min_thread_count_fails_in_json_and_human_modes() {
+    assert_automation_rules_suggest_flag_rejected("--min-thread-count");
+}
+
+#[test]
+fn automation_rules_suggest_zero_older_than_days_fails_in_json_and_human_modes() {
+    assert_automation_rules_suggest_flag_rejected("--older-than-days");
+}
+
+#[test]
+fn automation_rules_suggest_zero_sample_limit_fails_in_json_and_human_modes() {
+    assert_automation_rules_suggest_flag_rejected("--sample-limit");
+}
+
+fn assert_automation_rules_suggest_flag_rejected(flag: &str) {
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -217,7 +236,7 @@ fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
             "automation",
             "rules",
             "suggest",
-            "--limit",
+            flag,
             "0",
             "--json",
         ])
@@ -233,6 +252,7 @@ fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
     let json_value: serde_json::Value = serde_json::from_str(&json_stdout).unwrap();
     assert_eq!(json_value["success"], json!(false));
     assert_eq!(json_value["error"]["code"], json!("validation_failed"));
+    assert_eq!(json_value["error"]["kind"], json!("automation.validation"));
     assert_eq!(
         json_value["error"]["operation"],
         json!("automation.rules.suggest")
@@ -241,7 +261,7 @@ fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
         json_value["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("--limit")
+            .contains(flag)
     );
 
     let human_output = Command::new(&cargo)
@@ -254,7 +274,7 @@ fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
             "automation",
             "rules",
             "suggest",
-            "--limit",
+            flag,
             "0",
         ])
         .env("XDG_CONFIG_HOME", &config_dir)
@@ -265,7 +285,7 @@ fn automation_rules_suggest_zero_limit_fails_in_json_and_human_modes() {
     assert_eq!(human_output.status.code(), Some(2));
     assert!(human_output.stdout.is_empty());
     let human_stderr = String::from_utf8(human_output.stderr).unwrap();
-    assert!(human_stderr.contains("automation rules suggest --limit"));
+    assert!(human_stderr.contains(&format!("automation rules suggest {flag}")));
 }
 
 #[test]

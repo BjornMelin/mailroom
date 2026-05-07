@@ -181,12 +181,42 @@ fn group_candidates(
                 samples: Vec::new(),
             });
         group.matched_thread_count += 1;
-        if group.samples.len() < request.sample_limit {
-            group.samples.push(sample);
-        }
+        retain_recent_sample(&mut group.samples, sample, request.sample_limit);
     }
 
     (eligible_thread_count, groups)
+}
+
+fn retain_recent_sample(
+    samples: &mut Vec<AutomationRuleSuggestionSample>,
+    sample: AutomationRuleSuggestionSample,
+    sample_limit: usize,
+) {
+    if samples.len() < sample_limit {
+        samples.push(sample);
+        return;
+    }
+
+    let Some(oldest_index) = samples
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| sample_rank_key(left).cmp(&sample_rank_key(right)))
+        .map(|(index, _)| index)
+    else {
+        return;
+    };
+
+    if sample_rank_key(&sample) > sample_rank_key(&samples[oldest_index]) {
+        samples[oldest_index] = sample;
+    }
+}
+
+fn sample_rank_key(sample: &AutomationRuleSuggestionSample) -> (i64, &str, &str) {
+    (
+        sample.internal_date_epoch_ms,
+        sample.thread_id.as_str(),
+        sample.message_id.as_str(),
+    )
 }
 
 fn is_candidate_eligible(candidate: &AutomationThreadCandidate, cutoff_epoch_ms: i64) -> bool {
@@ -368,10 +398,14 @@ fn normalized_from_address(from_address: Option<&str>) -> Option<String> {
 
 fn normalized_precedence(header: Option<&str>) -> Option<String> {
     let value = header?.trim().to_ascii_lowercase();
+    let tokens: Vec<&str> = value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
     ["bulk", "list", "junk"]
         .iter()
-        .find(|expected| value.contains(**expected))
-        .map(|value| (*value).to_owned())
+        .find(|expected| tokens.contains(expected))
+        .map(|matched| (*matched).to_owned())
 }
 
 fn slugify(value: &str) -> String {
@@ -410,7 +444,7 @@ fn slugify(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{slugify, suggest_rules_from_candidates};
+    use super::{normalized_precedence, slugify, suggest_rules_from_candidates};
     use crate::automation::model::AutomationRulesSuggestRequest;
     use crate::config::resolve;
     use crate::store::automation::AutomationThreadCandidate;
@@ -632,6 +666,52 @@ mod tests {
         assert_eq!(report.suggestion_count, 1);
         assert_eq!(report.suggestions[0].rule_id, "archive-list-b-example-com");
         assert_eq!(report.suggestions[0].sample_threads.len(), 1);
+    }
+
+    #[test]
+    fn sample_limit_keeps_latest_samples_independent_of_input_order() {
+        let (_repo_root, config_report) = config_report();
+        let mut request = request();
+        request.limit = 1;
+        request.min_thread_count = 2;
+        request.sample_limit = 1;
+        let candidates = vec![
+            list_candidate_for("a.example.com", "thread-a-old", "message-a-old", 100),
+            list_candidate_for("b.example.com", "thread-b-old", "message-b-old", 400),
+            list_candidate_for("b.example.com", "thread-b-new", "message-b-new", 500),
+            list_candidate_for("a.example.com", "thread-a-new", "message-a-new", 900),
+        ];
+
+        let report = suggest_rules_from_candidates(
+            &config_report,
+            String::from("gmail:operator@example.com"),
+            &candidates,
+            &request,
+            2_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(report.suggestion_count, 1);
+        assert_eq!(report.suggestions[0].rule_id, "archive-list-a-example-com");
+        assert_eq!(report.suggestions[0].sample_threads.len(), 1);
+        assert_eq!(
+            report.suggestions[0].sample_threads[0].thread_id,
+            "thread-a-new"
+        );
+    }
+
+    #[test]
+    fn normalized_precedence_requires_exact_tokens() {
+        assert_eq!(
+            normalized_precedence(Some("bulk")),
+            Some(String::from("bulk"))
+        );
+        assert_eq!(
+            normalized_precedence(Some("x-priority; list")),
+            Some(String::from("list"))
+        );
+        assert_eq!(normalized_precedence(Some("notbulk")), None);
+        assert_eq!(normalized_precedence(Some("xlistx")), None);
     }
 
     #[test]
