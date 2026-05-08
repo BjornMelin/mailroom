@@ -710,6 +710,7 @@ impl TuiApp {
                 let count = report.suggestion_count;
                 self.automation_action_report =
                     Some(Ok(AutomationActionReport::RulesSuggest(Box::new(report))));
+                self.refresh_automation(config_report).await;
                 self.status = format!("automation suggestions ready: {count} disabled starters");
             }
             Err(error) => {
@@ -1243,28 +1244,22 @@ fn automation_modal_uses_text_input(modal: &AutomationModal) -> bool {
 
 fn push_automation_modal_text(modal: &mut AutomationModal, value: char) {
     match modal {
-        AutomationModal::RunPreview { limit_text }
-        | AutomationModal::ShowRun {
-            run_id_text: limit_text,
-        }
-        | AutomationModal::ApplyRun {
-            confirm_text: limit_text,
-            ..
-        } => limit_text.push(value),
+        AutomationModal::RunPreview { limit_text } => limit_text.push(value),
+        AutomationModal::ShowRun { run_id_text } => run_id_text.push(value),
+        AutomationModal::ApplyRun { confirm_text, .. } => confirm_text.push(value),
     }
 }
 
 fn pop_automation_modal_text(modal: &mut AutomationModal) {
     match modal {
-        AutomationModal::RunPreview { limit_text }
-        | AutomationModal::ShowRun {
-            run_id_text: limit_text,
-        }
-        | AutomationModal::ApplyRun {
-            confirm_text: limit_text,
-            ..
-        } => {
+        AutomationModal::RunPreview { limit_text } => {
             limit_text.pop();
+        }
+        AutomationModal::ShowRun { run_id_text } => {
+            run_id_text.pop();
+        }
+        AutomationModal::ApplyRun { confirm_text, .. } => {
+            confirm_text.pop();
         }
     }
 }
@@ -1301,18 +1296,15 @@ fn edit_automation_rules_blocking(
 ) -> std::result::Result<TerminalActionReport, String> {
     let rules_path = ensure_automation_rules_file(paths)?;
 
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| String::from("vi"));
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| String::from("sh"));
-    let command = format!("{} {}", editor, shell_quote_path(&rules_path));
-    let status = Command::new(shell)
-        .arg("-lc")
-        .arg(command)
+    let editor = editor_command_from_env()?;
+    let status = Command::new(&editor.program)
+        .args(&editor.args)
+        .arg(&rules_path)
         .status()
         .map_err(|error| {
             format!(
-                "failed to launch editor for {}: {error}",
+                "failed to launch editor {} for {}: {error}",
+                editor.program,
                 rules_path.display()
             )
         })?;
@@ -1323,6 +1315,108 @@ fn edit_automation_rules_blocking(
         ));
     }
     Ok(TerminalActionReport::AutomationRulesEdited { path: rules_path })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+fn editor_command_from_env() -> std::result::Result<EditorCommand, String> {
+    for variable in ["VISUAL", "EDITOR"] {
+        if let Ok(value) = std::env::var(variable)
+            && !value.trim().is_empty()
+        {
+            return parse_editor_command(&value)
+                .map_err(|error| format!("invalid ${variable} editor command: {error}"));
+        }
+    }
+    Ok(EditorCommand {
+        program: default_editor_program().to_string(),
+        args: Vec::new(),
+    })
+}
+
+#[cfg(windows)]
+fn default_editor_program() -> &'static str {
+    "notepad"
+}
+
+#[cfg(not(windows))]
+fn default_editor_program() -> &'static str {
+    "vi"
+}
+
+fn parse_editor_command(value: &str) -> std::result::Result<EditorCommand, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("editor command is empty"));
+    }
+    if Path::new(trimmed).exists() {
+        return Ok(EditorCommand {
+            program: trimmed.to_string(),
+            args: Vec::new(),
+        });
+    }
+    let mut words = split_command_words(trimmed)?;
+    if words.is_empty() {
+        return Err(String::from("editor command is empty"));
+    }
+    let program = words.remove(0);
+    Ok(EditorCommand {
+        program,
+        args: words,
+    })
+}
+
+fn split_command_words(value: &str) -> std::result::Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for value in value.chars() {
+        if escaped {
+            current.push(value);
+            escaped = false;
+            continue;
+        }
+        if value == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_char) = quote {
+            if value == quote_char {
+                quote = None;
+            } else {
+                current.push(value);
+            }
+            continue;
+        }
+        if value == '\'' || value == '"' {
+            quote = Some(value);
+            continue;
+        }
+        if value.is_whitespace() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(value);
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err(String::from("unterminated quote"));
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
 }
 
 fn ensure_automation_rules_file(
@@ -1367,11 +1461,6 @@ fn seed_automation_rules_file(
         .map_err(|error| format!("failed to write {}: {error}", rules_path.display()))?;
     }
     Ok(())
-}
-
-fn shell_quote_path(path: &Path) -> String {
-    let value = path.display().to_string();
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[derive(Debug, Clone)]
@@ -2405,7 +2494,8 @@ fn render_automation(frame: &mut Frame<'_>, area: Rect, app: &mut TuiApp) {
         ])
         .split(area);
 
-    match app.snapshot.automation.clone() {
+    app.set_automation_candidate_window_limit(automation_run_panel_table_capacity(chunks[2]));
+    match &app.snapshot.automation {
         Ok(report) => {
             let mut summary = vec![
                 metric("selected rules", report.selected_rule_count.to_string()),
@@ -2426,23 +2516,30 @@ fn render_automation(frame: &mut Frame<'_>, area: Rect, app: &mut TuiApp) {
             );
 
             render_automation_action_panel(frame, chunks[1], app);
-            render_automation_run_panel(frame, chunks[2], app, &report);
+            render_automation_run_panel(frame, chunks[2], app, report);
         }
-        Err(error) => render_text_panel(frame, area, "Automation", vec![error_line(&error)]),
+        Err(error) => render_text_panel(frame, area, "Automation", vec![error_line(error)]),
     }
+}
+
+fn automation_run_panel_table_capacity(area: Rect) -> usize {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(area);
+    workflow_table_row_capacity(chunks[0])
 }
 
 fn render_automation_run_panel(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &mut TuiApp,
+    app: &TuiApp,
     rollout: &automation::AutomationRolloutReport,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
         .split(area);
-    app.set_automation_candidate_window_limit(workflow_table_row_capacity(chunks[0]));
 
     if let Some(Ok(report)) = &app.automation_detail_report {
         let rows = app
@@ -2986,7 +3083,7 @@ mod tests {
         AutomationModal, CleanupField, DEFAULT_AUTOMATION_RUN_LIMIT, Snapshot, TUI_SEARCH_LIMIT,
         TerminalAction, TuiApp, View, WorkflowModal, automation_match_summary,
         ensure_automation_rules_file, failed_diagnostic_reports, format_epoch_day_utc, handle_key,
-        load_snapshot, render, snooze_until_validation_error, truncate,
+        load_snapshot, parse_editor_command, render, snooze_until_validation_error, truncate,
         workflow_table_row_capacity,
     };
     use crate::config::{self, WorkspaceConfig};
@@ -3793,6 +3890,21 @@ mod tests {
         assert!(rules_path.exists());
         assert!(runtime_root.join("auth").exists());
         assert!(!default_paths.runtime_root.exists());
+    }
+
+    #[test]
+    fn editor_command_parser_preserves_args_and_quoted_values() {
+        let command = parse_editor_command("code --wait 'path with spaces'").unwrap();
+
+        assert_eq!(command.program, "code");
+        assert_eq!(command.args, vec!["--wait", "path with spaces"]);
+    }
+
+    #[test]
+    fn editor_command_parser_rejects_unclosed_quotes() {
+        let error = parse_editor_command("vim 'unterminated").unwrap_err();
+
+        assert!(error.contains("unterminated quote"));
     }
 
     #[test]
