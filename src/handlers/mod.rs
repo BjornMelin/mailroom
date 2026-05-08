@@ -9,6 +9,7 @@ mod gmail;
 mod search;
 mod store;
 mod sync;
+mod tui;
 mod workflow;
 mod workspace;
 
@@ -23,6 +24,7 @@ pub(crate) use gmail::handle_gmail_command;
 pub(crate) use search::handle_search_command;
 pub(crate) use store::handle_store_command;
 pub(crate) use sync::handle_sync_command;
+pub(crate) use tui::handle_tui_command;
 pub(crate) use workflow::{
     handle_cleanup_command, handle_draft_command, handle_triage_command, handle_workflow_command,
 };

@@ -51,6 +51,8 @@ pub enum Commands {
     Roadmap,
     /// Search the local mailbox index
     Search(SearchArgs),
+    /// Open the read-only terminal operator shell
+    Tui(TuiArgs),
     /// Inspect, fetch, and export cataloged inbound attachments
     Attachment {
         #[command(subcommand)]
@@ -204,6 +206,13 @@ pub struct SearchArgs {
     /// Emit JSON instead of plain text
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TuiArgs {
+    /// Seed the search pane with an initial local mailbox query
+    #[arg(long)]
+    pub search: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

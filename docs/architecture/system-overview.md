@@ -31,11 +31,23 @@ The native Rust core owns:
 - reviewed cleanup actions for archive, label, and trash
 - typed automation rule parsing, snapshot persistence, and thread-first bulk apply
 - read-only label audit, readiness verification, and ruleset-hardening guidance
+- read-only Ratatui operator shell over existing diagnostics, search, workflow, and automation reports
 - structured CLI output
 
 ### TUI layer
 
-The TUI should be a thin operator shell over the native core. It must not create a second rules engine or storage model.
+The TUI is a thin operator shell over the native core. It must not create a
+second rules engine or storage model.
+
+The current `mailroom tui` shell is read-only and renders:
+
+- workspace, auth, store, mailbox, and readiness diagnostics
+- local SQLite FTS search results
+- thread workflow queue rows
+- automation rollout readiness and candidate previews
+
+Mutation-oriented TUI work must reuse the existing CLI/service actions and add
+explicit confirmation flows before exposing any Gmail write.
 
 ### Plugin-assisted operator path
 
@@ -81,6 +93,7 @@ The current native substrate is intentionally narrow but now usable:
 - explicit draft send and reviewed cleanup actions that resync the mailbox afterward
 - typed TOML automation rules and persisted review snapshots for bulk cleanup
 - read-only audit commands for label taxonomy drift, header coverage, and rollout readiness
+- read-only terminal shell over diagnostics, search, workflows, and automation rollout
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
 This substrate now covers the first complete operator loop for search, thread
@@ -107,6 +120,10 @@ Detailed automation ownership is defined in
 Detailed verification and hardening ownership is defined in
 `docs/decisions/0007-verification-audit-hardening.md` and
 `docs/operations/verification-and-hardening.md`.
+
+Detailed TUI ownership is defined in
+`docs/decisions/0008-read-only-tui-foundation.md` and
+`docs/operations/tui-operator-shell.md`.
 
 ## Non-goals for v1
 

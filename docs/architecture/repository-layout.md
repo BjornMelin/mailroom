@@ -29,6 +29,7 @@
 - `src/audit.rs`: read-only label audit and verification/hardening reports
 - `src/automation/`: rules parsing, snapshot planning, and bulk-apply orchestration
 - `src/mailbox.rs`: sync/search orchestration over Gmail and SQLite
+- `src/tui.rs`: read-only Ratatui operator shell over existing service reports
 - `src/workflows/`: thread-scoped triage, draft/send, snooze, and cleanup orchestration
 - `src/doctor.rs`: combined workspace/store/auth health reporting
 - `src/workspace.rs`: repo-root runtime path layout and initialization
@@ -49,4 +50,6 @@ As the codebase grows, prefer a layout along these lines:
 - `src/workflows/`: triage, drafting, and cleanup flows
 - `src/tui/`: ratatui application shell
 
-Do not introduce duplicate ownership of workflow or automation rules between CLI, TUI, and adapters.
+Do not introduce duplicate ownership of workflow or automation rules between
+CLI, TUI, and adapters. TUI actions should call existing service owners rather
+than querying or mutating Gmail directly.
