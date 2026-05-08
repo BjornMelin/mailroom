@@ -142,8 +142,9 @@ impl TuiApp {
     }
 
     async fn refresh(&mut self, paths: &workspace::WorkspacePaths, config_report: &ConfigReport) {
+        let selected_thread_id = self.selected_thread_id();
         self.snapshot = load_snapshot(paths, config_report).await;
-        self.normalize_workflow_selection();
+        self.restore_workflow_selection_by_thread_id(selected_thread_id.as_deref());
         self.status = String::from("reports refreshed");
     }
 
@@ -225,6 +226,23 @@ impl TuiApp {
     fn set_workflow_window_limit(&mut self, workflow_window_limit: usize) {
         self.workflow_window_limit = workflow_window_limit.max(1);
         self.ensure_workflow_selection_visible();
+    }
+
+    fn restore_workflow_selection_by_thread_id(&mut self, selected_thread_id: Option<&str>) {
+        self.workflow_detail_report = None;
+        self.workflow_action_report = None;
+        if let Some(thread_id) = selected_thread_id {
+            if let Some(index) = self
+                .workflow_rows()
+                .iter()
+                .position(|workflow| workflow.thread_id == thread_id)
+            {
+                self.update_workflow_selection(index);
+            } else {
+                self.update_workflow_selection(0);
+            }
+        }
+        self.normalize_workflow_selection();
     }
 
     fn update_workflow_selection(&mut self, workflow_selection: usize) {
@@ -611,11 +629,16 @@ impl WorkflowModal {
             Self::DraftBody { .. } | Self::DraftSend { .. } => {}
             Self::Cleanup {
                 action,
+                execute,
                 active_field,
                 ..
             } => {
                 if *action == store::workflows::CleanupAction::Label {
-                    *active_field = active_field.next();
+                    *active_field = if *execute {
+                        active_field.next()
+                    } else {
+                        active_field.next_preview()
+                    };
                 }
             }
         }
@@ -630,11 +653,16 @@ impl WorkflowModal {
             Self::DraftBody { .. } | Self::DraftSend { .. } => {}
             Self::Cleanup {
                 action,
+                execute,
                 active_field,
                 ..
             } => {
                 if *action == store::workflows::CleanupAction::Label {
-                    *active_field = active_field.previous();
+                    *active_field = if *execute {
+                        active_field.previous()
+                    } else {
+                        active_field.previous_preview()
+                    };
                 }
             }
         }
@@ -642,6 +670,7 @@ impl WorkflowModal {
 
     fn toggle_cleanup_execute(&mut self) {
         if let Self::Cleanup {
+            action,
             execute,
             active_field,
             confirm_text,
@@ -650,12 +679,32 @@ impl WorkflowModal {
         {
             *execute = !*execute;
             confirm_text.clear();
-            *active_field = CleanupField::Confirm;
+            *active_field = if *execute {
+                CleanupField::Confirm
+            } else if *action == store::workflows::CleanupAction::Label {
+                CleanupField::AddLabels
+            } else {
+                CleanupField::Confirm
+            };
         }
     }
 }
 
 impl CleanupField {
+    const fn next_preview(self) -> Self {
+        match self {
+            Self::AddLabels | Self::Confirm => Self::RemoveLabels,
+            Self::RemoveLabels => Self::AddLabels,
+        }
+    }
+
+    const fn previous_preview(self) -> Self {
+        match self {
+            Self::AddLabels | Self::Confirm => Self::RemoveLabels,
+            Self::RemoveLabels => Self::AddLabels,
+        }
+    }
+
     const fn next(self) -> Self {
         match self {
             Self::AddLabels => Self::RemoveLabels,
@@ -1983,9 +2032,9 @@ fn error_chain(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, WorkflowModal, failed_diagnostic_reports,
-        format_epoch_day_utc, handle_key, load_snapshot, render, snooze_until_validation_error,
-        truncate, workflow_table_row_capacity,
+        CleanupField, Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, WorkflowModal,
+        failed_diagnostic_reports, format_epoch_day_utc, handle_key, load_snapshot, render,
+        snooze_until_validation_error, truncate, workflow_table_row_capacity,
     };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
@@ -2045,6 +2094,23 @@ mod tests {
         app.workflow_action_report = Some(Err(String::from("old action error")));
 
         app.select_next_workflow();
+
+        assert_eq!(app.selected_thread_id().as_deref(), Some("thread-2"));
+        assert!(app.workflow_detail_report.is_none());
+        assert!(app.workflow_action_report.is_none());
+    }
+
+    #[test]
+    fn workflow_refresh_restores_selection_by_thread_id_after_reorder() {
+        let mut app = TuiApp::new(snapshot_with_workflows(3), None);
+        app.view = View::Workflows;
+        app.select_next_workflow();
+        let selected_thread_id = app.selected_thread_id();
+        app.workflow_detail_report = Some(Err(String::from("old detail error")));
+        app.workflow_action_report = Some(Err(String::from("old action error")));
+        app.snapshot.workflows.as_mut().unwrap().workflows.reverse();
+
+        app.restore_workflow_selection_by_thread_id(selected_thread_id.as_deref());
 
         assert_eq!(app.selected_thread_id().as_deref(), Some("thread-2"));
         assert!(app.workflow_detail_report.is_none());
@@ -2435,6 +2501,76 @@ mod tests {
 
         assert!(app.workflow_modal.is_none());
         assert_eq!(app.status, "workflow action canceled");
+    }
+
+    #[tokio::test]
+    async fn workflow_cleanup_label_preview_cycles_visible_fields_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('l')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &mut app,
+            &paths,
+            &config_report,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Cleanup {
+                active_field: CleanupField::RemoveLabels,
+                execute: false,
+                ..
+            })
+        ));
+
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &mut app,
+            &paths,
+            &config_report,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Cleanup {
+                active_field: CleanupField::AddLabels,
+                execute: false,
+                ..
+            })
+        ));
+
+        handle_key(ctrl_key('e'), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Cleanup {
+                active_field: CleanupField::Confirm,
+                execute: true,
+                ..
+            })
+        ));
+
+        handle_key(ctrl_key('e'), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Cleanup {
+                active_field: CleanupField::AddLabels,
+                execute: false,
+                ..
+            })
+        ));
     }
 
     #[test]
