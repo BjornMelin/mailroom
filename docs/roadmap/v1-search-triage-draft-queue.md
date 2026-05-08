@@ -10,7 +10,7 @@ Deliver the first complete operational slice:
 - draft/reply queue state
 - reviewed cleanup actions
 - review-first automation rules and bulk actions
-- CLI flows first, read-only TUI foundation second
+- CLI flows first, TUI operator flows second
 
 ## Included
 
@@ -25,7 +25,8 @@ Deliver the first complete operational slice:
 - draft queue records, remote Gmail draft sync, and operator notes
 - reviewed archive, label, and trash actions
 - review-first automation rules with persisted snapshots
-- read-only TUI dashboard/search/workflow/automation inspection shell
+- TUI dashboard/search/workflow/automation inspection shell with confirmed
+  selected-thread workflow, draft, and cleanup actions
 - plugin-assisted operator documentation
 
 ## Current status
@@ -73,7 +74,8 @@ The verification and hardening slice is now in place too:
 - read-only `audit verification` output for deep-sync readiness, header coverage, and first-wave rollout posture
 - operator runbooks for deep audit syncs, self-canary send tests, and micro-batch archive/label rollout
 
-The TUI foundation and first local workflow action slice are now in place too:
+The TUI foundation, local workflow action slice, and selected-thread
+draft/cleanup slice are now in place too:
 
 - Ratatui shell at `mailroom tui`
 - Dashboard, Search, Workflows, Automation, and Help panes
@@ -81,13 +83,18 @@ The TUI foundation and first local workflow action slice are now in place too:
 - workflow and automation inspection through the existing service reports
 - selected workflow detail plus confirmed local triage, promote, and snooze
   actions through existing workflow services
-- no draft send, cleanup apply, attachment export, automation apply, or direct
-  Gmail mutation controls
+- selected workflow current-draft inspection
+- confirmed draft start, draft body replacement, and high-friction draft send
+  through existing workflow services
+- cleanup archive, label, and trash preview by default, with high-friction
+  execute confirmations through existing workflow services
+- no attachment export, automation apply, rules editing, or direct Gmail adapter
+  calls from TUI code
 
-The next implementation slices should focus on production TUI draft/cleanup
-flows, automation action flows, and the real personal ruleset rollout on top of
-the shipped audit surface, not re-open auth, account, config, store, sync,
-workflow, attachment, or automation ownership.
+The next implementation slices should focus on automation action flows and the
+real personal ruleset rollout on top of the shipped audit surface, not re-open
+auth, account, config, store, sync, workflow, draft, cleanup, attachment, or
+automation ownership.
 
 ## Deferred
 
@@ -106,5 +113,5 @@ quickly, classify thread work for follow-up, stage and send replies in a durable
 local system, catalog/export attachments intentionally, and execute reviewed
 manual or automation-driven cleanup actions intentionally. The same operator can
 also open a terminal shell to inspect readiness, search, workflow queue,
-automation rollout posture, and confirmed local workflow actions from the
-existing local state.
+automation rollout posture, and confirmed selected-thread workflow, draft, and
+cleanup actions from the existing local state.

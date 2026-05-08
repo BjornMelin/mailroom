@@ -226,6 +226,28 @@ Behavior notes:
 - post-send and post-cleanup sync failures are reported as warnings while the
   completed mutation still returns success
 
+## TUI selected-thread flow
+
+`cargo run -- tui` exposes the same selected-thread workflow services from the
+Workflows pane. It does not bypass CLI ownership or call Gmail adapters directly.
+
+Use the TUI for one-thread-at-a-time operation:
+
+- `i`: inspect the selected workflow and current draft
+- `d`: start a reply or reply-all draft
+- `b`: replace the current draft body
+- `s`: send the current Gmail draft after typing `SEND`
+- `a`: preview or execute archive cleanup
+- `l`: preview or execute label cleanup
+- `x`: preview or execute trash cleanup
+
+Cleanup actions open in preview mode. Press `Ctrl-E` to switch to execute mode,
+then type `APPLY` exactly before pressing `Enter`. `Esc` cancels any
+confirmation without calling the workflow service.
+
+Keep bulk automation apply, rules editing, attachment export, and `closed`
+promotion on the CLI until their dedicated TUI slices exist.
+
 ## Local state
 
 This slice adds these SQLite objects:

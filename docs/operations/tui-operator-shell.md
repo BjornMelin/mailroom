@@ -2,10 +2,10 @@
 
 `mailroom tui` opens the native terminal operator shell.
 
-It is designed for fast inspection and deliberate local workflow actions after
-`workspace init`, auth setup, and a local sync. It does not replace the CLI JSON
-contract; it renders the same underlying reports for human operation and uses
-existing service owners for every action.
+It is designed for fast inspection and deliberate workflow, draft, and cleanup
+actions after `workspace init`, auth setup, and a local sync. It does not
+replace the CLI JSON contract; it renders the same underlying reports for human
+operation and uses existing service owners for every action.
 
 ## Run
 
@@ -24,14 +24,18 @@ cargo run -- tui --search "project alpha"
 - Dashboard: workspace, database, auth, account, mailbox count, and readiness
   flags from `doctor` plus `audit verification`.
 - Search: local SQLite FTS search through the mailbox read model.
-- Workflows: `workflow list` queue overview, selected-row detail, and confirmed
-  local workflow actions.
+- Workflows: `workflow list` queue overview, selected-row detail, current draft
+  inspection, confirmed local workflow actions, Gmail draft actions, and cleanup
+  preview/execute flows.
 - Automation: read-only `automation rollout` readiness and candidate preview.
 - Help: key bindings and safety posture.
 
 ## Keys
 
-- `q` or `Esc`: quit
+- `q`: quit when no confirmation modal is open and search editing is inactive
+- `Esc`: quit when search editing and confirmation modals are inactive; while
+  search editing is active, `Esc` exits the input instead, and `q` is treated as
+  search text
 - `Tab` / `Shift+Tab`: move between views
 - `1` through `5`: jump to a view
 - `/`: activate search input
@@ -46,48 +50,76 @@ Workflow view keys:
 - `t`: open a triage-bucket confirmation
 - `p`: open a workflow-promotion confirmation
 - `z`: open a snooze / clear-snooze confirmation
+- `i`: inspect the selected workflow and current local draft detail
+- `d`: start a Gmail reply draft for the selected workflow; in the modal,
+  `Tab` / `Shift+Tab` toggles Reply or Reply-All
+- `b`: edit the current Gmail draft body
+- `s`: send the current Gmail draft after high-friction confirmation
+- `a`: preview or execute archive cleanup
+- `l`: preview or execute label cleanup
+- `x`: preview or execute trash cleanup
 
 Workflow confirmation keys:
 
 - `Enter`: confirm the displayed action
-- `Esc` or `q`: cancel the confirmation
+- `Esc`: cancel the confirmation
 - `Ctrl-C`: quit the TUI
-- `Tab` / `Shift+Tab`: cycle triage bucket or promotion target
+- `Tab` / `Shift+Tab`: cycle triage bucket, promotion target, Reply or
+  Reply-All, or label cleanup fields depending on the active modal
 - `1` through `4`: choose `urgent`, `needs_reply_soon`, `waiting`, or `fyi`
   in a triage confirmation
 - `f` / `r`: choose `follow_up` or `ready_to_send` in a promotion confirmation
 - text input: type `YYYY-MM-DD` in a snooze confirmation; leave empty to clear
   the snooze without changing the current workflow stage
+- draft body input: type the replacement plain-text draft body; `Esc` cancels
+  without changing the draft
+- draft send input: type `SEND` exactly, then `Enter`
+- cleanup input: use `Ctrl-E` to toggle from preview to execute; execute mode
+  requires typing `APPLY` exactly, then `Enter`
+- label cleanup input: labels are comma-separated; `Tab` / `Shift+Tab` switches
+  between add, remove, and confirmation fields
 
 ## Safety Contract
 
-The TUI shell is still review-first. It exposes only local workflow mutation
-actions from the existing workflow service layer:
+The TUI shell is still review-first. It exposes workflow, draft, and cleanup
+actions only through the existing workflow service layer:
 
 - `triage set`
 - `workflow promote` to `follow_up` or `ready_to_send`
 - `workflow snooze` or clear snooze
+- `workflow show` for selected-workflow and current-draft inspection
+- `draft start`
+- `draft body`
+- `draft send`
+- cleanup archive, label, and trash preview
+- cleanup archive, label, and trash execute
 
 Promotion to `closed` remains CLI-only in this slice because that service path
 can retire and delete a remote Gmail draft.
 
-It does not:
+Draft send and cleanup execute are high-friction Gmail mutations:
 
-- send drafts
-- create or update Gmail drafts
-- archive, label, or trash mail
+- `draft send` requires the current workflow to have a synced Gmail draft ID and
+  requires typing `SEND` exactly before `Enter`
+- cleanup preview is the default for archive, label, and trash
+- cleanup execute requires toggling execute mode with `Ctrl-E`, typing `APPLY`
+  exactly, and then pressing `Enter`
+- after successful actions, the TUI refreshes the workflow list, selected draft
+  detail, and any active local search report through existing services
+
+It still does not:
+
+- promote workflows to `closed`
 - apply automation snapshots
 - create automation run snapshots
 - fetch or export attachments
 - edit `.mailroom/automation.toml`
 
-Use the existing CLI commands for mutation flows that are intentionally outside
-this TUI slice:
+Use the existing CLI commands for flows that remain intentionally outside this
+TUI slice:
 
 ```bash
-cargo run -- draft send <thread-id> --json
 cargo run -- workflow promote <thread-id> --to closed --json
-cargo run -- cleanup archive <thread-id> --execute --json
 cargo run -- automation run --limit 10 --json
 cargo run -- automation apply <run-id> --execute --json
 ```
