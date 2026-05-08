@@ -19,6 +19,9 @@ Seed the Search pane with an initial local query:
 cargo run -- tui --search "project alpha"
 ```
 
+The supported minimum terminal size is `80x24`. Smaller terminals render a
+non-mutating "Terminal too small" guard instead of the main layout.
+
 ## Views
 
 - Dashboard: workspace, database, auth, account, mailbox count, and readiness
@@ -34,10 +37,12 @@ cargo run -- tui --search "project alpha"
 
 ## Keys
 
-- `q`: quit when no confirmation modal is open and search editing is inactive
-- `Esc`: quit when search editing and confirmation modals are inactive; while
-  search editing is active, `Esc` exits the input instead, and `q` is treated as
-  search text
+- `q`: quit when no confirmation modal, search input, or help overlay is active;
+  when the help overlay is active, `q` closes the overlay instead
+- `?` / `F1`: open the help overlay without leaving the current view
+- `Esc`: quit when search editing, confirmation modals, and the help overlay are
+  inactive; while search editing is active, `Esc` exits the input instead; while
+  the help overlay is active, `Esc` closes the overlay
 - `Tab` / `Shift+Tab`: move between views
 - `1` through `5`: jump to a view
 - `/`: activate search input
@@ -154,6 +159,10 @@ rules file is missing, the TUI seeds it from `config/automation.example.toml`.
 When the editor exits, the TUI validates the file and refreshes automation
 readiness.
 
+The footer status always includes a textual severity label in addition to color:
+`OK`, `WARN`, or `ERROR`. Operators should rely on the text label rather than
+color alone.
+
 It still does not:
 
 - promote workflows to `closed`
@@ -192,3 +201,26 @@ cargo run -- automation rules validate --json
 
 The TUI intentionally reports these conditions rather than trying to repair or
 mutate local state.
+
+If the terminal remains in raw mode after a crash or killed process, restore the
+TTY with:
+
+```bash
+reset
+stty sane
+```
+
+Run PTY smoke checks before shipping TUI changes. These commands intentionally
+time out after opening the TUI and write transcripts under `/tmp` with
+restrictive permissions and unpredictable names because rendered mailbox data
+may appear in the session log:
+
+```bash
+umask 077
+SMOKE_MAIN="$(mktemp /tmp/mailroom-tui-smoke.XXXXXX.txt)"
+SMOKE_SEARCH="$(mktemp /tmp/mailroom-tui-search-smoke.XXXXXX.txt)"
+SMOKE_NARROW="$(mktemp /tmp/mailroom-tui-narrow-smoke.XXXXXX.txt)"
+script -qefc 'timeout 2s cargo run -- tui' "$SMOKE_MAIN"
+script -qefc 'timeout 2s cargo run -- tui --search "known term"' "$SMOKE_SEARCH"
+script -qefc 'stty cols 40 rows 10; timeout 2s cargo run -- tui' "$SMOKE_NARROW"
+```
