@@ -17,7 +17,7 @@ use tokio::task::spawn_blocking;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const TUI_SEARCH_LIMIT: usize = 15;
-const TUI_WORKFLOW_WINDOW_LIMIT: usize = 50;
+const TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT: usize = 50;
 const VIEWS: [View; 5] = [
     View::Dashboard,
     View::Search,
@@ -42,7 +42,7 @@ pub async fn run(
     let _guard = TerminalGuard;
 
     loop {
-        terminal.draw(|frame| render(frame, &app))?;
+        terminal.draw(|frame| render(frame, &mut app))?;
 
         if event::poll(EVENT_POLL_INTERVAL)? {
             let Event::Key(key) = event::read()? else {
@@ -77,6 +77,7 @@ struct TuiApp {
     search_report: Option<std::result::Result<SearchReport, String>>,
     workflow_selection: usize,
     workflow_scroll: usize,
+    workflow_window_limit: usize,
     workflow_modal: Option<WorkflowModal>,
     workflow_action_report: Option<std::result::Result<WorkflowActionReport, String>>,
     status: String,
@@ -98,6 +99,7 @@ impl TuiApp {
             search_report: None,
             workflow_selection: 0,
             workflow_scroll: 0,
+            workflow_window_limit: TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT,
             workflow_modal: None,
             workflow_action_report: None,
             status: String::from("TUI ready: local workflow actions require explicit confirmation"),
@@ -181,7 +183,7 @@ impl TuiApp {
             .iter()
             .enumerate()
             .skip(self.workflow_scroll)
-            .take(TUI_WORKFLOW_WINDOW_LIMIT)
+            .take(self.workflow_window_limit)
     }
 
     fn normalize_workflow_selection(&mut self) {
@@ -196,17 +198,23 @@ impl TuiApp {
     }
 
     fn ensure_workflow_selection_visible(&mut self) {
+        let workflow_window_limit = self.workflow_window_limit.max(1);
         let row_count = self.workflow_rows().len();
-        if row_count <= TUI_WORKFLOW_WINDOW_LIMIT {
+        if row_count <= workflow_window_limit {
             self.workflow_scroll = 0;
             return;
         }
 
         if self.workflow_selection < self.workflow_scroll {
             self.workflow_scroll = self.workflow_selection;
-        } else if self.workflow_selection >= self.workflow_scroll + TUI_WORKFLOW_WINDOW_LIMIT {
-            self.workflow_scroll = self.workflow_selection + 1 - TUI_WORKFLOW_WINDOW_LIMIT;
+        } else if self.workflow_selection >= self.workflow_scroll + workflow_window_limit {
+            self.workflow_scroll = self.workflow_selection + 1 - workflow_window_limit;
         }
+    }
+
+    fn set_workflow_window_limit(&mut self, workflow_window_limit: usize) {
+        self.workflow_window_limit = workflow_window_limit.max(1);
+        self.ensure_workflow_selection_visible();
     }
 
     fn select_next_workflow(&mut self) {
@@ -274,6 +282,14 @@ impl TuiApp {
     }
 
     async fn confirm_workflow_modal(&mut self, config_report: &ConfigReport) {
+        if let Some(WorkflowModal::Snooze { until }) = &self.workflow_modal
+            && let Some(error) = snooze_until_validation_error(until)
+        {
+            self.workflow_action_report = Some(Err(error.to_owned()));
+            self.status = error.to_owned();
+            return;
+        }
+
         let Some(modal) = self.workflow_modal.take() else {
             return;
         };
@@ -676,7 +692,7 @@ async fn handle_search_key(
     }
 }
 
-fn render(frame: &mut Frame<'_>, app: &TuiApp) {
+fn render(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -892,13 +908,15 @@ fn render_search_table(frame: &mut Frame<'_>, area: Rect, report: &SearchReport)
     frame.render_widget(table, area);
 }
 
-fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
+fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &mut TuiApp) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(area);
+    app.set_workflow_window_limit(workflow_table_row_capacity(chunks[0]));
+
     match &app.snapshot.workflows {
         Ok(report) => {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-                .split(area);
             let rows = app.visible_workflow_rows().map(|(index, workflow)| {
                 let marker = if index == app.workflow_selection {
                     ">"
@@ -947,7 +965,7 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                 "Workflows ({}, showing {}-{}) - j/k select, t triage, p promote, z snooze",
                 report.workflows.len(),
                 app.workflow_scroll.saturating_add(1).min(report.workflows.len()),
-                (app.workflow_scroll + TUI_WORKFLOW_WINDOW_LIMIT).min(report.workflows.len()),
+                (app.workflow_scroll + app.workflow_window_limit).min(report.workflows.len()),
             )));
             frame.render_widget(table, chunks[0]);
             render_workflow_detail(frame, chunks[1], app);
@@ -1069,14 +1087,23 @@ fn render_workflow_modal(frame: &mut Frame<'_>, area: Rect, app: &TuiApp, modal:
             lines.push(Line::from(
                 "Type YYYY-MM-DD, or leave empty to clear snooze.",
             ));
-            lines.push(metric(
-                "until",
-                if until.is_empty() {
-                    String::from("<clear>")
-                } else {
-                    until.clone()
-                },
-            ));
+            let until_value = if until.is_empty() {
+                String::from("<clear>")
+            } else {
+                until.clone()
+            };
+            let until_style = if snooze_until_validation_error(until).is_some() {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("until: ", Style::default().fg(Color::Cyan)),
+                Span::styled(until_value, until_style),
+            ]));
+            if let Some(error) = snooze_until_validation_error(until) {
+                lines.push(error_line(error));
+            }
         }
     }
     lines.push(Line::default());
@@ -1218,6 +1245,52 @@ fn bool_word(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn workflow_table_row_capacity(area: Rect) -> usize {
+    // Table data rows are the outer area minus block borders and the header row.
+    usize::from(area.height.saturating_sub(3)).max(1)
+}
+
+fn snooze_until_validation_error(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut parts = value.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Some("invalid snooze date: use YYYY-MM-DD or clear the field");
+    };
+    if year.len() != 4
+        || month.len() != 2
+        || day.len() != 2
+        || !year.chars().all(|character| character.is_ascii_digit())
+        || !month.chars().all(|character| character.is_ascii_digit())
+        || !day.chars().all(|character| character.is_ascii_digit())
+    {
+        return Some("invalid snooze date: use YYYY-MM-DD or clear the field");
+    }
+
+    let year = year.parse::<i64>().ok()?;
+    let month = month.parse::<u32>().ok()?;
+    let day = day.parse::<u32>().ok()?;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return Some("invalid snooze date: month must be 01-12"),
+    };
+    if day == 0 || day > max_day {
+        return Some("invalid snooze date: day is out of range");
+    }
+    None
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
 fn format_epoch_day_utc(epoch_s: i64) -> String {
     let days_since_unix_epoch = epoch_s.div_euclid(86_400);
     let (year, month, day) = civil_from_unix_days(days_since_unix_epoch);
@@ -1328,9 +1401,9 @@ fn error_chain(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Snapshot, TUI_SEARCH_LIMIT, TUI_WORKFLOW_WINDOW_LIMIT, TuiApp, View, WorkflowModal,
-        failed_diagnostic_reports, format_epoch_day_utc, handle_key, load_snapshot, render,
-        truncate,
+        Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, WorkflowModal, failed_diagnostic_reports,
+        format_epoch_day_utc, handle_key, load_snapshot, render, snooze_until_validation_error,
+        truncate, workflow_table_row_capacity,
     };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
@@ -1380,20 +1453,22 @@ mod tests {
     }
 
     #[test]
-    fn workflow_selection_scrolls_to_keep_selected_row_visible() {
-        let mut app = TuiApp::new(snapshot_with_workflows(TUI_WORKFLOW_WINDOW_LIMIT + 2), None);
+    fn workflow_selection_scrolls_to_keep_selected_row_inside_rendered_viewport() {
+        let visible_rows = workflow_table_row_capacity(ratatui::layout::Rect::new(0, 0, 59, 19));
+        let mut app = TuiApp::new(snapshot_with_workflows(visible_rows + 2), None);
         app.view = View::Workflows;
+        app.set_workflow_window_limit(visible_rows);
 
-        for _ in 0..TUI_WORKFLOW_WINDOW_LIMIT {
+        for _ in 0..visible_rows {
             app.select_next_workflow();
         }
 
-        assert_eq!(app.workflow_selection, TUI_WORKFLOW_WINDOW_LIMIT);
+        assert_eq!(app.workflow_selection, visible_rows);
         assert_eq!(app.workflow_scroll, 1);
 
-        let output = render_app(&app);
-        assert!(output.contains("thread-51"));
-        assert!(output.contains("showing 2-51"));
+        let output = render_app(&mut app);
+        assert!(output.contains(&format!("thread-{}", visible_rows + 1)));
+        assert!(output.contains(&format!("showing 2-{}", visible_rows + 1)));
     }
 
     #[test]
@@ -1426,6 +1501,29 @@ mod tests {
         };
 
         assert_eq!(modal.action_summary(), "clear workflow snooze");
+    }
+
+    #[test]
+    fn workflow_snooze_validation_accepts_empty_clear_and_valid_dates() {
+        assert_eq!(snooze_until_validation_error(""), None);
+        assert_eq!(snooze_until_validation_error("2026-05-09"), None);
+        assert_eq!(snooze_until_validation_error("2028-02-29"), None);
+    }
+
+    #[test]
+    fn workflow_snooze_validation_rejects_invalid_dates() {
+        assert_eq!(
+            snooze_until_validation_error("tomorrow"),
+            Some("invalid snooze date: use YYYY-MM-DD or clear the field")
+        );
+        assert_eq!(
+            snooze_until_validation_error("2026-13-09"),
+            Some("invalid snooze date: month must be 01-12")
+        );
+        assert_eq!(
+            snooze_until_validation_error("2026-02-29"),
+            Some("invalid snooze date: day is out of range")
+        );
     }
 
     #[tokio::test]
@@ -1541,6 +1639,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_snooze_modal_blocks_invalid_date_before_service_call() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+        app.workflow_modal = Some(WorkflowModal::Snooze {
+            until: String::from("tomorrow"),
+        });
+
+        handle_key(key(KeyCode::Enter), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Snooze { ref until }) if until == "tomorrow"
+        ));
+        assert_eq!(
+            app.status,
+            "invalid snooze date: use YYYY-MM-DD or clear the field"
+        );
+        let output = render_app(&mut app);
+        assert!(output.contains("error: invalid snooze date"));
+    }
+
+    #[tokio::test]
     async fn workflow_action_requires_selected_row() {
         let temp_dir = TempDir::new().unwrap();
         let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
@@ -1579,7 +1704,7 @@ mod tests {
         app.snapshot.doctor = Err(String::from("doctor failed"));
         app.snapshot.verification = Err(String::from("verification failed"));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: doctor failed"));
         assert!(output.contains("error: verification failed"));
@@ -1590,7 +1715,7 @@ mod tests {
         let mut app = TuiApp::new(empty_snapshot(), Some(String::from("invoice")));
         app.search_report = Some(Err(String::from("search failed")));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: search failed"));
     }
@@ -1601,7 +1726,7 @@ mod tests {
         app.view = View::Workflows;
         app.snapshot.workflows = Err(String::from("workflow report failed"));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: workflow report failed"));
     }
@@ -1614,7 +1739,7 @@ mod tests {
             bucket: TriageBucket::Urgent,
         });
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("Workflow detail"));
         assert!(output.contains("thread-1"));
@@ -1629,7 +1754,7 @@ mod tests {
         app.view = View::Automation;
         app.snapshot.automation = Err(String::from("automation report failed"));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: automation report failed"));
     }
@@ -1724,7 +1849,7 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
-    fn render_app(app: &TuiApp) -> String {
+    fn render_app(app: &mut TuiApp) -> String {
         let backend = TestBackend::new(96, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
