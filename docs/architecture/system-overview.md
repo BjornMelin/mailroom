@@ -31,7 +31,8 @@ The native Rust core owns:
 - reviewed cleanup actions for archive, label, and trash
 - typed automation rule parsing, snapshot persistence, and thread-first bulk apply
 - read-only label audit, readiness verification, and ruleset-hardening guidance
-- read-only Ratatui operator shell over existing diagnostics, search, workflow, and automation reports
+- Ratatui operator shell over existing diagnostics, search, workflow, and
+  automation reports plus confirmed local workflow actions
 - structured CLI output
 
 ### TUI layer
@@ -39,15 +40,16 @@ The native Rust core owns:
 The TUI is a thin operator shell over the native core. It must not create a
 second rules engine or storage model.
 
-The current `mailroom tui` shell is read-only and renders:
+The current `mailroom tui` shell renders:
 
 - workspace, auth, store, mailbox, and readiness diagnostics
 - local SQLite FTS search results
-- thread workflow queue rows
+- thread workflow queue rows plus confirmed local triage, promote, and snooze
+  actions
 - automation rollout readiness and candidate previews
 
-Mutation-oriented TUI work must reuse the existing CLI/service actions and add
-explicit confirmation flows before exposing any Gmail write.
+Mutation-oriented TUI work must reuse the existing CLI/service actions. Gmail
+write paths still require stronger confirmation flows before they are exposed.
 
 ### Plugin-assisted operator path
 
@@ -93,7 +95,8 @@ The current native substrate is intentionally narrow but now usable:
 - explicit draft send and reviewed cleanup actions that resync the mailbox afterward
 - typed TOML automation rules and persisted review snapshots for bulk cleanup
 - read-only audit commands for label taxonomy drift, header coverage, and rollout readiness
-- read-only terminal shell over diagnostics, search, workflows, and automation rollout
+- terminal shell over diagnostics, search, workflows, automation rollout, and
+  confirmed local workflow actions
 - hardened connection defaults: `foreign_keys=ON`, `trusted_schema=OFF`, `journal_mode=WAL`, `synchronous=NORMAL`, and a nonzero busy timeout
 
 This substrate now covers the first complete operator loop for search, thread
@@ -122,7 +125,8 @@ Detailed verification and hardening ownership is defined in
 `docs/operations/verification-and-hardening.md`.
 
 Detailed TUI ownership is defined in
-`docs/decisions/0008-read-only-tui-foundation.md` and
+`docs/decisions/0008-read-only-tui-foundation.md`,
+`docs/decisions/0009-tui-workflow-actions.md`, and
 `docs/operations/tui-operator-shell.md`.
 
 ## Non-goals for v1
