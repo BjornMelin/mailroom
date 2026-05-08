@@ -88,12 +88,16 @@ draft/cleanup slice are now in place too:
   through existing workflow services
 - cleanup archive, label, and trash preview by default, with high-friction
   execute confirmations through existing workflow services
-- no attachment export, automation apply, rules editing, or direct Gmail adapter
-  calls from TUI code
+- automation rules validation, disabled starter suggestion review, editor-backed
+  rules editing, persisted run creation, saved-run candidate inspection, and
+  high-friction saved-run apply through existing automation services
+- no attachment export, live rollout apply, or direct Gmail adapter calls from
+  TUI code
 
-The next implementation slices should focus on automation action flows and the
-real personal ruleset rollout on top of the shipped audit surface, not re-open
-auth, account, config, store, sync, workflow, draft, cleanup, attachment, or
+The next implementation slice should focus on production TUI polish,
+accessibility, narrow-terminal resilience, render-path performance, and the real
+personal ruleset rollout on top of the shipped audit surface, not re-open auth,
+account, config, store, sync, workflow, draft, cleanup, attachment, or
 automation ownership.
 
 ## Deferred

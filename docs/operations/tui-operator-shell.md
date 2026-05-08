@@ -2,10 +2,10 @@
 
 `mailroom tui` opens the native terminal operator shell.
 
-It is designed for fast inspection and deliberate workflow, draft, and cleanup
-actions after `workspace init`, auth setup, and a local sync. It does not
-replace the CLI JSON contract; it renders the same underlying reports for human
-operation and uses existing service owners for every action.
+It is designed for fast inspection and deliberate workflow, draft, cleanup, and
+automation actions after `workspace init`, auth setup, and a local sync. It does
+not replace the CLI JSON contract; it renders the same underlying reports for
+human operation and uses existing service owners for every action.
 
 ## Run
 
@@ -27,7 +27,9 @@ cargo run -- tui --search "project alpha"
 - Workflows: `workflow list` queue overview, selected-row detail, current draft
   inspection, confirmed local workflow actions, Gmail draft actions, and cleanup
   preview/execute flows.
-- Automation: read-only `automation rollout` readiness and candidate preview.
+- Automation: `automation rollout` readiness, rule validation, disabled starter
+  suggestion review, persisted run creation, saved-run candidate inspection, and
+  guarded saved-run apply.
 - Help: key bindings and safety posture.
 
 ## Keys
@@ -59,6 +61,17 @@ Workflow view keys:
 - `l`: preview or execute label cleanup
 - `x`: preview or execute trash cleanup
 
+Automation view keys:
+
+- `j` / `Down`: select next saved-run candidate after a run is loaded
+- `k` / `Up`: select previous saved-run candidate after a run is loaded
+- `v`: validate `.mailroom/automation.toml`
+- `g`: review disabled starter suggestions from local mailbox evidence
+- `n`: create a persisted automation preview run snapshot
+- `o`: load a persisted automation run by ID
+- `a`: apply the loaded persisted run after high-friction confirmation
+- `e`: open `.mailroom/automation.toml` in `$VISUAL`, `$EDITOR`, or `vi`
+
 Workflow confirmation keys:
 
 - `Enter`: confirm the displayed action
@@ -78,6 +91,15 @@ Workflow confirmation keys:
   requires typing `APPLY` exactly, then `Enter`
 - label cleanup input: labels are comma-separated; `Tab` / `Shift+Tab` switches
   between add, remove, and confirmation fields
+
+Automation confirmation keys:
+
+- `Enter`: confirm the displayed automation action
+- `Esc` / `q`: cancel the automation confirmation
+- run creation input: type a positive candidate limit; this creates only a
+  local persisted review snapshot
+- saved-run input: type a positive run ID to inspect candidates
+- apply input: type `APPLY` exactly, then `Enter`
 
 ## Safety Contract
 
@@ -107,21 +129,42 @@ Draft send and cleanup execute are high-friction Gmail mutations:
 - after successful actions, the TUI refreshes the workflow list, selected draft
   detail, and any active local search report through existing services
 
+Automation actions use the existing automation service layer:
+
+- rules validation uses `automation rules validate`
+- starter suggestions use `automation rules suggest` and stay disabled snippets
+  for operator review
+- run creation uses `automation run` and writes a local persisted snapshot
+- saved-run inspection uses `automation show`
+- apply uses `automation apply <run-id> --execute` only for the loaded persisted
+  run
+
+Automation apply is a high-friction Gmail mutation:
+
+- the TUI never applies live `automation rollout` output
+- a run must be loaded before apply can open
+- the confirmation summarizes the run ID, candidate count, action mix, blocked
+  rollout rules when present, and a Gmail mutation warning
+- apply requires typing `APPLY` exactly before `Enter`
+- after successful automation actions, the TUI refreshes rollout readiness
+
+Rules editing uses the operator's editor instead of an in-TUI TOML form. Press
+`e` to open `.mailroom/automation.toml` in `$VISUAL`, `$EDITOR`, or `vi`. If the
+rules file is missing, the TUI seeds it from `config/automation.example.toml`.
+When the editor exits, the TUI validates the file and refreshes automation
+readiness.
+
 It still does not:
 
 - promote workflows to `closed`
-- apply automation snapshots
-- create automation run snapshots
 - fetch or export attachments
-- edit `.mailroom/automation.toml`
+- apply rollout previews directly
 
 Use the existing CLI commands for flows that remain intentionally outside this
 TUI slice:
 
 ```bash
 cargo run -- workflow promote <thread-id> --to closed --json
-cargo run -- automation run --limit 10 --json
-cargo run -- automation apply <run-id> --execute --json
 ```
 
 ## Troubleshooting

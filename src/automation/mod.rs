@@ -5,7 +5,10 @@ mod rules;
 mod service;
 mod suggestions;
 
-pub(crate) use model::AutomationRolloutReport;
+pub(crate) use model::{
+    AutomationApplyReport, AutomationRolloutReport, AutomationRulesSuggestReport,
+    AutomationRulesValidateReport, AutomationRunPreviewReport, AutomationShowReport,
+};
 pub use model::{
     AutomationPruneRequest, AutomationPruneStatus, AutomationRolloutRequest,
     AutomationRulesSuggestRequest, AutomationRunRequest, DEFAULT_AUTOMATION_ROLLOUT_LIMIT,

@@ -5,7 +5,8 @@
 ## Current posture
 
 - Primary stack: Rust + `clap`
-- Operator surfaces: CLI first, TUI inspection plus confirmed selected-thread workflow, draft, and cleanup actions second
+- Operator surfaces: CLI first, TUI inspection plus confirmed selected-thread
+  workflow, draft, cleanup, and persisted automation actions second
 - Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
 - Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, attachment catalog/export foundation, review-first automation rules, and a terminal operator shell
 - Hardening surface: read-only label audits, readiness verification, and operator runbooks for safe real-mailbox rollout
@@ -171,9 +172,10 @@ with the durable design captured in
 The terminal operator shell lives in
 [`docs/operations/tui-operator-shell.md`](docs/operations/tui-operator-shell.md),
 with the durable design captured in
-[`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md)
+[`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md),
 [`docs/decisions/0009-tui-workflow-actions.md`](docs/decisions/0009-tui-workflow-actions.md),
-and [`docs/decisions/0010-tui-draft-cleanup-flows.md`](docs/decisions/0010-tui-draft-cleanup-flows.md).
+[`docs/decisions/0010-tui-draft-cleanup-flows.md`](docs/decisions/0010-tui-draft-cleanup-flows.md),
+and [`docs/decisions/0011-tui-automation-apply-rules.md`](docs/decisions/0011-tui-automation-apply-rules.md).
 
 Config precedence is:
 
@@ -218,6 +220,8 @@ Advanced manual overrides still work:
 - [`docs/decisions/0007-verification-audit-hardening.md`](docs/decisions/0007-verification-audit-hardening.md): read-only audit ownership and real-mailbox rollout posture
 - [`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md): read-only terminal shell ownership
 - [`docs/decisions/0009-tui-workflow-actions.md`](docs/decisions/0009-tui-workflow-actions.md): confirmed local workflow actions in the TUI
+- [`docs/decisions/0010-tui-draft-cleanup-flows.md`](docs/decisions/0010-tui-draft-cleanup-flows.md): selected-thread draft and cleanup flows in the TUI
+- [`docs/decisions/0011-tui-automation-apply-rules.md`](docs/decisions/0011-tui-automation-apply-rules.md): persisted automation run apply and editor-backed rules editing in the TUI
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
 - [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
 - [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md): sync commands, search filters, and cursor behavior
@@ -232,6 +236,10 @@ Advanced manual overrides still work:
 ## Near-term build plan
 
 1. Use the verification and hardening runbook to canonicalize labels, deepen the local audit corpus, and generate disabled starter rules with `automation rules suggest`.
-2. Add automation action flows to the TUI with confirmation screens that preserve the persisted review-snapshot safety model.
-3. Improve automation ergonomics only after a few low-surprise micro-batch archive/label runs land cleanly.
-4. Add unsubscribe assistance only after the deeper sync proves out list-header coverage in the local cache.
+2. Use the TUI automation pane for validation, disabled suggestion review,
+   persisted preview runs, saved-run candidate inspection, and high-friction
+   saved-run apply.
+3. Improve automation ergonomics only after a few low-surprise micro-batch
+   archive/label runs land cleanly.
+4. Add unsubscribe assistance only after the deeper sync proves out list-header
+   coverage in the local cache.
