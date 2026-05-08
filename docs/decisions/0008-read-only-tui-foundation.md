@@ -28,8 +28,10 @@ Mailroom adds `mailroom tui` as a Ratatui-based, read-only operator shell.
   a read-only automation rollout report from the existing Rust core.
 - The Search pane runs local SQLite FTS queries through the mailbox read model
   without store initialization or migration side effects.
-- No TUI view exposes Gmail mutations, draft send, cleanup execution,
-  attachment export, automation snapshot creation, or automation apply.
+- No first-slice TUI view exposed Gmail mutations, draft send, cleanup
+  execution, attachment export, automation snapshot creation, or automation
+  apply. Later ADRs add confirmed actions while preserving service ownership and
+  high-friction mutation gates.
 - `ratatui` is compiled with default features disabled and only the Crossterm
   backend enabled to avoid pulling extra widget/backend surface.
 

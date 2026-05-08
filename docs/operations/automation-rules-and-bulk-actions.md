@@ -169,6 +169,26 @@ cargo run -- automation apply 42 --execute --json
 Without `--execute`, `automation apply` returns a validation-style error and
 does not mutate Gmail.
 
+## TUI Automation Operator Flow
+
+`cargo run -- tui` exposes the same review-first automation loop in the
+Automation pane:
+
+- `v` validates `.mailroom/automation.toml`.
+- `g` reviews disabled starter suggestions from local mailbox evidence.
+- `e` opens `.mailroom/automation.toml` in `$VISUAL`, `$EDITOR`, or `vi`; if the
+  file is missing, the TUI seeds it from `config/automation.example.toml` before
+  launching the editor and validates it after the editor exits.
+- `n` creates a persisted preview run snapshot with a positive candidate limit.
+- `o` loads a persisted run by ID for candidate inspection.
+- `j` / `k` moves through loaded run candidates.
+- `a` applies only the loaded persisted run after typing `APPLY` exactly.
+
+The TUI never applies live `automation rollout` output. It must have a saved run
+loaded before apply can open, and the apply confirmation shows the run ID,
+candidate count, action mix, any currently blocked rollout rules, and a Gmail
+mutation warning.
+
 Prune stale local review snapshots after inspecting the dry-run counts:
 
 ```bash
