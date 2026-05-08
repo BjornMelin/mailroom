@@ -314,6 +314,8 @@ fn clear_workflow_snooze_preserves_existing_stage() {
     )
     .unwrap()
     .unwrap();
+    assert_eq!(detail.workflow.current_stage, WorkflowStage::ReadyToSend);
+    assert_eq!(detail.workflow.snoozed_until_epoch_s, None);
     let event = detail
         .events
         .iter()

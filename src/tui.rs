@@ -243,6 +243,36 @@ impl TuiApp {
         self.status = String::from("workflow confirmation active; Enter confirms, Esc cancels");
     }
 
+    fn open_triage_modal(&mut self) {
+        let bucket = self
+            .selected_workflow()
+            .and_then(|workflow| workflow.triage_bucket)
+            .unwrap_or(store::workflows::TriageBucket::NeedsReplySoon);
+        self.open_workflow_modal(WorkflowModal::Triage { bucket });
+    }
+
+    fn open_promote_modal(&mut self) {
+        let target = self
+            .selected_workflow()
+            .map(|workflow| match workflow.current_stage {
+                store::workflows::WorkflowStage::ReadyToSend => {
+                    store::workflows::WorkflowStage::ReadyToSend
+                }
+                _ => store::workflows::WorkflowStage::FollowUp,
+            })
+            .unwrap_or(store::workflows::WorkflowStage::FollowUp);
+        self.open_workflow_modal(WorkflowModal::Promote { target });
+    }
+
+    fn open_snooze_modal(&mut self) {
+        let until = self
+            .selected_workflow()
+            .and_then(|workflow| workflow.snoozed_until_epoch_s)
+            .map(format_epoch_day_utc)
+            .unwrap_or_default();
+        self.open_workflow_modal(WorkflowModal::Snooze { until });
+    }
+
     async fn confirm_workflow_modal(&mut self, config_report: &ConfigReport) {
         let Some(modal) = self.workflow_modal.take() else {
             return;
@@ -477,21 +507,15 @@ async fn handle_key(
                 return Ok(false);
             }
             KeyCode::Char('t') => {
-                app.open_workflow_modal(WorkflowModal::Triage {
-                    bucket: store::workflows::TriageBucket::NeedsReplySoon,
-                });
+                app.open_triage_modal();
                 return Ok(false);
             }
             KeyCode::Char('p') => {
-                app.open_workflow_modal(WorkflowModal::Promote {
-                    target: store::workflows::WorkflowStage::FollowUp,
-                });
+                app.open_promote_modal();
                 return Ok(false);
             }
             KeyCode::Char('z') => {
-                app.open_workflow_modal(WorkflowModal::Snooze {
-                    until: String::new(),
-                });
+                app.open_snooze_modal();
                 return Ok(false);
             }
             _ => {}
@@ -1194,6 +1218,33 @@ fn bool_word(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn format_epoch_day_utc(epoch_s: i64) -> String {
+    let days_since_unix_epoch = epoch_s.div_euclid(86_400);
+    let (year, month, day) = civil_from_unix_days(days_since_unix_epoch);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_unix_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
+    let adjusted_days = days_since_unix_epoch + 719_468;
+    let era = if adjusted_days >= 0 {
+        adjusted_days
+    } else {
+        adjusted_days - 146_096
+    } / 146_097;
+    let day_of_era = adjusted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month, day)
+}
+
 fn next_triage_bucket(value: store::workflows::TriageBucket) -> store::workflows::TriageBucket {
     use store::workflows::TriageBucket;
     match value {
@@ -1278,7 +1329,8 @@ fn error_chain(error: &anyhow::Error) -> String {
 mod tests {
     use super::{
         Snapshot, TUI_SEARCH_LIMIT, TUI_WORKFLOW_WINDOW_LIMIT, TuiApp, View, WorkflowModal,
-        failed_diagnostic_reports, handle_key, load_snapshot, render, truncate,
+        failed_diagnostic_reports, format_epoch_day_utc, handle_key, load_snapshot, render,
+        truncate,
     };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
@@ -1392,7 +1444,7 @@ mod tests {
         assert!(matches!(
             app.workflow_modal,
             Some(WorkflowModal::Triage {
-                bucket: TriageBucket::NeedsReplySoon
+                bucket: TriageBucket::Urgent
             })
         ));
 
@@ -1402,6 +1454,62 @@ mod tests {
 
         assert!(app.workflow_modal.is_none());
         assert_eq!(app.status, "workflow action canceled");
+    }
+
+    #[tokio::test]
+    async fn workflow_modals_seed_from_selected_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut snapshot = snapshot_with_workflows(1);
+        let workflow = snapshot
+            .workflows
+            .as_mut()
+            .unwrap()
+            .workflows
+            .first_mut()
+            .unwrap();
+        workflow.current_stage = WorkflowStage::ReadyToSend;
+        workflow.triage_bucket = Some(TriageBucket::Waiting);
+        workflow.snoozed_until_epoch_s = Some(0);
+        let mut app = TuiApp::new(snapshot, None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('t')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Triage {
+                bucket: TriageBucket::Waiting
+            })
+        ));
+
+        app.workflow_modal = None;
+        handle_key(key(KeyCode::Char('p')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Promote {
+                target: WorkflowStage::ReadyToSend
+            })
+        ));
+
+        app.workflow_modal = None;
+        handle_key(key(KeyCode::Char('z')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Snooze { ref until }) if until == "1970-01-01"
+        ));
+    }
+
+    #[test]
+    fn epoch_day_format_uses_utc_calendar_day() {
+        assert_eq!(format_epoch_day_utc(0), "1970-01-01");
+        assert_eq!(format_epoch_day_utc(86_400), "1970-01-02");
     }
 
     #[tokio::test]

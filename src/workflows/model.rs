@@ -112,6 +112,10 @@ mod tests {
     #[test]
     fn workflow_action_serializes_to_stable_snake_case_strings() {
         assert_eq!(
+            serde_json::to_string(&WorkflowAction::WorkflowSnoozeCleared).unwrap(),
+            "\"workflow_snooze_cleared\""
+        );
+        assert_eq!(
             serde_json::to_string(&WorkflowAction::DraftAttachmentRemoved).unwrap(),
             "\"draft_attachment_removed\""
         );
@@ -124,9 +128,12 @@ mod tests {
     #[test]
     fn workflow_action_deserializes_known_and_unknown_values() {
         let known: WorkflowAction = serde_json::from_str("\"workflow_promoted\"").unwrap();
+        let known_clear: WorkflowAction =
+            serde_json::from_str("\"workflow_snooze_cleared\"").unwrap();
         let unknown: WorkflowAction = serde_json::from_str("\"custom_action\"").unwrap();
 
         assert!(matches!(known, WorkflowAction::WorkflowPromoted));
+        assert!(matches!(known_clear, WorkflowAction::WorkflowSnoozeCleared));
         assert!(matches!(unknown, WorkflowAction::Other(value) if value == "custom_action"));
     }
 }
