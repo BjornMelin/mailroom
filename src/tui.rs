@@ -63,7 +63,7 @@ pub async fn run(
             }
             if let Some(action) = app.pending_terminal_action.take() {
                 ratatui::restore();
-                let result = run_terminal_action(action, paths, &config_report).await;
+                let result = run_terminal_action(action, paths, &config_report);
                 terminal = ratatui::try_init()?;
                 app.handle_terminal_action_result(paths, &config_report, result)
                     .await;
@@ -1281,33 +1281,25 @@ fn parse_positive_i64(value: &str) -> Option<i64> {
     value.trim().parse::<i64>().ok().filter(|value| *value > 0)
 }
 
-async fn run_terminal_action(
+fn run_terminal_action(
     action: TerminalAction,
-    paths: &workspace::WorkspacePaths,
+    _paths: &workspace::WorkspacePaths,
     config_report: &ConfigReport,
 ) -> std::result::Result<TerminalActionReport, String> {
     match action {
         TerminalAction::EditAutomationRules => {
-            let paths = paths.clone();
-            let runtime_root = config_report.config.workspace.runtime_root.clone();
-            spawn_blocking(move || edit_automation_rules_blocking(&paths, &runtime_root))
-                .await
-                .map_err(|error| format!("rules editor task failed: {error}"))?
+            let paths = crate::configured_paths(config_report).map_err(|error| {
+                format!("failed to resolve configured workspace paths: {error}")
+            })?;
+            edit_automation_rules_blocking(&paths)
         }
     }
 }
 
 fn edit_automation_rules_blocking(
     paths: &workspace::WorkspacePaths,
-    runtime_root: &Path,
 ) -> std::result::Result<TerminalActionReport, String> {
-    paths
-        .ensure_runtime_dirs()
-        .map_err(|error| format!("failed to create runtime directories: {error}"))?;
-    let rules_path = runtime_root.join("automation.toml");
-    if !rules_path.exists() {
-        seed_automation_rules_file(paths, &rules_path)?;
-    }
+    let rules_path = ensure_automation_rules_file(paths)?;
 
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -1331,6 +1323,19 @@ fn edit_automation_rules_blocking(
         ));
     }
     Ok(TerminalActionReport::AutomationRulesEdited { path: rules_path })
+}
+
+fn ensure_automation_rules_file(
+    paths: &workspace::WorkspacePaths,
+) -> std::result::Result<PathBuf, String> {
+    paths
+        .ensure_runtime_dirs()
+        .map_err(|error| format!("failed to create runtime directories: {error}"))?;
+    let rules_path = paths.runtime_root.join("automation.toml");
+    if !rules_path.exists() {
+        seed_automation_rules_file(paths, &rules_path)?;
+    }
+    Ok(rules_path)
 }
 
 fn seed_automation_rules_file(
@@ -2980,10 +2985,11 @@ mod tests {
     use super::{
         AutomationModal, CleanupField, DEFAULT_AUTOMATION_RUN_LIMIT, Snapshot, TUI_SEARCH_LIMIT,
         TerminalAction, TuiApp, View, WorkflowModal, automation_match_summary,
-        failed_diagnostic_reports, format_epoch_day_utc, handle_key, load_snapshot, render,
-        snooze_until_validation_error, truncate, workflow_table_row_capacity,
+        ensure_automation_rules_file, failed_diagnostic_reports, format_epoch_day_utc, handle_key,
+        load_snapshot, render, snooze_until_validation_error, truncate,
+        workflow_table_row_capacity,
     };
-    use crate::config;
+    use crate::config::{self, WorkspaceConfig};
     use crate::mailbox::{self, SearchRequest};
     use crate::store::automation::{
         AutomationActionKind, AutomationActionSnapshot, AutomationMatchReason,
@@ -3760,6 +3766,33 @@ mod tests {
             app.pending_terminal_action,
             Some(TerminalAction::EditAutomationRules)
         );
+    }
+
+    #[test]
+    fn automation_rules_seed_uses_configured_workspace_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_root = temp_dir.path().to_path_buf();
+        let default_paths = WorkspacePaths::from_repo_root(repo_root.clone());
+        let runtime_root = repo_root.join("custom-runtime");
+        let configured_paths = WorkspacePaths::from_config(
+            repo_root,
+            &WorkspaceConfig {
+                runtime_root: runtime_root.clone(),
+                auth_dir: runtime_root.join("auth"),
+                cache_dir: runtime_root.join("cache"),
+                state_dir: runtime_root.join("state"),
+                vault_dir: runtime_root.join("vault"),
+                exports_dir: runtime_root.join("exports"),
+                logs_dir: runtime_root.join("logs"),
+            },
+        );
+
+        let rules_path = ensure_automation_rules_file(&configured_paths).unwrap();
+
+        assert_eq!(rules_path, runtime_root.join("automation.toml"));
+        assert!(rules_path.exists());
+        assert!(runtime_root.join("auth").exists());
+        assert!(!default_paths.runtime_root.exists());
     }
 
     #[test]
