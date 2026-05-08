@@ -37,11 +37,12 @@ non-mutating "Terminal too small" guard instead of the main layout.
 
 ## Keys
 
-- `q`: quit when no confirmation modal is open and search editing is inactive
+- `q`: quit when no confirmation modal, search input, or help overlay is active;
+  when the help overlay is active, `q` closes the overlay instead
 - `?` / `F1`: open the help overlay without leaving the current view
-- `Esc`: quit when search editing and confirmation modals are inactive; while
-  search editing is active, `Esc` exits the input instead, while the help overlay
-  is active it closes the overlay, and `q` is treated as search text
+- `Esc`: quit when search editing, confirmation modals, and the help overlay are
+  inactive; while search editing is active, `Esc` exits the input instead; while
+  the help overlay is active, `Esc` closes the overlay
 - `Tab` / `Shift+Tab`: move between views
 - `1` through `5`: jump to a view
 - `/`: activate search input

@@ -60,6 +60,12 @@ pub async fn run(
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            if terminal_too_small(terminal.size()?.into()) {
+                if handle_small_terminal_key(key, &mut app) {
+                    break;
+                }
+                continue;
+            }
             if handle_key(key, &mut app, paths, &config_report).await? {
                 break;
             }
@@ -107,6 +113,14 @@ struct TuiApp {
     automation_candidate_window_limit: usize,
     pending_terminal_action: Option<TerminalAction>,
     status: String,
+    status_severity: StatusSeverity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusSeverity {
+    Ok,
+    Warn,
+    Error,
 }
 
 impl TuiApp {
@@ -138,7 +152,13 @@ impl TuiApp {
             automation_candidate_window_limit: TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT,
             pending_terminal_action: None,
             status: String::from("TUI ready: local workflow actions require explicit confirmation"),
+            status_severity: StatusSeverity::Ok,
         }
+    }
+
+    fn set_status(&mut self, severity: StatusSeverity, status: impl Into<String>) {
+        self.status = status.into();
+        self.status_severity = severity;
     }
 
     fn has_search_input(&self) -> bool {
@@ -149,7 +169,7 @@ impl TuiApp {
         let terms = self.search_input.trim().to_owned();
         if terms.is_empty() {
             self.search_report = Some(Err(String::from("type search terms before pressing enter")));
-            self.status = String::from("search skipped: empty query");
+            self.set_status(StatusSeverity::Warn, "search skipped: empty query");
             return;
         }
 
@@ -165,11 +185,14 @@ impl TuiApp {
             Ok(report) => {
                 let count = report.results.len();
                 self.search_report = Some(Ok(report));
-                self.status = format!("search complete: {count} local hits for \"{terms}\"");
+                self.set_status(
+                    StatusSeverity::Ok,
+                    format!("search complete: {count} local hits for \"{terms}\""),
+                );
             }
             Err(error) => {
                 self.search_report = Some(Err(error_chain(&error)));
-                self.status = String::from("search failed");
+                self.set_status(StatusSeverity::Error, "search failed");
             }
         }
     }
@@ -178,7 +201,7 @@ impl TuiApp {
         let selected_thread_id = self.selected_thread_id();
         self.snapshot = load_snapshot(paths, config_report).await;
         self.restore_workflow_selection_by_thread_id(selected_thread_id.as_deref());
-        self.status = String::from("reports refreshed");
+        self.set_status(StatusSeverity::Ok, "reports refreshed");
     }
 
     fn next_view(&mut self) {
@@ -318,11 +341,17 @@ impl TuiApp {
 
     fn open_workflow_modal(&mut self, modal: WorkflowModal) {
         if self.selected_workflow().is_none() {
-            self.status = String::from("workflow action unavailable: no workflow row selected");
+            self.set_status(
+                StatusSeverity::Error,
+                "workflow action unavailable: no workflow row selected",
+            );
             return;
         }
         self.workflow_modal = Some(modal);
-        self.status = String::from("workflow confirmation active; Enter confirms, Esc cancels");
+        self.set_status(
+            StatusSeverity::Ok,
+            "workflow confirmation active; Enter confirms, Esc cancels",
+        );
     }
 
     fn open_triage_modal(&mut self) {
@@ -362,7 +391,10 @@ impl TuiApp {
     async fn inspect_selected_workflow(&mut self, config_report: &ConfigReport) {
         let Some(thread_id) = self.selected_thread_id() else {
             self.workflow_detail_report = None;
-            self.status = String::from("workflow inspect skipped: no workflow row selected");
+            self.set_status(
+                StatusSeverity::Warn,
+                "workflow inspect skipped: no workflow row selected",
+            );
             return;
         };
 
@@ -370,15 +402,16 @@ impl TuiApp {
             Ok(report) => {
                 let has_draft = report.detail.current_draft.is_some();
                 self.workflow_detail_report = Some(Ok(report));
-                self.status = if has_draft {
-                    String::from("current draft detail loaded")
+                let status = if has_draft {
+                    "current draft detail loaded"
                 } else {
-                    String::from("workflow detail loaded: no current draft")
+                    "workflow detail loaded: no current draft"
                 };
+                self.set_status(StatusSeverity::Ok, status);
             }
             Err(error) => {
                 self.workflow_detail_report = Some(Err(error.to_string()));
-                self.status = String::from("workflow detail load failed");
+                self.set_status(StatusSeverity::Error, "workflow detail load failed");
             }
         }
     }
@@ -389,7 +422,10 @@ impl TuiApp {
             return;
         };
         let Some(draft) = &detail.detail.current_draft else {
-            self.status = String::from("draft body unavailable: start a draft first");
+            self.set_status(
+                StatusSeverity::Error,
+                "draft body unavailable: start a draft first",
+            );
             return;
         };
         self.open_workflow_modal(WorkflowModal::DraftBody {
@@ -403,11 +439,17 @@ impl TuiApp {
             return;
         };
         let Some(_draft) = &detail.detail.current_draft else {
-            self.status = String::from("draft send unavailable: start a draft first");
+            self.set_status(
+                StatusSeverity::Error,
+                "draft send unavailable: start a draft first",
+            );
             return;
         };
         if detail.detail.workflow.gmail_draft_id.is_none() {
-            self.status = String::from("draft send unavailable: no synced Gmail draft id");
+            self.set_status(
+                StatusSeverity::Error,
+                "draft send unavailable: no synced Gmail draft id",
+            );
             return;
         }
         self.open_workflow_modal(WorkflowModal::DraftSend {
@@ -440,7 +482,7 @@ impl TuiApp {
             && let Some(error) = snooze_until_validation_error(until)
         {
             self.workflow_action_report = Some(Err(error.to_owned()));
-            self.status = error.to_owned();
+            self.set_status(StatusSeverity::Error, error);
             return;
         }
         if let Some(WorkflowModal::DraftSend { confirm_text }) = &self.workflow_modal
@@ -449,7 +491,10 @@ impl TuiApp {
             self.workflow_action_report = Some(Err(String::from(
                 "draft send requires typing SEND before Enter",
             )));
-            self.status = String::from("draft send blocked: type SEND before Enter");
+            self.set_status(
+                StatusSeverity::Error,
+                "draft send blocked: type SEND before Enter",
+            );
             return;
         }
         if let Some(WorkflowModal::Cleanup {
@@ -462,7 +507,10 @@ impl TuiApp {
             self.workflow_action_report = Some(Err(String::from(
                 "cleanup execute requires typing APPLY before Enter",
             )));
-            self.status = String::from("cleanup execute blocked: type APPLY before Enter");
+            self.set_status(
+                StatusSeverity::Error,
+                "cleanup execute blocked: type APPLY before Enter",
+            );
             return;
         }
 
@@ -470,7 +518,10 @@ impl TuiApp {
             return;
         };
         let Some(thread_id) = self.selected_thread_id() else {
-            self.status = String::from("workflow action skipped: no workflow row selected");
+            self.set_status(
+                StatusSeverity::Warn,
+                "workflow action skipped: no workflow row selected",
+            );
             return;
         };
         let selected_thread_id = thread_id.clone();
@@ -539,11 +590,14 @@ impl TuiApp {
                 self.workflow_action_report = Some(Ok(report));
                 self.refresh_after_workflow_action(paths, config_report, Some(&selected_thread_id))
                     .await;
-                self.status = format!("workflow action complete: {action}");
+                self.set_status(
+                    StatusSeverity::Ok,
+                    format!("workflow action complete: {action}"),
+                );
             }
             Err(error) => {
                 self.workflow_action_report = Some(Err(error.to_string()));
-                self.status = String::from("workflow action failed");
+                self.set_status(StatusSeverity::Error, "workflow action failed");
             }
         }
     }
@@ -696,12 +750,15 @@ impl TuiApp {
                 self.automation_action_report =
                     Some(Ok(AutomationActionReport::RulesValidate(report)));
                 self.refresh_automation(config_report).await;
-                self.status = format!("automation rules valid: {enabled}/{total} enabled");
+                self.set_status(
+                    StatusSeverity::Ok,
+                    format!("automation rules valid: {enabled}/{total} enabled"),
+                );
             }
             Err(error) => {
                 self.automation_action_report = Some(Err(error.to_string()));
                 self.refresh_automation(config_report).await;
-                self.status = String::from("automation rules validation failed");
+                self.set_status(StatusSeverity::Error, "automation rules validation failed");
             }
         }
     }
@@ -719,12 +776,15 @@ impl TuiApp {
                 self.automation_action_report =
                     Some(Ok(AutomationActionReport::RulesSuggest(Box::new(report))));
                 self.refresh_automation(config_report).await;
-                self.status = format!("automation suggestions ready: {count} disabled starters");
+                self.set_status(
+                    StatusSeverity::Ok,
+                    format!("automation suggestions ready: {count} disabled starters"),
+                );
             }
             Err(error) => {
                 self.automation_action_report = Some(Err(error.to_string()));
                 self.refresh_automation(config_report).await;
-                self.status = String::from("automation rules suggestion failed");
+                self.set_status(StatusSeverity::Error, "automation rules suggestion failed");
             }
         }
     }
@@ -733,7 +793,10 @@ impl TuiApp {
         self.automation_modal = Some(AutomationModal::RunPreview {
             limit_text: DEFAULT_AUTOMATION_RUN_LIMIT.to_string(),
         });
-        self.status = String::from("automation run preview confirmation active");
+        self.set_status(
+            StatusSeverity::Ok,
+            "automation run preview confirmation active",
+        );
     }
 
     fn open_automation_show_modal(&mut self) {
@@ -742,18 +805,24 @@ impl TuiApp {
             .map(|run_id| run_id.to_string())
             .unwrap_or_default();
         self.automation_modal = Some(AutomationModal::ShowRun { run_id_text });
-        self.status = String::from("automation run id input active");
+        self.set_status(StatusSeverity::Ok, "automation run id input active");
     }
 
     fn open_automation_apply_modal(&mut self) {
         let Some(report) = self.loaded_automation_detail() else {
-            self.status = String::from("automation apply unavailable: load a persisted run first");
+            self.set_status(
+                StatusSeverity::Error,
+                "automation apply unavailable: load a persisted run first",
+            );
             return;
         };
         if report.detail.run.status != store::automation::AutomationRunStatus::Previewed {
-            self.status = format!(
-                "automation apply unavailable: loaded run is {}",
-                report.detail.run.status
+            self.set_status(
+                StatusSeverity::Error,
+                format!(
+                    "automation apply unavailable: loaded run is {}",
+                    report.detail.run.status
+                ),
             );
             return;
         }
@@ -761,12 +830,18 @@ impl TuiApp {
             run_id: report.detail.run.run_id,
             confirm_text: String::new(),
         });
-        self.status = String::from("automation apply confirmation active; type APPLY to execute");
+        self.set_status(
+            StatusSeverity::Ok,
+            "automation apply confirmation active; type APPLY to execute",
+        );
     }
 
     fn queue_automation_rules_editor(&mut self) {
         self.pending_terminal_action = Some(TerminalAction::EditAutomationRules);
-        self.status = String::from("opening $EDITOR for .mailroom/automation.toml");
+        self.set_status(
+            StatusSeverity::Ok,
+            "opening $EDITOR for .mailroom/automation.toml",
+        );
     }
 
     async fn confirm_automation_modal(&mut self, config_report: &ConfigReport) {
@@ -776,7 +851,10 @@ impl TuiApp {
             self.automation_action_report = Some(Err(String::from(
                 "automation apply requires typing APPLY before Enter",
             )));
-            self.status = String::from("automation apply blocked: type APPLY before Enter");
+            self.set_status(
+                StatusSeverity::Error,
+                "automation apply blocked: type APPLY before Enter",
+            );
             return;
         }
 
@@ -790,7 +868,10 @@ impl TuiApp {
                     self.automation_action_report = Some(Err(String::from(
                         "automation run limit must be a positive integer",
                     )));
-                    self.status = String::from("automation run blocked: invalid limit");
+                    self.set_status(
+                        StatusSeverity::Error,
+                        "automation run blocked: invalid limit",
+                    );
                     return;
                 };
                 let request = AutomationRunRequest {
@@ -810,14 +891,17 @@ impl TuiApp {
                         self.automation_candidate_selection = 0;
                         self.normalize_automation_candidate_selection();
                         self.refresh_automation(config_report).await;
-                        self.status = format!(
-                            "automation run {run_id} persisted with {candidate_count} candidates"
+                        self.set_status(
+                            StatusSeverity::Ok,
+                            format!(
+                                "automation run {run_id} persisted with {candidate_count} candidates"
+                            ),
                         );
                     }
                     Err(error) => {
                         self.automation_action_report = Some(Err(error.to_string()));
                         self.refresh_automation(config_report).await;
-                        self.status = String::from("automation run creation failed");
+                        self.set_status(StatusSeverity::Error, "automation run creation failed");
                     }
                 }
             }
@@ -827,7 +911,10 @@ impl TuiApp {
                     self.automation_action_report = Some(Err(String::from(
                         "automation run id must be a positive integer",
                     )));
-                    self.status = String::from("automation show blocked: invalid run id");
+                    self.set_status(
+                        StatusSeverity::Error,
+                        "automation show blocked: invalid run id",
+                    );
                     return;
                 };
                 match automation::show_run(config_report, run_id).await {
@@ -836,14 +923,17 @@ impl TuiApp {
                         self.automation_detail_report = Some(Ok(report));
                         self.automation_candidate_selection = 0;
                         self.normalize_automation_candidate_selection();
-                        self.status = format!(
-                            "automation run {run_id} loaded with {candidate_count} candidates"
+                        self.set_status(
+                            StatusSeverity::Ok,
+                            format!(
+                                "automation run {run_id} loaded with {candidate_count} candidates"
+                            ),
                         );
                     }
                     Err(error) => {
                         self.automation_detail_report = Some(Err(error.to_string()));
                         self.refresh_automation(config_report).await;
-                        self.status = String::from("automation run load failed");
+                        self.set_status(StatusSeverity::Error, "automation run load failed");
                     }
                 }
             }
@@ -861,14 +951,21 @@ impl TuiApp {
                         self.automation_candidate_selection = 0;
                         self.normalize_automation_candidate_selection();
                         self.refresh_automation(config_report).await;
-                        self.status = format!(
-                            "automation run {run_id} applied: {applied} succeeded, {failed} failed"
+                        self.set_status(
+                            if failed == 0 {
+                                StatusSeverity::Ok
+                            } else {
+                                StatusSeverity::Error
+                            },
+                            format!(
+                                "automation run {run_id} applied: {applied} succeeded, {failed} failed"
+                            ),
                         );
                     }
                     Err(error) => {
                         self.automation_action_report = Some(Err(error.to_string()));
                         self.refresh_automation(config_report).await;
-                        self.status = String::from("automation apply failed");
+                        self.set_status(StatusSeverity::Error, "automation apply failed");
                     }
                 }
             }
@@ -890,8 +987,10 @@ impl TuiApp {
                         self.automation_action_report =
                             Some(Ok(AutomationActionReport::RulesValidate(report)));
                         self.refresh_automation(config_report).await;
-                        self.status =
-                            format!("automation rules edited and valid: {enabled}/{total} enabled");
+                        self.set_status(
+                            StatusSeverity::Ok,
+                            format!("automation rules edited and valid: {enabled}/{total} enabled"),
+                        );
                     }
                     Err(error) => {
                         self.automation_action_report = Some(Err(format!(
@@ -899,14 +998,17 @@ impl TuiApp {
                             path.display()
                         )));
                         self.refresh_automation(config_report).await;
-                        self.status = String::from("automation rules edit did not validate");
+                        self.set_status(
+                            StatusSeverity::Error,
+                            "automation rules edit did not validate",
+                        );
                     }
                 }
             }
             Err(error) => {
                 self.automation_action_report = Some(Err(error));
                 self.refresh_automation(config_report).await;
-                self.status = String::from("automation rules editor failed");
+                self.set_status(StatusSeverity::Error, "automation rules editor failed");
             }
         }
     }
@@ -1568,6 +1670,34 @@ fn failed_diagnostic_reports(
     )
 }
 
+fn handle_small_terminal_key(key: KeyEvent, app: &mut TuiApp) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => true,
+        KeyCode::Char('?') | KeyCode::F(1) => {
+            app.set_status(
+                StatusSeverity::Warn,
+                format!(
+                    "terminal too small: resize to at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT} for help"
+                ),
+            );
+            false
+        }
+        _ => {
+            app.set_status(
+                StatusSeverity::Warn,
+                format!(
+                    "terminal too small: resize to at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}"
+                ),
+            );
+            false
+        }
+    }
+}
+
 async fn handle_key(
     key: KeyEvent,
     app: &mut TuiApp,
@@ -1582,7 +1712,7 @@ async fn handle_key(
         match key.code {
             KeyCode::Char('?') | KeyCode::F(1) | KeyCode::Esc | KeyCode::Char('q') => {
                 app.help_overlay = false;
-                app.status = String::from("help overlay closed");
+                app.set_status(StatusSeverity::Ok, "help overlay closed");
             }
             _ => {}
         }
@@ -1603,7 +1733,10 @@ async fn handle_key(
 
     if matches!(key.code, KeyCode::Char('?') | KeyCode::F(1)) {
         app.help_overlay = true;
-        app.status = String::from("help overlay active; ? Esc or q closes it");
+        app.set_status(
+            StatusSeverity::Ok,
+            "help overlay active; ? Esc or q closes it",
+        );
         return Ok(false);
     }
 
@@ -1737,7 +1870,10 @@ async fn handle_key(
         KeyCode::Char('/') => {
             app.view = View::Search;
             app.search_editing = true;
-            app.status = String::from("search input active; enter runs a local read-only query");
+            app.set_status(
+                StatusSeverity::Ok,
+                "search input active; enter runs a local read-only query",
+            );
             Ok(false)
         }
         KeyCode::Char('r') => {
@@ -1764,7 +1900,7 @@ async fn handle_workflow_modal_key(
     match key.code {
         KeyCode::Esc => {
             app.workflow_modal = None;
-            app.status = String::from("workflow action canceled");
+            app.set_status(StatusSeverity::Warn, "workflow action canceled");
         }
         KeyCode::Enter => app.confirm_workflow_modal(paths, config_report).await,
         KeyCode::Tab | KeyCode::Right => {
@@ -1795,7 +1931,7 @@ async fn handle_workflow_modal_key(
         }
         KeyCode::Char('q') => {
             app.workflow_modal = None;
-            app.status = String::from("workflow action canceled");
+            app.set_status(StatusSeverity::Warn, "workflow action canceled");
         }
         KeyCode::Char('1') => match &mut app.workflow_modal {
             Some(WorkflowModal::Triage { bucket }) => {
@@ -1859,7 +1995,7 @@ async fn handle_automation_modal_key(
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.automation_modal = None;
-            app.status = String::from("automation action canceled");
+            app.set_status(StatusSeverity::Warn, "automation action canceled");
         }
         KeyCode::Enter => app.confirm_automation_modal(config_report).await,
         KeyCode::Backspace => {
@@ -1891,7 +2027,7 @@ async fn handle_search_key(
     match key.code {
         KeyCode::Esc => {
             app.search_editing = false;
-            app.status = String::from("search input inactive");
+            app.set_status(StatusSeverity::Warn, "search input inactive");
             Ok(false)
         }
         KeyCode::Enter => {
@@ -1964,27 +2100,16 @@ fn render_terminal_too_small(frame: &mut Frame<'_>, area: Rect) {
                 area.width, area.height
             )),
             Line::from("Resize the terminal or run the CLI command directly."),
-            Line::from("The TUI has not started any mailbox mutation."),
+            Line::from("Mailbox actions are disabled until the terminal is resized."),
         ],
     );
 }
 
-fn status_label_and_style(status: &str) -> (&'static str, Style) {
-    if status.contains("failed")
-        || status.contains("error")
-        || status.contains("blocked")
-        || status.contains("invalid")
-        || status.contains("unavailable")
-    {
-        ("ERROR", Style::default().fg(Color::Red))
-    } else if status.contains("canceled")
-        || status.contains("skipped")
-        || status.contains("missing")
-        || status.contains("warning")
-    {
-        ("WARN", Style::default().fg(Color::Yellow))
-    } else {
-        ("OK", Style::default().fg(Color::Green))
+fn status_label_and_style(severity: StatusSeverity) -> (&'static str, Style) {
+    match severity {
+        StatusSeverity::Ok => ("OK", Style::default().fg(Color::Green)),
+        StatusSeverity::Warn => ("WARN", Style::default().fg(Color::Yellow)),
+        StatusSeverity::Error => ("ERROR", Style::default().fg(Color::Red)),
     }
 }
 
@@ -2005,7 +2130,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
-    let (status_label, status_style) = status_label_and_style(&app.status);
+    let (status_label, status_style) = status_label_and_style(app.status_severity);
     let footer = Paragraph::new(Text::from(vec![Line::from(vec![
         Span::raw(
             "q quit | ? help | tab view | 1-5 jump | / search | r refresh | workflows: j/k t/p/z d/b/s a/l/x | automation: v/g/n/o/a/e | ",
@@ -3225,11 +3350,11 @@ fn error_chain(error: &anyhow::Error) -> String {
 mod tests {
     use super::{
         AutomationModal, CleanupField, DEFAULT_AUTOMATION_RUN_LIMIT, MIN_TERMINAL_HEIGHT,
-        MIN_TERMINAL_WIDTH, Snapshot, TUI_SEARCH_LIMIT, TerminalAction, TuiApp, View,
-        WorkflowModal, automation_match_summary, ensure_automation_rules_file,
-        failed_diagnostic_reports, format_epoch_day_utc, handle_key, load_snapshot,
-        parse_editor_command, render, snooze_until_validation_error, status_label_and_style,
-        truncate, workflow_table_row_capacity,
+        MIN_TERMINAL_WIDTH, Snapshot, StatusSeverity, TUI_SEARCH_LIMIT, TerminalAction, TuiApp,
+        View, WorkflowModal, automation_match_summary, ensure_automation_rules_file,
+        failed_diagnostic_reports, format_epoch_day_utc, handle_key, handle_small_terminal_key,
+        load_snapshot, parse_editor_command, render, snooze_until_validation_error,
+        status_label_and_style, truncate, workflow_table_row_capacity,
     };
     use crate::auth::AuthStatusReport;
     use crate::config::{self, WorkspaceConfig};
@@ -3898,17 +4023,30 @@ mod tests {
         assert!(output.contains(&format!(
             "Need at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}"
         )));
+        assert!(output.contains("Mailbox actions are disabled"));
         assert!(!output.contains("workflow action"));
     }
 
     #[test]
+    fn narrow_terminal_key_gate_blocks_actions_until_resize() {
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        assert!(!handle_small_terminal_key(
+            key(KeyCode::Char('t')),
+            &mut app
+        ));
+        assert!(app.workflow_modal.is_none());
+        assert_eq!(app.status_severity, StatusSeverity::Warn);
+
+        assert!(handle_small_terminal_key(key(KeyCode::Char('q')), &mut app));
+    }
+
+    #[test]
     fn footer_status_uses_textual_severity_labels() {
-        assert_eq!(status_label_and_style("reports refreshed").0, "OK");
-        assert_eq!(status_label_and_style("workflow action canceled").0, "WARN");
-        assert_eq!(
-            status_label_and_style("automation apply blocked").0,
-            "ERROR"
-        );
+        assert_eq!(status_label_and_style(StatusSeverity::Ok).0, "OK");
+        assert_eq!(status_label_and_style(StatusSeverity::Warn).0, "WARN");
+        assert_eq!(status_label_and_style(StatusSeverity::Error).0, "ERROR");
     }
 
     #[test]
