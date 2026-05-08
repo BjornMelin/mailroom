@@ -211,11 +211,16 @@ stty sane
 ```
 
 Run PTY smoke checks before shipping TUI changes. These commands intentionally
-time out after opening the TUI and should write transcripts only under `/tmp`
-because rendered mailbox data may appear in the session log:
+time out after opening the TUI and write transcripts under `/tmp` with
+restrictive permissions and unpredictable names because rendered mailbox data
+may appear in the session log:
 
 ```bash
-script -qefc 'timeout 2s cargo run -- tui' /tmp/mailroom-tui-smoke.txt
-script -qefc 'timeout 2s cargo run -- tui --search "known term"' /tmp/mailroom-tui-search-smoke.txt
-script -qefc 'stty cols 40 rows 10; timeout 2s cargo run -- tui' /tmp/mailroom-tui-narrow-smoke.txt
+umask 077
+SMOKE_MAIN="$(mktemp /tmp/mailroom-tui-smoke.XXXXXX.txt)"
+SMOKE_SEARCH="$(mktemp /tmp/mailroom-tui-search-smoke.XXXXXX.txt)"
+SMOKE_NARROW="$(mktemp /tmp/mailroom-tui-narrow-smoke.XXXXXX.txt)"
+script -qefc 'timeout 2s cargo run -- tui' "$SMOKE_MAIN"
+script -qefc 'timeout 2s cargo run -- tui --search "known term"' "$SMOKE_SEARCH"
+script -qefc 'stty cols 40 rows 10; timeout 2s cargo run -- tui' "$SMOKE_NARROW"
 ```
