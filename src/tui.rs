@@ -693,6 +693,7 @@ impl TuiApp {
             }
             Err(error) => {
                 self.automation_action_report = Some(Err(error.to_string()));
+                self.refresh_automation(config_report).await;
                 self.status = String::from("automation rules validation failed");
             }
         }
@@ -715,6 +716,7 @@ impl TuiApp {
             }
             Err(error) => {
                 self.automation_action_report = Some(Err(error.to_string()));
+                self.refresh_automation(config_report).await;
                 self.status = String::from("automation rules suggestion failed");
             }
         }
@@ -741,6 +743,13 @@ impl TuiApp {
             self.status = String::from("automation apply unavailable: load a persisted run first");
             return;
         };
+        if report.detail.run.status != store::automation::AutomationRunStatus::Previewed {
+            self.status = format!(
+                "automation apply unavailable: loaded run is {}",
+                report.detail.run.status
+            );
+            return;
+        }
         self.automation_modal = Some(AutomationModal::ApplyRun {
             run_id: report.detail.run.run_id,
             confirm_text: String::new(),
@@ -800,6 +809,7 @@ impl TuiApp {
                     }
                     Err(error) => {
                         self.automation_action_report = Some(Err(error.to_string()));
+                        self.refresh_automation(config_report).await;
                         self.status = String::from("automation run creation failed");
                     }
                 }
@@ -825,6 +835,7 @@ impl TuiApp {
                     }
                     Err(error) => {
                         self.automation_detail_report = Some(Err(error.to_string()));
+                        self.refresh_automation(config_report).await;
                         self.status = String::from("automation run load failed");
                     }
                 }
@@ -849,6 +860,7 @@ impl TuiApp {
                     }
                     Err(error) => {
                         self.automation_action_report = Some(Err(error.to_string()));
+                        self.refresh_automation(config_report).await;
                         self.status = String::from("automation apply failed");
                     }
                 }
@@ -879,12 +891,14 @@ impl TuiApp {
                             "edited rules file {} did not validate: {error}",
                             path.display()
                         )));
-                        self.status = String::from("automation rules edit returned invalid TOML");
+                        self.refresh_automation(config_report).await;
+                        self.status = String::from("automation rules edit did not validate");
                     }
                 }
             }
             Err(error) => {
                 self.automation_action_report = Some(Err(error));
+                self.refresh_automation(config_report).await;
                 self.status = String::from("automation rules editor failed");
             }
         }
@@ -3822,6 +3836,28 @@ mod tests {
         assert_eq!(
             app.status,
             "automation apply blocked: type APPLY before Enter"
+        );
+    }
+
+    #[tokio::test]
+    async fn automation_apply_blocks_non_preview_runs() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(empty_snapshot(), None);
+        app.view = View::Automation;
+        let mut detail = sample_automation_run_detail();
+        detail.run.status = AutomationRunStatus::Applied;
+        app.automation_detail_report = Some(Ok(crate::automation::AutomationShowReport { detail }));
+
+        handle_key(key(KeyCode::Char('a')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(app.automation_modal.is_none());
+        assert_eq!(
+            app.status,
+            "automation apply unavailable: loaded run is applied"
         );
     }
 
