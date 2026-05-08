@@ -5,7 +5,7 @@
 ## Current posture
 
 - Primary stack: Rust + `clap`
-- Operator surfaces: CLI first, TUI inspection and confirmed local workflow actions second
+- Operator surfaces: CLI first, TUI inspection plus confirmed selected-thread workflow, draft, and cleanup actions second
 - Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
 - Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, attachment catalog/export foundation, review-first automation rules, and a terminal operator shell
 - Hardening surface: read-only label audits, readiness verification, and operator runbooks for safe real-mailbox rollout
@@ -172,7 +172,8 @@ The terminal operator shell lives in
 [`docs/operations/tui-operator-shell.md`](docs/operations/tui-operator-shell.md),
 with the durable design captured in
 [`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md)
-and [`docs/decisions/0009-tui-workflow-actions.md`](docs/decisions/0009-tui-workflow-actions.md).
+[`docs/decisions/0009-tui-workflow-actions.md`](docs/decisions/0009-tui-workflow-actions.md),
+and [`docs/decisions/0010-tui-draft-cleanup-flows.md`](docs/decisions/0010-tui-draft-cleanup-flows.md).
 
 Config precedence is:
 
@@ -231,6 +232,6 @@ Advanced manual overrides still work:
 ## Near-term build plan
 
 1. Use the verification and hardening runbook to canonicalize labels, deepen the local audit corpus, and generate disabled starter rules with `automation rules suggest`.
-2. Turn the TUI from read-only inspection into explicit workflow, draft, cleanup, and automation action flows with confirmation screens.
+2. Add automation action flows to the TUI with confirmation screens that preserve the persisted review-snapshot safety model.
 3. Improve automation ergonomics only after a few low-surprise micro-batch archive/label runs land cleanly.
 4. Add unsubscribe assistance only after the deeper sync proves out list-header coverage in the local cache.

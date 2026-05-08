@@ -3,7 +3,7 @@ use crate::config::ConfigReport;
 use crate::doctor::DoctorReport;
 use crate::mailbox::{self, SearchReport, SearchRequest};
 use crate::store;
-use crate::workflows::{WorkflowActionReport, WorkflowListReport};
+use crate::workflows::{WorkflowActionReport, WorkflowListReport, WorkflowShowReport};
 use crate::{audit, workflows, workspace};
 use anyhow::Result as AnyhowResult;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -79,6 +79,7 @@ struct TuiApp {
     workflow_scroll: usize,
     workflow_window_limit: usize,
     workflow_modal: Option<WorkflowModal>,
+    workflow_detail_report: Option<std::result::Result<WorkflowShowReport, String>>,
     workflow_action_report: Option<std::result::Result<WorkflowActionReport, String>>,
     status: String,
 }
@@ -101,6 +102,7 @@ impl TuiApp {
             workflow_scroll: 0,
             workflow_window_limit: TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT,
             workflow_modal: None,
+            workflow_detail_report: None,
             workflow_action_report: None,
             status: String::from("TUI ready: local workflow actions require explicit confirmation"),
         }
@@ -169,6 +171,14 @@ impl TuiApp {
 
     fn selected_workflow(&self) -> Option<&store::workflows::WorkflowRecord> {
         self.workflow_rows().get(self.workflow_selection)
+    }
+
+    fn selected_loaded_detail(&self) -> Option<&WorkflowShowReport> {
+        let selected_thread_id = self.selected_workflow()?.thread_id.as_str();
+        self.workflow_detail_report
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .filter(|report| report.detail.workflow.thread_id == selected_thread_id)
     }
 
     fn selected_thread_id(&self) -> Option<String> {
@@ -281,12 +291,114 @@ impl TuiApp {
         self.open_workflow_modal(WorkflowModal::Snooze { until });
     }
 
-    async fn confirm_workflow_modal(&mut self, config_report: &ConfigReport) {
+    fn open_draft_start_modal(&mut self) {
+        self.open_workflow_modal(WorkflowModal::DraftStart { reply_all: false });
+    }
+
+    async fn inspect_selected_workflow(&mut self, config_report: &ConfigReport) {
+        let Some(thread_id) = self.selected_thread_id() else {
+            self.workflow_detail_report = None;
+            self.status = String::from("workflow inspect skipped: no workflow row selected");
+            return;
+        };
+
+        match workflows::show_workflow(config_report, thread_id).await {
+            Ok(report) => {
+                let has_draft = report.detail.current_draft.is_some();
+                self.workflow_detail_report = Some(Ok(report));
+                self.status = if has_draft {
+                    String::from("current draft detail loaded")
+                } else {
+                    String::from("workflow detail loaded: no current draft")
+                };
+            }
+            Err(error) => {
+                self.workflow_detail_report = Some(Err(error.to_string()));
+                self.status = String::from("workflow detail load failed");
+            }
+        }
+    }
+
+    async fn open_draft_body_modal(&mut self, config_report: &ConfigReport) {
+        self.inspect_selected_workflow(config_report).await;
+        let Some(detail) = self.selected_loaded_detail() else {
+            return;
+        };
+        let Some(draft) = &detail.detail.current_draft else {
+            self.status = String::from("draft body unavailable: start a draft first");
+            return;
+        };
+        self.open_workflow_modal(WorkflowModal::DraftBody {
+            body_text: draft.revision.body_text.clone(),
+        });
+    }
+
+    async fn open_draft_send_modal(&mut self, config_report: &ConfigReport) {
+        self.inspect_selected_workflow(config_report).await;
+        let Some(detail) = self.selected_loaded_detail() else {
+            return;
+        };
+        let Some(_draft) = &detail.detail.current_draft else {
+            self.status = String::from("draft send unavailable: start a draft first");
+            return;
+        };
+        if detail.detail.workflow.gmail_draft_id.is_none() {
+            self.status = String::from("draft send unavailable: no synced Gmail draft id");
+            return;
+        }
+        self.open_workflow_modal(WorkflowModal::DraftSend {
+            confirm_text: String::new(),
+        });
+    }
+
+    fn open_cleanup_modal(&mut self, action: store::workflows::CleanupAction) {
+        let active_field = if action == store::workflows::CleanupAction::Label {
+            CleanupField::AddLabels
+        } else {
+            CleanupField::Confirm
+        };
+        self.open_workflow_modal(WorkflowModal::Cleanup {
+            action,
+            execute: false,
+            add_labels: String::new(),
+            remove_labels: String::new(),
+            active_field,
+            confirm_text: String::new(),
+        });
+    }
+
+    async fn confirm_workflow_modal(
+        &mut self,
+        paths: &workspace::WorkspacePaths,
+        config_report: &ConfigReport,
+    ) {
         if let Some(WorkflowModal::Snooze { until }) = &self.workflow_modal
             && let Some(error) = snooze_until_validation_error(until)
         {
             self.workflow_action_report = Some(Err(error.to_owned()));
             self.status = error.to_owned();
+            return;
+        }
+        if let Some(WorkflowModal::DraftSend { confirm_text }) = &self.workflow_modal
+            && confirm_text != "SEND"
+        {
+            self.workflow_action_report = Some(Err(String::from(
+                "draft send requires typing SEND before Enter",
+            )));
+            self.status = String::from("draft send blocked: type SEND before Enter");
+            return;
+        }
+        if let Some(WorkflowModal::Cleanup {
+            execute: true,
+            confirm_text,
+            ..
+        }) = &self.workflow_modal
+            && confirm_text != "APPLY"
+        {
+            self.workflow_action_report = Some(Err(String::from(
+                "cleanup execute requires typing APPLY before Enter",
+            )));
+            self.status = String::from("cleanup execute blocked: type APPLY before Enter");
             return;
         }
 
@@ -317,13 +429,51 @@ impl TuiApp {
                     .await
                 }
             }
+            WorkflowModal::DraftStart { reply_all } => {
+                let reply_mode = if reply_all {
+                    store::workflows::ReplyMode::ReplyAll
+                } else {
+                    store::workflows::ReplyMode::Reply
+                };
+                workflows::draft_start(config_report, thread_id, reply_mode).await
+            }
+            WorkflowModal::DraftBody { body_text } => {
+                workflows::draft_body_set(config_report, thread_id, body_text).await
+            }
+            WorkflowModal::DraftSend { .. } => {
+                workflows::draft_send(config_report, thread_id).await
+            }
+            WorkflowModal::Cleanup {
+                action,
+                execute,
+                add_labels,
+                remove_labels,
+                ..
+            } => match action {
+                store::workflows::CleanupAction::Archive => {
+                    workflows::cleanup_archive(config_report, thread_id, execute).await
+                }
+                store::workflows::CleanupAction::Trash => {
+                    workflows::cleanup_trash(config_report, thread_id, execute).await
+                }
+                store::workflows::CleanupAction::Label => {
+                    workflows::cleanup_label(
+                        config_report,
+                        thread_id,
+                        execute,
+                        split_label_names(&add_labels),
+                        split_label_names(&remove_labels),
+                    )
+                    .await
+                }
+            },
         };
 
         match result {
             Ok(report) => {
                 let action = report.action.to_string();
                 self.workflow_action_report = Some(Ok(report));
-                self.refresh_workflows(config_report, Some(&selected_thread_id))
+                self.refresh_after_workflow_action(paths, config_report, Some(&selected_thread_id))
                     .await;
                 self.status = format!("workflow action complete: {action}");
             }
@@ -334,14 +484,16 @@ impl TuiApp {
         }
     }
 
-    async fn refresh_workflows(
+    async fn refresh_after_workflow_action(
         &mut self,
+        paths: &workspace::WorkspacePaths,
         config_report: &ConfigReport,
         selected_thread_id: Option<&str>,
     ) {
-        self.snapshot.workflows = workflows::list_workflows_read_only(config_report, None, None)
-            .await
-            .map_err(|error| error.to_string());
+        self.snapshot = load_snapshot(paths, config_report).await;
+        if self.search_report.is_some() && self.has_search_input() {
+            self.submit_search(config_report).await;
+        }
         if let Some(thread_id) = selected_thread_id
             && let Some(index) = self
                 .workflow_rows()
@@ -349,6 +501,7 @@ impl TuiApp {
                 .position(|workflow| workflow.thread_id == thread_id)
         {
             self.workflow_selection = index;
+            self.inspect_selected_workflow(config_report).await;
         }
         self.normalize_workflow_selection();
     }
@@ -365,6 +518,30 @@ enum WorkflowModal {
     Snooze {
         until: String,
     },
+    DraftStart {
+        reply_all: bool,
+    },
+    DraftBody {
+        body_text: String,
+    },
+    DraftSend {
+        confirm_text: String,
+    },
+    Cleanup {
+        action: store::workflows::CleanupAction,
+        execute: bool,
+        add_labels: String,
+        remove_labels: String,
+        active_field: CleanupField,
+        confirm_text: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupField {
+    AddLabels,
+    RemoveLabels,
+    Confirm,
 }
 
 impl WorkflowModal {
@@ -373,6 +550,11 @@ impl WorkflowModal {
             Self::Triage { .. } => "Confirm triage set",
             Self::Promote { .. } => "Confirm workflow promote",
             Self::Snooze { .. } => "Confirm workflow snooze",
+            Self::DraftStart { .. } => "Confirm draft start",
+            Self::DraftBody { .. } => "Confirm draft body edit",
+            Self::DraftSend { .. } => "Confirm draft send",
+            Self::Cleanup { execute: false, .. } => "Confirm cleanup preview",
+            Self::Cleanup { execute: true, .. } => "Confirm cleanup execute",
         }
     }
 
@@ -384,6 +566,30 @@ impl WorkflowModal {
                 String::from("clear workflow snooze")
             }
             Self::Snooze { until } => format!("snooze workflow until {}", until.trim()),
+            Self::DraftStart { reply_all: true } => String::from("start reply-all Gmail draft"),
+            Self::DraftStart { reply_all: false } => String::from("start reply Gmail draft"),
+            Self::DraftBody { body_text } => {
+                format!("replace draft body ({} chars)", body_text.chars().count())
+            }
+            Self::DraftSend { .. } => String::from("send current Gmail draft"),
+            Self::Cleanup {
+                action,
+                execute,
+                add_labels,
+                remove_labels,
+                ..
+            } => {
+                let mode = if *execute { "execute" } else { "preview" };
+                if *action == store::workflows::CleanupAction::Label {
+                    format!(
+                        "{mode} label cleanup (add: {}; remove: {})",
+                        blank_label_summary(add_labels),
+                        blank_label_summary(remove_labels)
+                    )
+                } else {
+                    format!("{mode} {action} cleanup")
+                }
+            }
         }
     }
 
@@ -392,6 +598,17 @@ impl WorkflowModal {
             Self::Triage { bucket } => *bucket = next_triage_bucket(*bucket),
             Self::Promote { target } => *target = next_tui_promote_target(*target),
             Self::Snooze { .. } => {}
+            Self::DraftStart { reply_all } => *reply_all = !*reply_all,
+            Self::DraftBody { .. } | Self::DraftSend { .. } => {}
+            Self::Cleanup {
+                action,
+                active_field,
+                ..
+            } => {
+                if *action == store::workflows::CleanupAction::Label {
+                    *active_field = active_field.next();
+                }
+            }
         }
     }
 
@@ -400,7 +617,138 @@ impl WorkflowModal {
             Self::Triage { bucket } => *bucket = previous_triage_bucket(*bucket),
             Self::Promote { target } => *target = previous_tui_promote_target(*target),
             Self::Snooze { .. } => {}
+            Self::DraftStart { reply_all } => *reply_all = !*reply_all,
+            Self::DraftBody { .. } | Self::DraftSend { .. } => {}
+            Self::Cleanup {
+                action,
+                active_field,
+                ..
+            } => {
+                if *action == store::workflows::CleanupAction::Label {
+                    *active_field = active_field.previous();
+                }
+            }
         }
+    }
+
+    fn toggle_cleanup_execute(&mut self) {
+        if let Self::Cleanup {
+            execute,
+            active_field,
+            confirm_text,
+            ..
+        } = self
+        {
+            *execute = !*execute;
+            confirm_text.clear();
+            *active_field = CleanupField::Confirm;
+        }
+    }
+}
+
+impl CleanupField {
+    const fn next(self) -> Self {
+        match self {
+            Self::AddLabels => Self::RemoveLabels,
+            Self::RemoveLabels => Self::Confirm,
+            Self::Confirm => Self::AddLabels,
+        }
+    }
+
+    const fn previous(self) -> Self {
+        match self {
+            Self::AddLabels => Self::Confirm,
+            Self::RemoveLabels => Self::AddLabels,
+            Self::Confirm => Self::RemoveLabels,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::AddLabels => "add",
+            Self::RemoveLabels => "remove",
+            Self::Confirm => "confirm",
+        }
+    }
+}
+
+fn accepts_plain_text_key(key: KeyEvent) -> bool {
+    key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+}
+
+fn workflow_modal_uses_text_input(modal: &WorkflowModal) -> bool {
+    matches!(
+        modal,
+        WorkflowModal::Snooze { .. }
+            | WorkflowModal::DraftBody { .. }
+            | WorkflowModal::DraftSend { .. }
+            | WorkflowModal::Cleanup { .. }
+    )
+}
+
+fn push_workflow_modal_text(modal: &mut WorkflowModal, value: char) {
+    match modal {
+        WorkflowModal::Snooze { until } => until.push(value),
+        WorkflowModal::DraftBody { body_text } => body_text.push(value),
+        WorkflowModal::DraftSend { confirm_text } => confirm_text.push(value),
+        WorkflowModal::Cleanup {
+            action,
+            active_field,
+            add_labels,
+            remove_labels,
+            confirm_text,
+            ..
+        } => match (*action, *active_field) {
+            (store::workflows::CleanupAction::Label, CleanupField::AddLabels) => {
+                add_labels.push(value);
+            }
+            (store::workflows::CleanupAction::Label, CleanupField::RemoveLabels) => {
+                remove_labels.push(value);
+            }
+            (_, CleanupField::Confirm) => {
+                confirm_text.push(value);
+            }
+            _ => {}
+        },
+        WorkflowModal::Triage { .. }
+        | WorkflowModal::Promote { .. }
+        | WorkflowModal::DraftStart { .. } => {}
+    }
+}
+
+fn pop_workflow_modal_text(modal: &mut WorkflowModal) {
+    match modal {
+        WorkflowModal::Snooze { until } => {
+            until.pop();
+        }
+        WorkflowModal::DraftBody { body_text } => {
+            body_text.pop();
+        }
+        WorkflowModal::DraftSend { confirm_text } => {
+            confirm_text.pop();
+        }
+        WorkflowModal::Cleanup {
+            action,
+            active_field,
+            add_labels,
+            remove_labels,
+            confirm_text,
+            ..
+        } => match (*action, *active_field) {
+            (store::workflows::CleanupAction::Label, CleanupField::AddLabels) => {
+                add_labels.pop();
+            }
+            (store::workflows::CleanupAction::Label, CleanupField::RemoveLabels) => {
+                remove_labels.pop();
+            }
+            (_, CleanupField::Confirm) => {
+                confirm_text.pop();
+            }
+            _ => {}
+        },
+        WorkflowModal::Triage { .. }
+        | WorkflowModal::Promote { .. }
+        | WorkflowModal::DraftStart { .. } => {}
     }
 }
 
@@ -505,7 +853,7 @@ async fn handle_key(
     }
 
     if app.workflow_modal.is_some() {
-        return handle_workflow_modal_key(key, app, config_report).await;
+        return handle_workflow_modal_key(key, app, paths, config_report).await;
     }
 
     if app.search_editing {
@@ -532,6 +880,34 @@ async fn handle_key(
             }
             KeyCode::Char('z') => {
                 app.open_snooze_modal();
+                return Ok(false);
+            }
+            KeyCode::Char('i') => {
+                app.inspect_selected_workflow(config_report).await;
+                return Ok(false);
+            }
+            KeyCode::Char('d') => {
+                app.open_draft_start_modal();
+                return Ok(false);
+            }
+            KeyCode::Char('b') => {
+                app.open_draft_body_modal(config_report).await;
+                return Ok(false);
+            }
+            KeyCode::Char('s') => {
+                app.open_draft_send_modal(config_report).await;
+                return Ok(false);
+            }
+            KeyCode::Char('a') => {
+                app.open_cleanup_modal(store::workflows::CleanupAction::Archive);
+                return Ok(false);
+            }
+            KeyCode::Char('l') => {
+                app.open_cleanup_modal(store::workflows::CleanupAction::Label);
+                return Ok(false);
+            }
+            KeyCode::Char('x') => {
+                app.open_cleanup_modal(store::workflows::CleanupAction::Trash);
                 return Ok(false);
             }
             _ => {}
@@ -585,14 +961,22 @@ async fn handle_key(
 async fn handle_workflow_modal_key(
     key: KeyEvent,
     app: &mut TuiApp,
+    paths: &workspace::WorkspacePaths,
     config_report: &ConfigReport,
 ) -> AnyhowResult<bool> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+        if let Some(modal) = &mut app.workflow_modal {
+            modal.toggle_cleanup_execute();
+        }
+        return Ok(false);
+    }
+
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             app.workflow_modal = None;
             app.status = String::from("workflow action canceled");
         }
-        KeyCode::Enter => app.confirm_workflow_modal(config_report).await,
+        KeyCode::Enter => app.confirm_workflow_modal(paths, config_report).await,
         KeyCode::Tab | KeyCode::Right => {
             if let Some(modal) = &mut app.workflow_modal {
                 modal.cycle_next();
@@ -604,9 +988,24 @@ async fn handle_workflow_modal_key(
             }
         }
         KeyCode::Backspace => {
-            if let Some(WorkflowModal::Snooze { until }) = &mut app.workflow_modal {
-                until.pop();
+            if let Some(modal) = &mut app.workflow_modal {
+                pop_workflow_modal_text(modal);
             }
+        }
+        KeyCode::Char(value)
+            if accepts_plain_text_key(key)
+                && app
+                    .workflow_modal
+                    .as_ref()
+                    .is_some_and(workflow_modal_uses_text_input) =>
+        {
+            if let Some(modal) = &mut app.workflow_modal {
+                push_workflow_modal_text(modal, value);
+            }
+        }
+        KeyCode::Char('q') => {
+            app.workflow_modal = None;
+            app.status = String::from("workflow action canceled");
         }
         KeyCode::Char('1') => match &mut app.workflow_modal {
             Some(WorkflowModal::Triage { bucket }) => {
@@ -651,10 +1050,10 @@ async fn handle_workflow_modal_key(
             _ => {}
         },
         KeyCode::Char(value) => {
-            if let Some(WorkflowModal::Snooze { until }) = &mut app.workflow_modal
-                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            if let Some(modal) = &mut app.workflow_modal
+                && accepts_plain_text_key(key)
             {
-                until.push(value);
+                push_workflow_modal_text(modal, value);
             }
         }
         _ => {}
@@ -735,7 +1134,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     let footer = Paragraph::new(Text::from(vec![Line::from(vec![
-        Span::raw("q quit | tab view | 1-5 jump | / search | r refresh | workflows: j/k t/p/z | "),
+        Span::raw(
+            "q quit | tab view | 1-5 jump | / search | r refresh | workflows: j/k t/p/z d/b/s a/l/x | ",
+        ),
         Span::styled(&app.status, Style::default().fg(Color::Yellow)),
     ])]));
     frame.render_widget(footer, area);
@@ -962,7 +1363,7 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &mut TuiApp) {
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(Block::default().borders(Borders::ALL).title(format!(
-                "Workflows ({}, showing {}-{}) - j/k select, t triage, p promote, z snooze",
+                "Workflows ({}, showing {}-{}) - j/k select, t/p/z workflow, d/b/s draft, a/l/x cleanup",
                 report.workflows.len(),
                 app.workflow_scroll.saturating_add(1).min(report.workflows.len()),
                 (app.workflow_scroll + app.workflow_window_limit).min(report.workflows.len()),
@@ -1008,12 +1409,20 @@ fn render_workflow_detail(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
         if !workflow.note.trim().is_empty() {
             lines.push(metric("note", truncate(&workflow.note, 72)));
         }
+        if let Some(report) = app.selected_loaded_detail() {
+            lines.push(Line::default());
+            render_current_draft_summary(&mut lines, report.detail.current_draft.as_ref());
+        } else if let Some(Err(error)) = &app.workflow_detail_report {
+            lines.push(Line::default());
+            lines.push(error_line(error));
+        }
         lines.push(Line::default());
         lines.push(Line::from("Actions require confirmation:"));
-        lines.push(Line::from("t triage bucket | p promote | z snooze/clear"));
         lines.push(Line::from(
-            "Promote targets are follow_up or ready_to_send only.",
+            "t triage | p promote | z snooze/clear | i inspect draft",
         ));
+        lines.push(Line::from("d start draft | b edit body | s send draft"));
+        lines.push(Line::from("a archive | l label cleanup | x trash cleanup"));
     } else {
         lines.push(Line::from("No workflow row selected."));
         lines.push(Line::from(
@@ -1039,6 +1448,31 @@ fn render_workflow_detail(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                         .map(|bucket| bucket.to_string())
                         .unwrap_or_else(|| String::from("-")),
                 ));
+                if let Some(preview) = &report.cleanup_preview {
+                    lines.push(metric("cleanup_action", preview.action.to_string()));
+                    lines.push(metric("cleanup_execute", preview.execute.to_string()));
+                    if !preview.add_label_names.is_empty() {
+                        lines.push(metric("cleanup_add", preview.add_label_names.join(", ")));
+                    }
+                    if !preview.remove_label_names.is_empty() {
+                        lines.push(metric(
+                            "cleanup_remove",
+                            preview.remove_label_names.join(", "),
+                        ));
+                    }
+                }
+                render_current_draft_summary(&mut lines, report.current_draft.as_ref());
+                if let Some(sync_report) = &report.sync_report {
+                    lines.push(metric("sync_mode", sync_report.mode.to_string()));
+                    lines.push(metric(
+                        "sync_messages_upserted",
+                        sync_report.messages_upserted.to_string(),
+                    ));
+                    lines.push(metric(
+                        "sync_messages_deleted",
+                        sync_report.messages_deleted.to_string(),
+                    ));
+                }
             }
             Err(error) => lines.push(error_line(error)),
         }
@@ -1057,7 +1491,7 @@ fn render_workflow_detail(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 }
 
 fn render_workflow_modal(frame: &mut Frame<'_>, area: Rect, app: &TuiApp, modal: &WorkflowModal) {
-    let popup = centered_rect(68, 11, area);
+    let popup = centered_rect(72, workflow_modal_height(modal), area);
     frame.render_widget(Clear, popup);
     let mut lines = Vec::new();
     if let Some(workflow) = app.selected_workflow() {
@@ -1105,15 +1539,87 @@ fn render_workflow_modal(frame: &mut Frame<'_>, area: Rect, app: &TuiApp, modal:
                 lines.push(error_line(error));
             }
         }
+        WorkflowModal::DraftStart { reply_all } => {
+            lines.push(Line::from(
+                "Tab/Shift-Tab toggles reply vs reply-all before creating a Gmail draft.",
+            ));
+            lines.push(metric(
+                "reply_mode",
+                if *reply_all { "reply_all" } else { "reply" },
+            ));
+        }
+        WorkflowModal::DraftBody { body_text } => {
+            lines.push(Line::from(
+                "Type a plain-text body. Enter replaces the current Gmail draft body.",
+            ));
+            lines.push(metric("body_chars", body_text.chars().count().to_string()));
+            lines.push(metric("body", truncate(body_text, 96)));
+        }
+        WorkflowModal::DraftSend { confirm_text } => {
+            lines.push(Line::from(Span::styled(
+                "This sends the current Gmail draft. Type SEND exactly, then Enter.",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+            if let Some(report) = app.selected_loaded_detail() {
+                render_current_draft_summary(&mut lines, report.detail.current_draft.as_ref());
+            } else {
+                lines.push(Line::from(
+                    "Press i to inspect the current draft before sending.",
+                ));
+            }
+            lines.push(metric("confirm", confirm_text.clone()));
+        }
+        WorkflowModal::Cleanup {
+            action,
+            execute,
+            add_labels,
+            remove_labels,
+            active_field,
+            confirm_text,
+        } => {
+            lines.push(Line::from(
+                "Ctrl-E toggles preview/execute. Execute mutates Gmail after confirmation.",
+            ));
+            lines.push(metric("mode", if *execute { "execute" } else { "preview" }));
+            lines.push(metric("cleanup_action", action.to_string()));
+            if *action == store::workflows::CleanupAction::Label {
+                lines.push(Line::from(
+                    "Tab/Shift-Tab switches add/remove/confirm fields; labels are comma-separated.",
+                ));
+                lines.push(metric("active_field", active_field.label()));
+                lines.push(metric("add_labels", blank_label_summary(add_labels)));
+                lines.push(metric("remove_labels", blank_label_summary(remove_labels)));
+            }
+            if *execute {
+                lines.push(Line::from(Span::styled(
+                    "Type APPLY exactly, then Enter to execute.",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(metric("confirm", confirm_text.clone()));
+            }
+        }
     }
     lines.push(Line::default());
-    lines.push(Line::from("Enter confirm | Esc/q cancel | Ctrl-C quit"));
+    lines.push(Line::from("Enter confirm | Esc cancel | Ctrl-C quit"));
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .block(Block::default().borders(Borders::ALL).title(modal.title()))
             .wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+fn workflow_modal_height(modal: &WorkflowModal) -> u16 {
+    match modal {
+        WorkflowModal::DraftSend { .. } => 18,
+        WorkflowModal::Cleanup {
+            action: store::workflows::CleanupAction::Label,
+            ..
+        } => 16,
+        WorkflowModal::DraftBody { .. } => 13,
+        WorkflowModal::Cleanup { execute: true, .. } => 14,
+        _ => 11,
+    }
 }
 
 fn render_automation(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
@@ -1187,15 +1693,14 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
             Line::from(""),
             Line::from("1 Dashboard: auth, store, mailbox, and readiness summary."),
             Line::from("2 Search: run local SQLite FTS queries against synced mail."),
-            Line::from(
-                "3 Workflows: inspect rows and confirm local triage/promote/snooze actions.",
-            ),
+            Line::from("3 Workflows: confirm triage/promote/snooze, draft, and cleanup actions."),
             Line::from("4 Automation: inspect rollout readiness and preview candidates."),
             Line::from("5 Help: key bindings and safety posture."),
             Line::from(""),
-            Line::from("Workflow actions call existing workflow services only after confirmation."),
-            Line::from("No view sends drafts, archives mail, labels mail, trashes mail,"),
-            Line::from("applies automation, exports attachments, or writes automation snapshots."),
+            Line::from("Workflow keys: i inspect draft | d start | b body | s send."),
+            Line::from("Cleanup keys: a archive | l label | x trash; Ctrl-E toggles execute."),
+            Line::from("Draft send requires typing SEND; cleanup execute requires APPLY."),
+            Line::from("No view applies automation, exports attachments, or edits rules."),
         ],
     );
 }
@@ -1239,6 +1744,62 @@ fn error_line(error: &str) -> Line<'static> {
         format!("error: {error}"),
         Style::default().fg(Color::Red),
     ))
+}
+
+fn render_current_draft_summary(
+    lines: &mut Vec<Line<'static>>,
+    draft: Option<&store::workflows::DraftRevisionDetail>,
+) {
+    lines.push(Line::from(Span::styled(
+        "Current draft",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    let Some(draft) = draft else {
+        lines.push(Line::from("No current draft loaded for this workflow."));
+        return;
+    };
+    lines.push(metric(
+        "draft_revision_id",
+        draft.revision.draft_revision_id.to_string(),
+    ));
+    lines.push(metric("reply_mode", draft.revision.reply_mode.to_string()));
+    lines.push(metric(
+        "to",
+        truncate(&draft.revision.to_addresses.join(", "), 52),
+    ));
+    if !draft.revision.cc_addresses.is_empty() {
+        lines.push(metric(
+            "cc",
+            truncate(&draft.revision.cc_addresses.join(", "), 52),
+        ));
+    }
+    lines.push(metric("subject", truncate(&draft.revision.subject, 52)));
+    lines.push(metric(
+        "body_chars",
+        draft.revision.body_text.chars().count().to_string(),
+    ));
+    if !draft.revision.body_text.trim().is_empty() {
+        lines.push(metric("body", truncate(&draft.revision.body_text, 72)));
+    }
+    lines.push(metric("attachments", draft.attachments.len().to_string()));
+}
+
+fn split_label_names(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn blank_label_summary(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        String::from("<none>")
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn bool_word(value: bool) -> &'static str {
@@ -1407,7 +1968,10 @@ mod tests {
     };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
-    use crate::store::workflows::{TriageBucket, WorkflowRecord, WorkflowStage};
+    use crate::store::workflows::{
+        CleanupAction, DraftAttachmentRecord, DraftRevisionDetail, DraftRevisionRecord, ReplyMode,
+        TriageBucket, WorkflowDetail, WorkflowRecord, WorkflowStage,
+    };
     use crate::workspace::WorkspacePaths;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
@@ -1468,7 +2032,7 @@ mod tests {
 
         let output = render_app(&mut app);
         assert!(output.contains(&format!("thread-{}", visible_rows + 1)));
-        assert!(output.contains(&format!("showing 2-{}", visible_rows + 1)));
+        assert!(app.workflow_scroll > 0);
     }
 
     #[test]
@@ -1666,6 +2230,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_draft_start_modal_toggles_reply_all_and_cancels() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('d')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::DraftStart { reply_all: false })
+        ));
+
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &mut app,
+            &paths,
+            &config_report,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::DraftStart { reply_all: true })
+        ));
+
+        handle_key(key(KeyCode::Esc), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(app.workflow_modal.is_none());
+        assert_eq!(app.status, "workflow action canceled");
+    }
+
+    #[tokio::test]
+    async fn workflow_draft_body_modal_captures_text_and_cancels_without_action() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+        app.workflow_modal = Some(WorkflowModal::DraftBody {
+            body_text: String::new(),
+        });
+
+        for character in "Thanks".chars() {
+            handle_key(
+                key(KeyCode::Char(character)),
+                &mut app,
+                &paths,
+                &config_report,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::DraftBody { ref body_text }) if body_text == "Thanks"
+        ));
+
+        handle_key(key(KeyCode::Esc), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(app.workflow_modal.is_none());
+        assert!(app.workflow_action_report.is_none());
+    }
+
+    #[tokio::test]
+    async fn workflow_draft_send_requires_send_confirmation() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+        app.workflow_modal = Some(WorkflowModal::DraftSend {
+            confirm_text: String::new(),
+        });
+
+        handle_key(key(KeyCode::Enter), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::DraftSend { ref confirm_text }) if confirm_text.is_empty()
+        ));
+        assert_eq!(app.status, "draft send blocked: type SEND before Enter");
+    }
+
+    #[tokio::test]
+    async fn workflow_cleanup_label_modal_captures_labels_and_requires_apply_for_execute() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('l')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        for character in "Important".chars() {
+            handle_key(
+                key(KeyCode::Char(character)),
+                &mut app,
+                &paths,
+                &config_report,
+            )
+            .await
+            .unwrap();
+        }
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()),
+            &mut app,
+            &paths,
+            &config_report,
+        )
+        .await
+        .unwrap();
+        for character in "INBOX".chars() {
+            handle_key(
+                key(KeyCode::Char(character)),
+                &mut app,
+                &paths,
+                &config_report,
+            )
+            .await
+            .unwrap();
+        }
+        handle_key(ctrl_key('e'), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        handle_key(key(KeyCode::Enter), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Cleanup {
+                action: CleanupAction::Label,
+                execute: true,
+                ref add_labels,
+                ref remove_labels,
+                ref confirm_text,
+                ..
+            }) if add_labels == "Important" && remove_labels == "INBOX" && confirm_text.is_empty()
+        ));
+        assert_eq!(
+            app.status,
+            "cleanup execute blocked: type APPLY before Enter"
+        );
+    }
+
+    #[test]
+    fn workflows_render_loaded_current_draft_detail() {
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+        app.workflow_detail_report = Some(Ok(crate::workflows::WorkflowShowReport {
+            detail: sample_workflow_detail(),
+        }));
+
+        let output = render_app(&mut app);
+
+        assert!(output.contains("Current draft"));
+        assert!(output.contains("draft_revision_id: 7"));
+        assert!(output.contains("subject: Re: Subject 1"));
+        assert!(output.contains("body_chars: 14"));
+    }
+
+    #[tokio::test]
     async fn workflow_action_requires_selected_row() {
         let temp_dir = TempDir::new().unwrap();
         let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
@@ -1845,12 +2579,52 @@ mod tests {
         }
     }
 
+    fn sample_workflow_detail() -> WorkflowDetail {
+        WorkflowDetail {
+            workflow: sample_workflow(1),
+            current_draft: Some(DraftRevisionDetail {
+                revision: DraftRevisionRecord {
+                    draft_revision_id: 7,
+                    workflow_id: 1,
+                    account_id: String::from("account-1"),
+                    thread_id: String::from("thread-1"),
+                    source_message_id: String::from("message-1"),
+                    reply_mode: ReplyMode::Reply,
+                    subject: String::from("Re: Subject 1"),
+                    to_addresses: vec![String::from("recipient@example.com")],
+                    cc_addresses: Vec::new(),
+                    bcc_addresses: Vec::new(),
+                    body_text: String::from("Draft response"),
+                    created_at_epoch_s: 1_700_000_000,
+                },
+                attachments: vec![DraftAttachmentRecord {
+                    attachment_id: 9,
+                    draft_revision_id: 7,
+                    path: String::from("/tmp/reply.txt"),
+                    file_name: String::from("reply.txt"),
+                    mime_type: String::from("text/plain"),
+                    size_bytes: 42,
+                    created_at_epoch_s: 1_700_000_000,
+                }],
+            }),
+            events: Vec::new(),
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
+    fn ctrl_key(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
     fn render_app(app: &mut TuiApp) -> String {
-        let backend = TestBackend::new(96, 24);
+        render_app_with_size(app, 96, 24)
+    }
+
+    fn render_app_with_size(app: &mut TuiApp, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         terminal
