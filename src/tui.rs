@@ -65,6 +65,7 @@ pub async fn run(
                 ratatui::restore();
                 let result = run_terminal_action(action, paths);
                 terminal = ratatui::try_init()?;
+                terminal.clear()?;
                 app.handle_terminal_action_result(paths, &config_report, result)
                     .await;
             }
