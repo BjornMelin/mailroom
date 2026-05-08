@@ -32,7 +32,7 @@ cargo run -- tui --search "project alpha"
 
 ## Keys
 
-- `q` or `Esc`: quit
+- `q` or `Esc`: quit when no confirmation modal is open
 - `Tab` / `Shift+Tab`: move between views
 - `1` through `5`: jump to a view
 - `/`: activate search input
@@ -48,7 +48,8 @@ Workflow view keys:
 - `p`: open a workflow-promotion confirmation
 - `z`: open a snooze / clear-snooze confirmation
 - `i`: inspect the selected workflow and current local draft detail
-- `d`: start a Gmail reply draft for the selected workflow
+- `d`: start a Gmail reply draft for the selected workflow; in the modal,
+  `Tab` / `Shift+Tab` toggles Reply vs Reply-All
 - `b`: edit the current Gmail draft body
 - `s`: send the current Gmail draft after high-friction confirmation
 - `a`: preview or execute archive cleanup
@@ -60,7 +61,8 @@ Workflow confirmation keys:
 - `Enter`: confirm the displayed action
 - `Esc`: cancel the confirmation
 - `Ctrl-C`: quit the TUI
-- `Tab` / `Shift+Tab`: cycle triage bucket or promotion target
+- `Tab` / `Shift+Tab`: cycle triage bucket, promotion target, Reply vs
+  Reply-All, or label cleanup fields depending on the active modal
 - `1` through `4`: choose `urgent`, `needs_reply_soon`, `waiting`, or `fyi`
   in a triage confirmation
 - `f` / `r`: choose `follow_up` or `ready_to_send` in a promotion confirmation

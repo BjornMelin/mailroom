@@ -199,10 +199,10 @@ impl TuiApp {
     fn normalize_workflow_selection(&mut self) {
         let row_count = self.workflow_rows().len();
         if row_count == 0 {
-            self.workflow_selection = 0;
+            self.update_workflow_selection(0);
             self.workflow_scroll = 0;
         } else if self.workflow_selection >= row_count {
-            self.workflow_selection = row_count - 1;
+            self.update_workflow_selection(row_count - 1);
         }
         self.ensure_workflow_selection_visible();
     }
@@ -227,28 +227,37 @@ impl TuiApp {
         self.ensure_workflow_selection_visible();
     }
 
+    fn update_workflow_selection(&mut self, workflow_selection: usize) {
+        if self.workflow_selection != workflow_selection {
+            self.workflow_selection = workflow_selection;
+            self.workflow_detail_report = None;
+            self.workflow_action_report = None;
+        }
+    }
+
     fn select_next_workflow(&mut self) {
         let row_count = self.workflow_rows().len();
         if row_count == 0 {
-            self.workflow_selection = 0;
+            self.update_workflow_selection(0);
             self.workflow_scroll = 0;
             return;
         }
-        self.workflow_selection = (self.workflow_selection + 1) % row_count;
+        self.update_workflow_selection((self.workflow_selection + 1) % row_count);
         self.ensure_workflow_selection_visible();
     }
 
     fn select_previous_workflow(&mut self) {
         let row_count = self.workflow_rows().len();
         if row_count == 0 {
-            self.workflow_selection = 0;
+            self.update_workflow_selection(0);
             self.workflow_scroll = 0;
             return;
         }
-        self.workflow_selection = self
-            .workflow_selection
-            .checked_sub(1)
-            .unwrap_or(row_count - 1);
+        self.update_workflow_selection(
+            self.workflow_selection
+                .checked_sub(1)
+                .unwrap_or(row_count - 1),
+        );
         self.ensure_workflow_selection_visible();
     }
 
@@ -677,13 +686,25 @@ fn accepts_plain_text_key(key: KeyEvent) -> bool {
 }
 
 fn workflow_modal_uses_text_input(modal: &WorkflowModal) -> bool {
-    matches!(
-        modal,
+    match modal {
         WorkflowModal::Snooze { .. }
-            | WorkflowModal::DraftBody { .. }
-            | WorkflowModal::DraftSend { .. }
-            | WorkflowModal::Cleanup { .. }
-    )
+        | WorkflowModal::DraftBody { .. }
+        | WorkflowModal::DraftSend { .. } => true,
+        WorkflowModal::Cleanup {
+            action: store::workflows::CleanupAction::Label,
+            active_field: CleanupField::AddLabels | CleanupField::RemoveLabels,
+            ..
+        } => true,
+        WorkflowModal::Cleanup {
+            execute: true,
+            active_field: CleanupField::Confirm,
+            ..
+        } => true,
+        WorkflowModal::Triage { .. }
+        | WorkflowModal::Promote { .. }
+        | WorkflowModal::DraftStart { .. }
+        | WorkflowModal::Cleanup { .. } => false,
+    }
 }
 
 fn push_workflow_modal_text(modal: &mut WorkflowModal, value: char) {
@@ -2017,6 +2038,20 @@ mod tests {
     }
 
     #[test]
+    fn workflow_selection_change_clears_stale_reports() {
+        let mut app = TuiApp::new(snapshot_with_workflows(2), None);
+        app.view = View::Workflows;
+        app.workflow_detail_report = Some(Err(String::from("old detail error")));
+        app.workflow_action_report = Some(Err(String::from("old action error")));
+
+        app.select_next_workflow();
+
+        assert_eq!(app.selected_thread_id().as_deref(), Some("thread-2"));
+        assert!(app.workflow_detail_report.is_none());
+        assert!(app.workflow_action_report.is_none());
+    }
+
+    #[test]
     fn workflow_selection_scrolls_to_keep_selected_row_inside_rendered_viewport() {
         let visible_rows = workflow_table_row_capacity(ratatui::layout::Rect::new(0, 0, 59, 19));
         let mut app = TuiApp::new(snapshot_with_workflows(visible_rows + 2), None);
@@ -2381,6 +2416,25 @@ mod tests {
             app.status,
             "cleanup execute blocked: type APPLY before Enter"
         );
+    }
+
+    #[tokio::test]
+    async fn workflow_cleanup_archive_preview_does_not_capture_hidden_text() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('a')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        handle_key(key(KeyCode::Char('q')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(app.workflow_modal.is_none());
+        assert_eq!(app.status, "workflow action canceled");
     }
 
     #[test]
