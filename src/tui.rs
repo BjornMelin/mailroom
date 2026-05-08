@@ -17,6 +17,7 @@ use tokio::task::spawn_blocking;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const TUI_SEARCH_LIMIT: usize = 15;
+const TUI_WORKFLOW_WINDOW_LIMIT: usize = 50;
 const VIEWS: [View; 5] = [
     View::Dashboard,
     View::Search,
@@ -75,6 +76,7 @@ struct TuiApp {
     search_editing: bool,
     search_report: Option<std::result::Result<SearchReport, String>>,
     workflow_selection: usize,
+    workflow_scroll: usize,
     workflow_modal: Option<WorkflowModal>,
     workflow_action_report: Option<std::result::Result<WorkflowActionReport, String>>,
     status: String,
@@ -95,6 +97,7 @@ impl TuiApp {
             search_editing: false,
             search_report: None,
             workflow_selection: 0,
+            workflow_scroll: 0,
             workflow_modal: None,
             workflow_action_report: None,
             status: String::from("TUI ready: local workflow actions require explicit confirmation"),
@@ -171,12 +174,38 @@ impl TuiApp {
             .map(|workflow| workflow.thread_id.clone())
     }
 
+    fn visible_workflow_rows(
+        &self,
+    ) -> impl Iterator<Item = (usize, &store::workflows::WorkflowRecord)> {
+        self.workflow_rows()
+            .iter()
+            .enumerate()
+            .skip(self.workflow_scroll)
+            .take(TUI_WORKFLOW_WINDOW_LIMIT)
+    }
+
     fn normalize_workflow_selection(&mut self) {
         let row_count = self.workflow_rows().len();
         if row_count == 0 {
             self.workflow_selection = 0;
+            self.workflow_scroll = 0;
         } else if self.workflow_selection >= row_count {
             self.workflow_selection = row_count - 1;
+        }
+        self.ensure_workflow_selection_visible();
+    }
+
+    fn ensure_workflow_selection_visible(&mut self) {
+        let row_count = self.workflow_rows().len();
+        if row_count <= TUI_WORKFLOW_WINDOW_LIMIT {
+            self.workflow_scroll = 0;
+            return;
+        }
+
+        if self.workflow_selection < self.workflow_scroll {
+            self.workflow_scroll = self.workflow_selection;
+        } else if self.workflow_selection >= self.workflow_scroll + TUI_WORKFLOW_WINDOW_LIMIT {
+            self.workflow_scroll = self.workflow_selection + 1 - TUI_WORKFLOW_WINDOW_LIMIT;
         }
     }
 
@@ -184,21 +213,25 @@ impl TuiApp {
         let row_count = self.workflow_rows().len();
         if row_count == 0 {
             self.workflow_selection = 0;
+            self.workflow_scroll = 0;
             return;
         }
         self.workflow_selection = (self.workflow_selection + 1) % row_count;
+        self.ensure_workflow_selection_visible();
     }
 
     fn select_previous_workflow(&mut self) {
         let row_count = self.workflow_rows().len();
         if row_count == 0 {
             self.workflow_selection = 0;
+            self.workflow_scroll = 0;
             return;
         }
         self.workflow_selection = self
             .workflow_selection
             .checked_sub(1)
             .unwrap_or(row_count - 1);
+        self.ensure_workflow_selection_visible();
     }
 
     fn open_workflow_modal(&mut self, modal: WorkflowModal) {
@@ -227,12 +260,16 @@ impl TuiApp {
                 workflows::promote_workflow(config_report, thread_id, target).await
             }
             WorkflowModal::Snooze { until } => {
-                let until = if until.trim().is_empty() {
-                    None
+                if until.trim().is_empty() {
+                    workflows::clear_workflow_snooze(config_report, thread_id).await
                 } else {
-                    Some(until.trim().to_owned())
-                };
-                workflows::snooze_workflow(config_report, thread_id, until).await
+                    workflows::snooze_workflow(
+                        config_report,
+                        thread_id,
+                        Some(until.trim().to_owned()),
+                    )
+                    .await
+                }
             }
         };
 
@@ -838,40 +875,35 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
                 .split(area);
-            let rows = report
-                .workflows
-                .iter()
-                .take(50)
-                .enumerate()
-                .map(|(index, workflow)| {
-                    let marker = if index == app.workflow_selection {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    let mut row = Row::new(vec![
-                        Cell::from(marker),
-                        Cell::from(workflow.workflow_id.to_string()),
-                        Cell::from(workflow.current_stage.to_string()),
-                        Cell::from(
-                            workflow
-                                .triage_bucket
-                                .map(|bucket| bucket.to_string())
-                                .unwrap_or_else(|| String::from("-")),
-                        ),
-                        Cell::from(truncate(&workflow.latest_message_subject, 44)),
-                        Cell::from(truncate(&workflow.latest_message_from_header, 28)),
-                    ]);
-                    if index == app.workflow_selection {
-                        row = row.style(
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        );
-                    }
-                    row
-                });
+            let rows = app.visible_workflow_rows().map(|(index, workflow)| {
+                let marker = if index == app.workflow_selection {
+                    ">"
+                } else {
+                    " "
+                };
+                let mut row = Row::new(vec![
+                    Cell::from(marker),
+                    Cell::from(workflow.workflow_id.to_string()),
+                    Cell::from(workflow.current_stage.to_string()),
+                    Cell::from(
+                        workflow
+                            .triage_bucket
+                            .map(|bucket| bucket.to_string())
+                            .unwrap_or_else(|| String::from("-")),
+                    ),
+                    Cell::from(truncate(&workflow.latest_message_subject, 44)),
+                    Cell::from(truncate(&workflow.latest_message_from_header, 28)),
+                ]);
+                if index == app.workflow_selection {
+                    row = row.style(
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+                row
+            });
             let table = Table::new(
                 rows,
                 [
@@ -888,8 +920,10 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(Block::default().borders(Borders::ALL).title(format!(
-                "Workflows ({}) - j/k select, t triage, p promote, z snooze",
-                report.workflows.len()
+                "Workflows ({}, showing {}-{}) - j/k select, t triage, p promote, z snooze",
+                report.workflows.len(),
+                app.workflow_scroll.saturating_add(1).min(report.workflows.len()),
+                (app.workflow_scroll + TUI_WORKFLOW_WINDOW_LIMIT).min(report.workflows.len()),
             )));
             frame.render_widget(table, chunks[0]);
             render_workflow_detail(frame, chunks[1], app);
@@ -1243,8 +1277,8 @@ fn error_chain(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, WorkflowModal, failed_diagnostic_reports,
-        handle_key, load_snapshot, render, truncate,
+        Snapshot, TUI_SEARCH_LIMIT, TUI_WORKFLOW_WINDOW_LIMIT, TuiApp, View, WorkflowModal,
+        failed_diagnostic_reports, handle_key, load_snapshot, render, truncate,
     };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
@@ -1294,6 +1328,23 @@ mod tests {
     }
 
     #[test]
+    fn workflow_selection_scrolls_to_keep_selected_row_visible() {
+        let mut app = TuiApp::new(snapshot_with_workflows(TUI_WORKFLOW_WINDOW_LIMIT + 2), None);
+        app.view = View::Workflows;
+
+        for _ in 0..TUI_WORKFLOW_WINDOW_LIMIT {
+            app.select_next_workflow();
+        }
+
+        assert_eq!(app.workflow_selection, TUI_WORKFLOW_WINDOW_LIMIT);
+        assert_eq!(app.workflow_scroll, 1);
+
+        let output = render_app(&app);
+        assert!(output.contains("thread-51"));
+        assert!(output.contains("showing 2-51"));
+    }
+
+    #[test]
     fn workflow_promote_modal_cycles_only_local_targets() {
         let mut modal = WorkflowModal::Promote {
             target: WorkflowStage::FollowUp,
@@ -1314,6 +1365,15 @@ mod tests {
                 target: WorkflowStage::FollowUp
             }
         ));
+    }
+
+    #[test]
+    fn workflow_snooze_clear_modal_describes_stage_preserving_clear() {
+        let modal = WorkflowModal::Snooze {
+            until: String::new(),
+        };
+
+        assert_eq!(modal.action_summary(), "clear workflow snooze");
     }
 
     #[tokio::test]

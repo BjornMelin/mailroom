@@ -24,7 +24,7 @@ confirmation prompts:
 - promote to `follow_up`
 - promote to `ready_to_send`
 - snooze until an operator-entered `YYYY-MM-DD`
-- clear snooze
+- clear snooze without changing the current workflow stage
 
 The TUI must call the existing workflow service functions for those actions and
 refresh the workflow list after a successful action.
@@ -71,4 +71,3 @@ event logging, and account resolution.
 Rejected because draft send, cleanup execution, and closed promotion include
 Gmail mutations and need stronger confirmation surfaces than the first local
 workflow action slice.
-

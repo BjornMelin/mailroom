@@ -299,6 +299,14 @@ pub(crate) struct SnoozeWorkflowInput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ClearWorkflowSnoozeInput {
+    pub(crate) account_id: String,
+    pub(crate) thread_id: String,
+    pub(crate) snapshot: WorkflowMessageSnapshot,
+    pub(crate) updated_at_epoch_s: i64,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct UpsertDraftRevisionInput {
     pub(crate) account_id: String,
     pub(crate) thread_id: String,

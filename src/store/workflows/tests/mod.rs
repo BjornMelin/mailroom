@@ -1,12 +1,13 @@
 use super::{
-    ApplyCleanupInput, AttachmentInput, CleanupAction, MarkSentInput, PromoteWorkflowInput,
-    RemoteDraftStateInput, ReplyMode, RestoreDraftStateInput, RetireDraftStateInput,
-    SetTriageStateInput, TriageBucket, UpsertDraftRevisionInput, WorkflowListFilter,
-    WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage, WorkflowStoreWriteError, apply_cleanup,
+    ApplyCleanupInput, AttachmentInput, CleanupAction, ClearWorkflowSnoozeInput, MarkSentInput,
+    PromoteWorkflowInput, RemoteDraftStateInput, ReplyMode, RestoreDraftStateInput,
+    RetireDraftStateInput, SetTriageStateInput, SnoozeWorkflowInput, TriageBucket,
+    UpsertDraftRevisionInput, WorkflowListFilter, WorkflowMessageSnapshot, WorkflowRecord,
+    WorkflowStage, WorkflowStoreWriteError, apply_cleanup, clear_workflow_snooze,
     get_workflow_detail, inspect_workflows, list_workflows, mark_sent,
     restore_draft_state_with_expected_version, retire_draft_state, set_remote_draft_state,
-    set_remote_draft_state_with_expected_version, set_triage_state, upsert_draft_revision,
-    upsert_stage, write,
+    set_remote_draft_state_with_expected_version, set_triage_state, snooze_workflow,
+    upsert_draft_revision, upsert_stage, write,
 };
 use crate::config::resolve;
 use crate::store::{accounts, init};

@@ -439,3 +439,38 @@ pub async fn snooze_workflow(
     )
     .await
 }
+
+pub async fn clear_workflow_snooze(
+    config_report: &ConfigReport,
+    thread_id: String,
+) -> WorkflowResult<WorkflowActionReport> {
+    store::init(config_report).map_err(|source| WorkflowServiceError::StoreInit { source })?;
+    let account_id = resolve_workflow_account_id(config_report, Some(&thread_id)).await?;
+    let snapshot = latest_thread_snapshot(config_report, &account_id, &thread_id).await?;
+    let database_path = config_report.config.store.database_path.clone();
+    let busy_timeout_ms = config_report.config.store.busy_timeout_ms;
+    let updated_at_epoch_s = current_epoch_seconds()?;
+    let workflow = join_blocking(
+        spawn_blocking(move || {
+            store::workflows::clear_workflow_snooze(
+                &database_path,
+                busy_timeout_ms,
+                &store::workflows::ClearWorkflowSnoozeInput {
+                    account_id,
+                    thread_id,
+                    snapshot,
+                    updated_at_epoch_s,
+                },
+            )
+        }),
+        "workflow.clear_snooze",
+    )
+    .await?;
+    action_report(
+        config_report,
+        WorkflowAction::WorkflowSnoozeCleared,
+        workflow,
+        None,
+    )
+    .await
+}

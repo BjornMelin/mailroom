@@ -57,7 +57,7 @@ Workflow confirmation keys:
   in a triage confirmation
 - `f` / `r`: choose `follow_up` or `ready_to_send` in a promotion confirmation
 - text input: type `YYYY-MM-DD` in a snooze confirmation; leave empty to clear
-  the snooze
+  the snooze without changing the current workflow stage
 
 ## Safety Contract
 
