@@ -23,6 +23,8 @@ use std::time::Duration;
 use tokio::task::spawn_blocking;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const MIN_TERMINAL_WIDTH: u16 = 80;
+const MIN_TERMINAL_HEIGHT: u16 = 24;
 const TUI_SEARCH_LIMIT: usize = 15;
 const TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT: usize = 50;
 const VIEWS: [View; 5] = [
@@ -96,6 +98,7 @@ struct TuiApp {
     workflow_modal: Option<WorkflowModal>,
     workflow_detail_report: Option<std::result::Result<WorkflowShowReport, String>>,
     workflow_action_report: Option<std::result::Result<WorkflowActionReport, String>>,
+    help_overlay: bool,
     automation_modal: Option<AutomationModal>,
     automation_detail_report: Option<std::result::Result<automation::AutomationShowReport, String>>,
     automation_action_report: Option<std::result::Result<AutomationActionReport, String>>,
@@ -126,6 +129,7 @@ impl TuiApp {
             workflow_modal: None,
             workflow_detail_report: None,
             workflow_action_report: None,
+            help_overlay: false,
             automation_modal: None,
             automation_detail_report: None,
             automation_action_report: None,
@@ -181,6 +185,7 @@ impl TuiApp {
         let next = (self.view.index() + 1) % VIEWS.len();
         self.view = VIEWS[next];
         self.search_editing = false;
+        self.help_overlay = false;
         self.workflow_modal = None;
         self.automation_modal = None;
     }
@@ -189,6 +194,7 @@ impl TuiApp {
         let previous = self.view.index().checked_sub(1).unwrap_or(VIEWS.len() - 1);
         self.view = VIEWS[previous];
         self.search_editing = false;
+        self.help_overlay = false;
         self.workflow_modal = None;
         self.automation_modal = None;
     }
@@ -1572,6 +1578,17 @@ async fn handle_key(
         return Ok(true);
     }
 
+    if app.help_overlay {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::F(1) | KeyCode::Esc | KeyCode::Char('q') => {
+                app.help_overlay = false;
+                app.status = String::from("help overlay closed");
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     if app.workflow_modal.is_some() {
         return handle_workflow_modal_key(key, app, paths, config_report).await;
     }
@@ -1582,6 +1599,12 @@ async fn handle_key(
 
     if app.search_editing {
         return handle_search_key(key, app, config_report).await;
+    }
+
+    if matches!(key.code, KeyCode::Char('?') | KeyCode::F(1)) {
+        app.help_overlay = true;
+        app.status = String::from("help overlay active; ? Esc or q closes it");
+        return Ok(false);
     }
 
     if app.view == View::Workflows {
@@ -1688,22 +1711,27 @@ async fn handle_key(
         }
         KeyCode::Char('1') => {
             app.view = View::Dashboard;
+            app.help_overlay = false;
             Ok(false)
         }
         KeyCode::Char('2') => {
             app.view = View::Search;
+            app.help_overlay = false;
             Ok(false)
         }
         KeyCode::Char('3') => {
             app.view = View::Workflows;
+            app.help_overlay = false;
             Ok(false)
         }
         KeyCode::Char('4') => {
             app.view = View::Automation;
+            app.help_overlay = false;
             Ok(false)
         }
         KeyCode::Char('5') => {
             app.view = View::Help;
+            app.help_overlay = false;
             Ok(false)
         }
         KeyCode::Char('/') => {
@@ -1887,6 +1915,11 @@ async fn handle_search_key(
 
 fn render(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
+    if terminal_too_small(area) {
+        render_terminal_too_small(frame, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1911,6 +1944,48 @@ fn render(frame: &mut Frame<'_>, app: &mut TuiApp) {
     if let Some(modal) = &app.automation_modal {
         render_automation_modal(frame, area, app, modal);
     }
+    if app.help_overlay {
+        render_help_overlay(frame, area);
+    }
+}
+
+fn terminal_too_small(area: Rect) -> bool {
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT
+}
+
+fn render_terminal_too_small(frame: &mut Frame<'_>, area: Rect) {
+    render_text_panel(
+        frame,
+        area,
+        "Terminal too small",
+        vec![
+            Line::from(format!(
+                "Need at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}; current terminal is {}x{}.",
+                area.width, area.height
+            )),
+            Line::from("Resize the terminal or run the CLI command directly."),
+            Line::from("The TUI has not started any mailbox mutation."),
+        ],
+    );
+}
+
+fn status_label_and_style(status: &str) -> (&'static str, Style) {
+    if status.contains("failed")
+        || status.contains("error")
+        || status.contains("blocked")
+        || status.contains("invalid")
+        || status.contains("unavailable")
+    {
+        ("ERROR", Style::default().fg(Color::Red))
+    } else if status.contains("canceled")
+        || status.contains("skipped")
+        || status.contains("missing")
+        || status.contains("warning")
+    {
+        ("WARN", Style::default().fg(Color::Yellow))
+    } else {
+        ("OK", Style::default().fg(Color::Green))
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
@@ -1930,11 +2005,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
+    let (status_label, status_style) = status_label_and_style(&app.status);
     let footer = Paragraph::new(Text::from(vec![Line::from(vec![
         Span::raw(
-            "q quit | tab view | 1-5 jump | / search | r refresh | workflows: j/k t/p/z d/b/s a/l/x | automation: v/g/n/o/a/e | ",
+            "q quit | ? help | tab view | 1-5 jump | / search | r refresh | workflows: j/k t/p/z d/b/s a/l/x | automation: v/g/n/o/a/e | ",
         ),
-        Span::styled(&app.status, Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{status_label}: "), status_style),
+        Span::styled(&app.status, status_style),
     ])]));
     frame.render_widget(footer, area);
 }
@@ -1986,6 +2063,12 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
             "automation runs",
             report.store.automation_run_count.to_string(),
         ));
+        if report.store.message_count == 0 {
+            left.push(Line::default());
+            left.push(Line::from(
+                "No synced mail in the local store yet; run sync before mailbox triage.",
+            ));
+        }
     }
     frame.render_widget(
         Paragraph::new(Text::from(left))
@@ -2077,6 +2160,22 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 }
 
 fn render_search_table(frame: &mut Frame<'_>, area: Rect, report: &SearchReport) {
+    if report.results.is_empty() {
+        render_text_panel(
+            frame,
+            area,
+            "Search results (0)",
+            vec![
+                Line::from(format!("No local results for \"{}\".", report.terms)),
+                Line::from(
+                    "Try broader terms, confirm sync has run, or use the CLI search filters.",
+                ),
+                Line::from("This view reads SQLite only and does not call Gmail."),
+            ],
+        );
+        return;
+    }
+
     let rows = report.results.iter().map(|result| {
         Row::new(vec![
             Cell::from(truncate(&result.subject, 44)),
@@ -2115,6 +2214,21 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &mut TuiApp) {
 
     match &app.snapshot.workflows {
         Ok(report) => {
+            if report.workflows.is_empty() {
+                render_text_panel(
+                    frame,
+                    chunks[0],
+                    "Workflows (0)",
+                    vec![
+                        Line::from("No local workflow rows yet."),
+                        Line::from("Create workflow state with `triage set` from the CLI first."),
+                        Line::from("This view will update after refresh or restart."),
+                    ],
+                );
+                render_workflow_detail(frame, chunks[1], app);
+                return;
+            }
+
             let rows = app.visible_workflow_rows().map(|(index, workflow)| {
                 let marker = if index == app.workflow_selection {
                     ">"
@@ -2588,6 +2702,23 @@ fn render_automation_run_panel(
         frame.render_widget(table, chunks[0]);
         render_automation_candidate_detail(frame, chunks[1], app);
     } else {
+        if rollout.candidates.is_empty() {
+            render_text_panel(
+                frame,
+                chunks[0],
+                "Rollout candidate preview (0)",
+                vec![
+                    Line::from("No automation candidates in the current rollout preview."),
+                    Line::from(
+                        "Validate rules with v, review suggestions with g, or sync more mail.",
+                    ),
+                    Line::from("Only persisted run snapshots can be applied."),
+                ],
+            );
+            render_text_panel(frame, chunks[1], "Automation keys", automation_key_lines());
+            return;
+        }
+
         let rows = rollout.candidates.iter().take(50).map(|candidate| {
             Row::new(vec![
                 Cell::from(truncate(&candidate.rule_id, 24)),
@@ -2618,19 +2749,18 @@ fn render_automation_run_panel(
                 .title("Rollout candidate preview"),
         );
         frame.render_widget(table, chunks[0]);
-        render_text_panel(
-            frame,
-            chunks[1],
-            "Automation keys",
-            vec![
-                Line::from("v validate rules | g suggest disabled starters"),
-                Line::from("n create persisted preview run | o load run"),
-                Line::from("j/k move saved-run candidates after load"),
-                Line::from("a apply loaded run after typing APPLY"),
-                Line::from("e edit rules in $EDITOR, then validate"),
-            ],
-        );
+        render_text_panel(frame, chunks[1], "Automation keys", automation_key_lines());
     }
+}
+
+fn automation_key_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from("v validate rules | g suggest disabled starters"),
+        Line::from("n create persisted preview run | o load run"),
+        Line::from("j/k move saved-run candidates after load"),
+        Line::from("a apply loaded run after typing APPLY"),
+        Line::from("e edit rules in $EDITOR, then validate"),
+    ]
 }
 
 fn render_automation_action_panel(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
@@ -2807,29 +2937,34 @@ fn automation_match_summary(reason: &store::automation::AutomationMatchReason) -
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    render_text_panel(
-        frame,
-        area,
-        "Help",
-        vec![
-            Line::from("Operator shell"),
-            Line::from(""),
-            Line::from("1 Dashboard: auth, store, mailbox, and readiness summary."),
-            Line::from("2 Search: run local SQLite FTS queries against synced mail."),
-            Line::from("3 Workflows: confirm triage/promote/snooze, draft, and cleanup actions."),
-            Line::from("4 Automation: validate rules, persist runs, inspect candidates, apply."),
-            Line::from("5 Help: key bindings and safety posture."),
-            Line::from(""),
-            Line::from("Workflow keys: i inspect draft | d start | b body | s send."),
-            Line::from("Cleanup keys: a archive | l label | x trash; Ctrl-E toggles execute."),
-            Line::from("Draft send requires typing SEND; cleanup execute requires APPLY."),
-            Line::from(
-                "Automation keys: v validate | g suggest | n run | o show | a apply | e edit.",
-            ),
-            Line::from("Automation apply requires a persisted run and typing APPLY."),
-            Line::from("No view applies live rollout output or exports attachments."),
-        ],
-    );
+    render_text_panel(frame, area, "Help", help_lines());
+}
+
+fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
+    let popup = centered_rect(86, 18, area);
+    frame.render_widget(Clear, popup);
+    render_text_panel(frame, popup, "Help overlay (?/Esc/q closes)", help_lines());
+}
+
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from("Operator shell"),
+        Line::from(""),
+        Line::from("? / F1: open this overlay without leaving the current view."),
+        Line::from("q / Esc: quit when no prompt is active; close overlay when it is active."),
+        Line::from("1 Dashboard: auth, store, mailbox, and readiness summary."),
+        Line::from("2 Search: run local SQLite FTS queries against synced mail."),
+        Line::from("3 Workflows: confirm triage/promote/snooze, draft, and cleanup actions."),
+        Line::from("4 Automation: validate rules, persist runs, inspect candidates, apply."),
+        Line::from("5 Help: key bindings and safety posture."),
+        Line::from(""),
+        Line::from("Workflow keys: i inspect draft | d start | b body | s send."),
+        Line::from("Cleanup keys: a archive | l label | x trash; Ctrl-E toggles execute."),
+        Line::from("Draft send requires typing SEND; cleanup execute requires APPLY."),
+        Line::from("Automation keys: v validate | g suggest | n run | o show | a apply | e edit."),
+        Line::from("Automation apply requires a persisted run and typing APPLY."),
+        Line::from("No view applies live rollout output or exports attachments."),
+    ]
 }
 
 fn render_text_panel(frame: &mut Frame<'_>, area: Rect, title: &str, lines: Vec<Line<'static>>) {
@@ -3089,14 +3224,17 @@ fn error_chain(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutomationModal, CleanupField, DEFAULT_AUTOMATION_RUN_LIMIT, Snapshot, TUI_SEARCH_LIMIT,
-        TerminalAction, TuiApp, View, WorkflowModal, automation_match_summary,
-        ensure_automation_rules_file, failed_diagnostic_reports, format_epoch_day_utc, handle_key,
-        load_snapshot, parse_editor_command, render, snooze_until_validation_error, truncate,
-        workflow_table_row_capacity,
+        AutomationModal, CleanupField, DEFAULT_AUTOMATION_RUN_LIMIT, MIN_TERMINAL_HEIGHT,
+        MIN_TERMINAL_WIDTH, Snapshot, TUI_SEARCH_LIMIT, TerminalAction, TuiApp, View,
+        WorkflowModal, automation_match_summary, ensure_automation_rules_file,
+        failed_diagnostic_reports, format_epoch_day_utc, handle_key, load_snapshot,
+        parse_editor_command, render, snooze_until_validation_error, status_label_and_style,
+        truncate, workflow_table_row_capacity,
     };
+    use crate::auth::AuthStatusReport;
     use crate::config::{self, WorkspaceConfig};
     use crate::mailbox::{self, SearchRequest};
+    use crate::store::StoreDoctorReport;
     use crate::store::automation::{
         AutomationActionKind, AutomationActionSnapshot, AutomationMatchReason,
         AutomationRunCandidateRecord, AutomationRunDetail, AutomationRunRecord,
@@ -3136,6 +3274,31 @@ mod tests {
         assert_eq!(app.view, View::Help);
         app.next_view();
         assert_eq!(app.view, View::Dashboard);
+    }
+
+    #[tokio::test]
+    async fn help_overlay_opens_without_changing_view_and_closes_in_place() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('?')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert_eq!(app.view, View::Workflows);
+        assert!(app.help_overlay);
+
+        let output = render_app(&mut app);
+        assert!(output.contains("Help overlay"));
+        assert!(output.contains("No view applies live rollout output"));
+
+        handle_key(key(KeyCode::Esc), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert_eq!(app.view, View::Workflows);
+        assert!(!app.help_overlay);
     }
 
     #[test]
@@ -3198,6 +3361,19 @@ mod tests {
         let output = render_app(&mut app);
         assert!(output.contains(&format!("thread-{}", visible_rows + 1)));
         assert!(app.workflow_scroll > 0);
+    }
+
+    #[test]
+    fn large_workflow_render_smoke_stays_windowed() {
+        let mut app = TuiApp::new(snapshot_with_workflows(1_000), None);
+        app.view = View::Workflows;
+
+        let output = render_app_with_size(&mut app, 140, 30);
+
+        assert!(output.contains("Workflows (1000"));
+        assert!(output.contains("Subject 1"));
+        assert!(!output.contains("Subject 1000"));
+        assert!(app.workflow_window_limit < 1_000);
     }
 
     #[test]
@@ -3699,6 +3875,43 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_renders_empty_local_store_guidance() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_empty_dashboard(&paths, config_report), None);
+
+        let output = render_app(&mut app);
+
+        assert!(output.contains("messages: 0"));
+        assert!(output.contains("No synced mail in the local store yet"));
+    }
+
+    #[test]
+    fn narrow_terminal_renders_guard_instead_of_main_layout() {
+        let mut app = TuiApp::new(empty_snapshot(), None);
+
+        let output =
+            render_app_with_size(&mut app, MIN_TERMINAL_WIDTH - 1, MIN_TERMINAL_HEIGHT - 1);
+
+        assert!(output.contains("Terminal too small"));
+        assert!(output.contains(&format!(
+            "Need at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}"
+        )));
+        assert!(!output.contains("workflow action"));
+    }
+
+    #[test]
+    fn footer_status_uses_textual_severity_labels() {
+        assert_eq!(status_label_and_style("reports refreshed").0, "OK");
+        assert_eq!(status_label_and_style("workflow action canceled").0, "WARN");
+        assert_eq!(
+            status_label_and_style("automation apply blocked").0,
+            "ERROR"
+        );
+    }
+
+    #[test]
     fn search_renders_search_errors() {
         let mut app = TuiApp::new(empty_snapshot(), Some(String::from("invoice")));
         app.search_report = Some(Err(String::from("search failed")));
@@ -3706,6 +3919,18 @@ mod tests {
         let output = render_app(&mut app);
 
         assert!(output.contains("error: search failed"));
+    }
+
+    #[test]
+    fn search_renders_empty_results_guidance() {
+        let mut app = TuiApp::new(empty_snapshot(), Some(String::from("invoice")));
+        app.search_report = Some(Ok(empty_search_report("invoice")));
+
+        let output = render_app(&mut app);
+
+        assert!(output.contains("Search results (0)"));
+        assert!(output.contains("No local results for \"invoice\""));
+        assert!(output.contains("does not call Gmail"));
     }
 
     #[test]
@@ -3717,6 +3942,18 @@ mod tests {
         let output = render_app(&mut app);
 
         assert!(output.contains("error: workflow report failed"));
+    }
+
+    #[test]
+    fn workflows_render_empty_results_guidance() {
+        let mut app = TuiApp::new(snapshot_with_workflows(0), None);
+        app.view = View::Workflows;
+
+        let output = render_app(&mut app);
+
+        assert!(output.contains("Workflows (0)"));
+        assert!(output.contains("No local workflow rows yet"));
+        assert!(output.contains("No workflow row selected"));
     }
 
     #[test]
@@ -3745,6 +3982,19 @@ mod tests {
         let output = render_app(&mut app);
 
         assert!(output.contains("error: automation report failed"));
+    }
+
+    #[test]
+    fn automation_renders_empty_rollout_guidance() {
+        let mut app = TuiApp::new(empty_snapshot(), None);
+        app.view = View::Automation;
+        app.snapshot.automation = Ok(empty_automation_rollout_report());
+
+        let output = render_app(&mut app);
+
+        assert!(output.contains("Rollout candidate preview (0)"));
+        assert!(output.contains("No automation candidates"));
+        assert!(output.contains("Only persisted run snapshots can be applied"));
     }
 
     #[tokio::test]
@@ -4014,6 +4264,102 @@ mod tests {
             workflows: (1..=count).map(sample_workflow).collect(),
         });
         snapshot
+    }
+
+    fn snapshot_with_empty_dashboard(
+        paths: &WorkspacePaths,
+        config_report: config::ConfigReport,
+    ) -> Snapshot {
+        let mut snapshot = empty_snapshot();
+        snapshot.doctor = Ok(crate::doctor::DoctorReport {
+            config: config_report.clone(),
+            workspace: crate::workspace::DoctorReport::inspect(paths),
+            store: StoreDoctorReport {
+                config: config_report.clone(),
+                database_exists: false,
+                database_path: config_report.config.store.database_path.clone(),
+                known_migrations: 16,
+                schema_version: None,
+                pending_migrations: None,
+                pragmas: None,
+                mailbox: None,
+                workflows: None,
+                automation: None,
+            },
+            auth: AuthStatusReport {
+                configured: false,
+                oauth_client_source: String::from("none"),
+                oauth_client_path: paths.auth_dir.join("client_secret.json"),
+                oauth_client_exists: false,
+                credential_path: paths.auth_dir.join("credentials.json"),
+                credential_exists: false,
+                access_token_expires_at_epoch_s: None,
+                scopes: Vec::new(),
+                active_account: None,
+            },
+        });
+        snapshot.verification = Ok(empty_verification_report());
+        snapshot
+    }
+
+    fn empty_verification_report() -> crate::audit::VerificationAuditReport {
+        crate::audit::VerificationAuditReport {
+            account_id: None,
+            authenticated: false,
+            rules_file_path: ".mailroom/automation.toml".into(),
+            rules_file_exists: false,
+            bootstrap_query: None,
+            bootstrap_recent_days: None,
+            mailbox: None,
+            store: crate::audit::VerificationStoreSummary {
+                database_exists: false,
+                schema_version: None,
+                message_count: 0,
+                indexed_message_count: 0,
+                attachment_count: 0,
+                vaulted_attachment_count: 0,
+                attachment_export_count: 0,
+                workflow_count: 0,
+                automation_run_count: 0,
+            },
+            label_summary: crate::audit::VerificationLabelSummary {
+                total_label_count: 0,
+                empty_user_label_count: 0,
+                normalized_overlap_count: 0,
+                numbered_overlap_count: 0,
+            },
+            readiness: crate::audit::VerificationReadiness {
+                manual_mutation_ready: false,
+                sender_rule_tuning_ready: false,
+                list_header_rule_tuning_ready: false,
+                draft_send_canary_ready: false,
+                deep_audit_sync_recommended: false,
+            },
+            warnings: Vec::new(),
+            next_steps: Vec::new(),
+        }
+    }
+
+    fn empty_search_report(terms: &str) -> mailbox::SearchReport {
+        mailbox::SearchReport {
+            terms: terms.to_owned(),
+            label: None,
+            from_address: None,
+            after_epoch_ms: None,
+            before_epoch_ms: None,
+            limit: TUI_SEARCH_LIMIT,
+            results: Vec::new(),
+        }
+    }
+
+    fn empty_automation_rollout_report() -> crate::automation::AutomationRolloutReport {
+        let mut report = sample_automation_rollout_report();
+        report.verification = empty_verification_report();
+        report.selected_rule_ids = Vec::new();
+        report.selected_rule_count = 0;
+        report.candidate_count = 0;
+        report.candidates = Vec::new();
+        report
     }
 
     fn sample_automation_rollout_report() -> crate::automation::AutomationRolloutReport {
