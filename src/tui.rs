@@ -63,7 +63,7 @@ pub async fn run(
             }
             if let Some(action) = app.pending_terminal_action.take() {
                 ratatui::restore();
-                let result = run_terminal_action(action, paths, &config_report);
+                let result = run_terminal_action(action, paths);
                 terminal = ratatui::try_init()?;
                 app.handle_terminal_action_result(paths, &config_report, result)
                     .await;
@@ -1292,16 +1292,10 @@ fn parse_positive_i64(value: &str) -> Option<i64> {
 
 fn run_terminal_action(
     action: TerminalAction,
-    _paths: &workspace::WorkspacePaths,
-    config_report: &ConfigReport,
+    paths: &workspace::WorkspacePaths,
 ) -> std::result::Result<TerminalActionReport, String> {
     match action {
-        TerminalAction::EditAutomationRules => {
-            let paths = crate::configured_paths(config_report).map_err(|error| {
-                format!("failed to resolve configured workspace paths: {error}")
-            })?;
-            edit_automation_rules_blocking(&paths)
-        }
+        TerminalAction::EditAutomationRules => edit_automation_rules_blocking(paths),
     }
 }
 
