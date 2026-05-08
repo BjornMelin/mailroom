@@ -73,19 +73,21 @@ The verification and hardening slice is now in place too:
 - read-only `audit verification` output for deep-sync readiness, header coverage, and first-wave rollout posture
 - operator runbooks for deep audit syncs, self-canary send tests, and micro-batch archive/label rollout
 
-The read-only TUI foundation is now in place too:
+The TUI foundation and first local workflow action slice are now in place too:
 
 - Ratatui shell at `mailroom tui`
 - Dashboard, Search, Workflows, Automation, and Help panes
 - local search through the existing SQLite-backed search service
 - workflow and automation inspection through the existing service reports
-- no Gmail write, draft send, cleanup apply, attachment export, or automation
-  apply controls
+- selected workflow detail plus confirmed local triage, promote, and snooze
+  actions through existing workflow services
+- no draft send, cleanup apply, attachment export, automation apply, or direct
+  Gmail mutation controls
 
-The next implementation slices should focus on production TUI action flows and
-the real personal ruleset rollout on top of the shipped audit surface, not
-re-open auth, account, config, store, sync, workflow, attachment, or automation
-ownership.
+The next implementation slices should focus on production TUI draft/cleanup
+flows, automation action flows, and the real personal ruleset rollout on top of
+the shipped audit surface, not re-open auth, account, config, store, sync,
+workflow, attachment, or automation ownership.
 
 ## Deferred
 
@@ -103,5 +105,6 @@ An operator can set up the workspace, sync mailbox metadata locally, search it
 quickly, classify thread work for follow-up, stage and send replies in a durable
 local system, catalog/export attachments intentionally, and execute reviewed
 manual or automation-driven cleanup actions intentionally. The same operator can
-also open a read-only terminal shell to inspect readiness, search, workflow
-queue, and automation rollout posture from the existing local state.
+also open a terminal shell to inspect readiness, search, workflow queue,
+automation rollout posture, and confirmed local workflow actions from the
+existing local state.

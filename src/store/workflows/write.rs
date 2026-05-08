@@ -1,9 +1,10 @@
 use super::read::load_workflow;
 use super::{
-    ApplyCleanupInput, AttachmentInput, CleanupAction, DraftRevisionRecord, MarkSentInput,
-    PromoteWorkflowInput, RemoteDraftStateInput, RestoreDraftStateInput, RetireDraftStateInput,
-    SetTriageStateInput, SnoozeWorkflowInput, TriageBucket, UpsertDraftRevisionInput,
-    WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage, WorkflowStoreWriteError,
+    ApplyCleanupInput, AttachmentInput, CleanupAction, ClearWorkflowSnoozeInput,
+    DraftRevisionRecord, MarkSentInput, PromoteWorkflowInput, RemoteDraftStateInput,
+    RestoreDraftStateInput, RetireDraftStateInput, SetTriageStateInput, SnoozeWorkflowInput,
+    TriageBucket, UpsertDraftRevisionInput, WorkflowMessageSnapshot, WorkflowRecord, WorkflowStage,
+    WorkflowStoreWriteError,
 };
 use crate::store::connection;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -158,6 +159,49 @@ pub(crate) fn snooze_workflow(
             note: None,
             payload_json: &json!({
                 "snoozed_until_epoch_s": input.snoozed_until_epoch_s,
+            })
+            .to_string(),
+            created_at_epoch_s: input.updated_at_epoch_s,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(workflow)
+}
+
+pub(crate) fn clear_workflow_snooze(
+    database_path: &Path,
+    busy_timeout_ms: u64,
+    input: &ClearWorkflowSnoozeInput,
+) -> Result<WorkflowRecord, WorkflowStoreWriteError> {
+    let mut connection = connection::open_or_create(database_path, busy_timeout_ms)
+        .map_err(|source| WorkflowStoreWriteError::open_database(database_path, source))?;
+    let transaction = connection.transaction()?;
+    let existing =
+        load_workflow(&transaction, &input.account_id, &input.thread_id)?.ok_or_else(|| {
+            WorkflowStoreWriteError::MissingWorkflow {
+                thread_id: input.thread_id.clone(),
+            }
+        })?;
+    let from_stage = existing.current_stage;
+    let expected_workflow_version = Some(existing.workflow_version);
+    let mut workflow = existing;
+
+    workflow.snoozed_until_epoch_s = None;
+    workflow.updated_at_epoch_s = input.updated_at_epoch_s;
+    apply_snapshot(&mut workflow, &input.snapshot);
+
+    let workflow = persist_workflow(&transaction, workflow, expected_workflow_version)?;
+    insert_event(
+        &transaction,
+        &workflow,
+        &WorkflowEventInsert {
+            event_kind: "workflow_snooze_cleared",
+            from_stage: Some(from_stage),
+            to_stage: Some(workflow.current_stage),
+            triage_bucket: workflow.triage_bucket,
+            note: None,
+            payload_json: &json!({
+                "snoozed_until_epoch_s": null,
             })
             .to_string(),
             created_at_epoch_s: input.updated_at_epoch_s,

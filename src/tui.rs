@@ -2,20 +2,22 @@ use crate::automation::{self, AutomationRolloutRequest, DEFAULT_AUTOMATION_ROLLO
 use crate::config::ConfigReport;
 use crate::doctor::DoctorReport;
 use crate::mailbox::{self, SearchReport, SearchRequest};
-use crate::workflows::WorkflowListReport;
-use crate::{audit, workspace};
+use crate::store;
+use crate::workflows::{WorkflowActionReport, WorkflowListReport};
+use crate::{audit, workflows, workspace};
 use anyhow::Result as AnyhowResult;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
 use std::time::Duration;
 use tokio::task::spawn_blocking;
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const TUI_SEARCH_LIMIT: usize = 15;
+const TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT: usize = 50;
 const VIEWS: [View; 5] = [
     View::Dashboard,
     View::Search,
@@ -40,7 +42,7 @@ pub async fn run(
     let _guard = TerminalGuard;
 
     loop {
-        terminal.draw(|frame| render(frame, &app))?;
+        terminal.draw(|frame| render(frame, &mut app))?;
 
         if event::poll(EVENT_POLL_INTERVAL)? {
             let Event::Key(key) = event::read()? else {
@@ -73,6 +75,11 @@ struct TuiApp {
     search_input: String,
     search_editing: bool,
     search_report: Option<std::result::Result<SearchReport, String>>,
+    workflow_selection: usize,
+    workflow_scroll: usize,
+    workflow_window_limit: usize,
+    workflow_modal: Option<WorkflowModal>,
+    workflow_action_report: Option<std::result::Result<WorkflowActionReport, String>>,
     status: String,
 }
 
@@ -90,9 +97,12 @@ impl TuiApp {
             search_input,
             search_editing: false,
             search_report: None,
-            status: String::from(
-                "read-only mode: no Gmail or local mutation actions are available",
-            ),
+            workflow_selection: 0,
+            workflow_scroll: 0,
+            workflow_window_limit: TUI_WORKFLOW_FALLBACK_WINDOW_LIMIT,
+            workflow_modal: None,
+            workflow_action_report: None,
+            status: String::from("TUI ready: local workflow actions require explicit confirmation"),
         }
     }
 
@@ -131,19 +141,266 @@ impl TuiApp {
 
     async fn refresh(&mut self, paths: &workspace::WorkspacePaths, config_report: &ConfigReport) {
         self.snapshot = load_snapshot(paths, config_report).await;
-        self.status = String::from("read-only reports refreshed");
+        self.normalize_workflow_selection();
+        self.status = String::from("reports refreshed");
     }
 
     fn next_view(&mut self) {
         let next = (self.view.index() + 1) % VIEWS.len();
         self.view = VIEWS[next];
         self.search_editing = false;
+        self.workflow_modal = None;
     }
 
     fn previous_view(&mut self) {
         let previous = self.view.index().checked_sub(1).unwrap_or(VIEWS.len() - 1);
         self.view = VIEWS[previous];
         self.search_editing = false;
+        self.workflow_modal = None;
+    }
+
+    fn workflow_rows(&self) -> &[store::workflows::WorkflowRecord] {
+        self.snapshot
+            .workflows
+            .as_ref()
+            .map(|report| report.workflows.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn selected_workflow(&self) -> Option<&store::workflows::WorkflowRecord> {
+        self.workflow_rows().get(self.workflow_selection)
+    }
+
+    fn selected_thread_id(&self) -> Option<String> {
+        self.selected_workflow()
+            .map(|workflow| workflow.thread_id.clone())
+    }
+
+    fn visible_workflow_rows(
+        &self,
+    ) -> impl Iterator<Item = (usize, &store::workflows::WorkflowRecord)> {
+        self.workflow_rows()
+            .iter()
+            .enumerate()
+            .skip(self.workflow_scroll)
+            .take(self.workflow_window_limit)
+    }
+
+    fn normalize_workflow_selection(&mut self) {
+        let row_count = self.workflow_rows().len();
+        if row_count == 0 {
+            self.workflow_selection = 0;
+            self.workflow_scroll = 0;
+        } else if self.workflow_selection >= row_count {
+            self.workflow_selection = row_count - 1;
+        }
+        self.ensure_workflow_selection_visible();
+    }
+
+    fn ensure_workflow_selection_visible(&mut self) {
+        let workflow_window_limit = self.workflow_window_limit.max(1);
+        let row_count = self.workflow_rows().len();
+        if row_count <= workflow_window_limit {
+            self.workflow_scroll = 0;
+            return;
+        }
+
+        if self.workflow_selection < self.workflow_scroll {
+            self.workflow_scroll = self.workflow_selection;
+        } else if self.workflow_selection >= self.workflow_scroll + workflow_window_limit {
+            self.workflow_scroll = self.workflow_selection + 1 - workflow_window_limit;
+        }
+    }
+
+    fn set_workflow_window_limit(&mut self, workflow_window_limit: usize) {
+        self.workflow_window_limit = workflow_window_limit.max(1);
+        self.ensure_workflow_selection_visible();
+    }
+
+    fn select_next_workflow(&mut self) {
+        let row_count = self.workflow_rows().len();
+        if row_count == 0 {
+            self.workflow_selection = 0;
+            self.workflow_scroll = 0;
+            return;
+        }
+        self.workflow_selection = (self.workflow_selection + 1) % row_count;
+        self.ensure_workflow_selection_visible();
+    }
+
+    fn select_previous_workflow(&mut self) {
+        let row_count = self.workflow_rows().len();
+        if row_count == 0 {
+            self.workflow_selection = 0;
+            self.workflow_scroll = 0;
+            return;
+        }
+        self.workflow_selection = self
+            .workflow_selection
+            .checked_sub(1)
+            .unwrap_or(row_count - 1);
+        self.ensure_workflow_selection_visible();
+    }
+
+    fn open_workflow_modal(&mut self, modal: WorkflowModal) {
+        if self.selected_workflow().is_none() {
+            self.status = String::from("workflow action unavailable: no workflow row selected");
+            return;
+        }
+        self.workflow_modal = Some(modal);
+        self.status = String::from("workflow confirmation active; Enter confirms, Esc cancels");
+    }
+
+    fn open_triage_modal(&mut self) {
+        let bucket = self
+            .selected_workflow()
+            .and_then(|workflow| workflow.triage_bucket)
+            .unwrap_or(store::workflows::TriageBucket::NeedsReplySoon);
+        self.open_workflow_modal(WorkflowModal::Triage { bucket });
+    }
+
+    fn open_promote_modal(&mut self) {
+        let target = self
+            .selected_workflow()
+            .map(|workflow| match workflow.current_stage {
+                store::workflows::WorkflowStage::ReadyToSend => {
+                    store::workflows::WorkflowStage::ReadyToSend
+                }
+                _ => store::workflows::WorkflowStage::FollowUp,
+            })
+            .unwrap_or(store::workflows::WorkflowStage::FollowUp);
+        self.open_workflow_modal(WorkflowModal::Promote { target });
+    }
+
+    fn open_snooze_modal(&mut self) {
+        let until = self
+            .selected_workflow()
+            .and_then(|workflow| workflow.snoozed_until_epoch_s)
+            .map(format_epoch_day_utc)
+            .unwrap_or_default();
+        self.open_workflow_modal(WorkflowModal::Snooze { until });
+    }
+
+    async fn confirm_workflow_modal(&mut self, config_report: &ConfigReport) {
+        if let Some(WorkflowModal::Snooze { until }) = &self.workflow_modal
+            && let Some(error) = snooze_until_validation_error(until)
+        {
+            self.workflow_action_report = Some(Err(error.to_owned()));
+            self.status = error.to_owned();
+            return;
+        }
+
+        let Some(modal) = self.workflow_modal.take() else {
+            return;
+        };
+        let Some(thread_id) = self.selected_thread_id() else {
+            self.status = String::from("workflow action skipped: no workflow row selected");
+            return;
+        };
+        let selected_thread_id = thread_id.clone();
+        let result = match modal {
+            WorkflowModal::Triage { bucket } => {
+                workflows::set_triage(config_report, thread_id, bucket, None).await
+            }
+            WorkflowModal::Promote { target } => {
+                workflows::promote_workflow(config_report, thread_id, target).await
+            }
+            WorkflowModal::Snooze { until } => {
+                if until.trim().is_empty() {
+                    workflows::clear_workflow_snooze(config_report, thread_id).await
+                } else {
+                    workflows::snooze_workflow(
+                        config_report,
+                        thread_id,
+                        Some(until.trim().to_owned()),
+                    )
+                    .await
+                }
+            }
+        };
+
+        match result {
+            Ok(report) => {
+                let action = report.action.to_string();
+                self.workflow_action_report = Some(Ok(report));
+                self.refresh_workflows(config_report, Some(&selected_thread_id))
+                    .await;
+                self.status = format!("workflow action complete: {action}");
+            }
+            Err(error) => {
+                self.workflow_action_report = Some(Err(error.to_string()));
+                self.status = String::from("workflow action failed");
+            }
+        }
+    }
+
+    async fn refresh_workflows(
+        &mut self,
+        config_report: &ConfigReport,
+        selected_thread_id: Option<&str>,
+    ) {
+        self.snapshot.workflows = workflows::list_workflows_read_only(config_report, None, None)
+            .await
+            .map_err(|error| error.to_string());
+        if let Some(thread_id) = selected_thread_id
+            && let Some(index) = self
+                .workflow_rows()
+                .iter()
+                .position(|workflow| workflow.thread_id == thread_id)
+        {
+            self.workflow_selection = index;
+        }
+        self.normalize_workflow_selection();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkflowModal {
+    Triage {
+        bucket: store::workflows::TriageBucket,
+    },
+    Promote {
+        target: store::workflows::WorkflowStage,
+    },
+    Snooze {
+        until: String,
+    },
+}
+
+impl WorkflowModal {
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Triage { .. } => "Confirm triage set",
+            Self::Promote { .. } => "Confirm workflow promote",
+            Self::Snooze { .. } => "Confirm workflow snooze",
+        }
+    }
+
+    fn action_summary(&self) -> String {
+        match self {
+            Self::Triage { bucket } => format!("set triage bucket to {bucket}"),
+            Self::Promote { target } => format!("promote workflow to {target}"),
+            Self::Snooze { until } if until.trim().is_empty() => {
+                String::from("clear workflow snooze")
+            }
+            Self::Snooze { until } => format!("snooze workflow until {}", until.trim()),
+        }
+    }
+
+    fn cycle_next(&mut self) {
+        match self {
+            Self::Triage { bucket } => *bucket = next_triage_bucket(*bucket),
+            Self::Promote { target } => *target = next_tui_promote_target(*target),
+            Self::Snooze { .. } => {}
+        }
+    }
+
+    fn cycle_previous(&mut self) {
+        match self {
+            Self::Triage { bucket } => *bucket = previous_triage_bucket(*bucket),
+            Self::Promote { target } => *target = previous_tui_promote_target(*target),
+            Self::Snooze { .. } => {}
+        }
     }
 }
 
@@ -247,8 +504,38 @@ async fn handle_key(
         return Ok(true);
     }
 
+    if app.workflow_modal.is_some() {
+        return handle_workflow_modal_key(key, app, config_report).await;
+    }
+
     if app.search_editing {
         return handle_search_key(key, app, config_report).await;
+    }
+
+    if app.view == View::Workflows {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.select_next_workflow();
+                return Ok(false);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.select_previous_workflow();
+                return Ok(false);
+            }
+            KeyCode::Char('t') => {
+                app.open_triage_modal();
+                return Ok(false);
+            }
+            KeyCode::Char('p') => {
+                app.open_promote_modal();
+                return Ok(false);
+            }
+            KeyCode::Char('z') => {
+                app.open_snooze_modal();
+                return Ok(false);
+            }
+            _ => {}
+        }
     }
 
     match key.code {
@@ -295,6 +582,86 @@ async fn handle_key(
     }
 }
 
+async fn handle_workflow_modal_key(
+    key: KeyEvent,
+    app: &mut TuiApp,
+    config_report: &ConfigReport,
+) -> AnyhowResult<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.workflow_modal = None;
+            app.status = String::from("workflow action canceled");
+        }
+        KeyCode::Enter => app.confirm_workflow_modal(config_report).await,
+        KeyCode::Tab | KeyCode::Right => {
+            if let Some(modal) = &mut app.workflow_modal {
+                modal.cycle_next();
+            }
+        }
+        KeyCode::BackTab | KeyCode::Left => {
+            if let Some(modal) = &mut app.workflow_modal {
+                modal.cycle_previous();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(WorkflowModal::Snooze { until }) = &mut app.workflow_modal {
+                until.pop();
+            }
+        }
+        KeyCode::Char('1') => match &mut app.workflow_modal {
+            Some(WorkflowModal::Triage { bucket }) => {
+                *bucket = store::workflows::TriageBucket::Urgent;
+            }
+            Some(WorkflowModal::Snooze { until }) => until.push('1'),
+            _ => {}
+        },
+        KeyCode::Char('2') => match &mut app.workflow_modal {
+            Some(WorkflowModal::Triage { bucket }) => {
+                *bucket = store::workflows::TriageBucket::NeedsReplySoon;
+            }
+            Some(WorkflowModal::Snooze { until }) => until.push('2'),
+            _ => {}
+        },
+        KeyCode::Char('3') => match &mut app.workflow_modal {
+            Some(WorkflowModal::Triage { bucket }) => {
+                *bucket = store::workflows::TriageBucket::Waiting;
+            }
+            Some(WorkflowModal::Snooze { until }) => until.push('3'),
+            _ => {}
+        },
+        KeyCode::Char('4') => match &mut app.workflow_modal {
+            Some(WorkflowModal::Triage { bucket }) => {
+                *bucket = store::workflows::TriageBucket::Fyi;
+            }
+            Some(WorkflowModal::Snooze { until }) => until.push('4'),
+            _ => {}
+        },
+        KeyCode::Char('f') => match &mut app.workflow_modal {
+            Some(WorkflowModal::Promote { target }) => {
+                *target = store::workflows::WorkflowStage::FollowUp;
+            }
+            Some(WorkflowModal::Snooze { until }) => until.push('f'),
+            _ => {}
+        },
+        KeyCode::Char('r') => match &mut app.workflow_modal {
+            Some(WorkflowModal::Promote { target }) => {
+                *target = store::workflows::WorkflowStage::ReadyToSend;
+            }
+            Some(WorkflowModal::Snooze { until }) => until.push('r'),
+            _ => {}
+        },
+        KeyCode::Char(value) => {
+            if let Some(WorkflowModal::Snooze { until }) = &mut app.workflow_modal
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            {
+                until.push(value);
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
 async fn handle_search_key(
     key: KeyEvent,
     app: &mut TuiApp,
@@ -325,7 +692,7 @@ async fn handle_search_key(
     }
 }
 
-fn render(frame: &mut Frame<'_>, app: &TuiApp) {
+fn render(frame: &mut Frame<'_>, app: &mut TuiApp) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -345,6 +712,9 @@ fn render(frame: &mut Frame<'_>, app: &TuiApp) {
         View::Help => render_help(frame, chunks[1]),
     }
     render_footer(frame, chunks[2], app);
+    if let Some(modal) = &app.workflow_modal {
+        render_workflow_modal(frame, area, app, modal);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
@@ -365,7 +735,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     let footer = Paragraph::new(Text::from(vec![Line::from(vec![
-        Span::raw("q quit | tab view | 1-5 jump | / search | enter submit | r refresh | "),
+        Span::raw("q quit | tab view | 1-5 jump | / search | r refresh | workflows: j/k t/p/z | "),
         Span::styled(&app.status, Style::default().fg(Color::Yellow)),
     ])]));
     frame.render_widget(footer, area);
@@ -538,11 +908,23 @@ fn render_search_table(frame: &mut Frame<'_>, area: Rect, report: &SearchReport)
     frame.render_widget(table, area);
 }
 
-fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
+fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &mut TuiApp) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(area);
+    app.set_workflow_window_limit(workflow_table_row_capacity(chunks[0]));
+
     match &app.snapshot.workflows {
         Ok(report) => {
-            let rows = report.workflows.iter().take(50).map(|workflow| {
-                Row::new(vec![
+            let rows = app.visible_workflow_rows().map(|(index, workflow)| {
+                let marker = if index == app.workflow_selection {
+                    ">"
+                } else {
+                    " "
+                };
+                let mut row = Row::new(vec![
+                    Cell::from(marker),
                     Cell::from(workflow.workflow_id.to_string()),
                     Cell::from(workflow.current_stage.to_string()),
                     Cell::from(
@@ -553,11 +935,21 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                     ),
                     Cell::from(truncate(&workflow.latest_message_subject, 44)),
                     Cell::from(truncate(&workflow.latest_message_from_header, 28)),
-                ])
+                ]);
+                if index == app.workflow_selection {
+                    row = row.style(
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+                row
             });
             let table = Table::new(
                 rows,
                 [
+                    Constraint::Length(1),
                     Constraint::Length(6),
                     Constraint::Length(14),
                     Constraint::Length(18),
@@ -566,18 +958,162 @@ fn render_workflows(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                 ],
             )
             .header(
-                Row::new(vec!["ID", "Stage", "Bucket", "Subject", "From"])
+                Row::new(vec!["", "ID", "Stage", "Bucket", "Subject", "From"])
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!("Workflows ({})", report.workflows.len())),
-            );
-            frame.render_widget(table, area);
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "Workflows ({}, showing {}-{}) - j/k select, t triage, p promote, z snooze",
+                report.workflows.len(),
+                app.workflow_scroll.saturating_add(1).min(report.workflows.len()),
+                (app.workflow_scroll + app.workflow_window_limit).min(report.workflows.len()),
+            )));
+            frame.render_widget(table, chunks[0]);
+            render_workflow_detail(frame, chunks[1], app);
         }
         Err(error) => render_text_panel(frame, area, "Workflows", vec![error_line(error)]),
     }
+}
+
+fn render_workflow_detail(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
+    let mut lines = Vec::new();
+    if let Some(workflow) = app.selected_workflow() {
+        lines.push(Line::from(Span::styled(
+            "Selected workflow",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(metric("thread", truncate(&workflow.thread_id, 36)));
+        lines.push(metric("stage", workflow.current_stage.to_string()));
+        lines.push(metric(
+            "bucket",
+            workflow
+                .triage_bucket
+                .map(|bucket| bucket.to_string())
+                .unwrap_or_else(|| String::from("-")),
+        ));
+        lines.push(metric(
+            "snoozed_until_epoch_s",
+            workflow
+                .snoozed_until_epoch_s
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("-")),
+        ));
+        lines.push(metric(
+            "subject",
+            truncate(&workflow.latest_message_subject, 48),
+        ));
+        lines.push(metric(
+            "from",
+            truncate(&workflow.latest_message_from_header, 42),
+        ));
+        if !workflow.note.trim().is_empty() {
+            lines.push(metric("note", truncate(&workflow.note, 72)));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from("Actions require confirmation:"));
+        lines.push(Line::from("t triage bucket | p promote | z snooze/clear"));
+        lines.push(Line::from(
+            "Promote targets are follow_up or ready_to_send only.",
+        ));
+    } else {
+        lines.push(Line::from("No workflow row selected."));
+        lines.push(Line::from(
+            "Create workflow state with `triage set` from the CLI first.",
+        ));
+    }
+
+    if let Some(result) = &app.workflow_action_report {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Latest action",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        match result {
+            Ok(report) => {
+                lines.push(metric("action", report.action.to_string()));
+                lines.push(metric("stage", report.workflow.current_stage.to_string()));
+                lines.push(metric(
+                    "bucket",
+                    report
+                        .workflow
+                        .triage_bucket
+                        .map(|bucket| bucket.to_string())
+                        .unwrap_or_else(|| String::from("-")),
+                ));
+            }
+            Err(error) => lines.push(error_line(error)),
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Workflow detail"),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_workflow_modal(frame: &mut Frame<'_>, area: Rect, app: &TuiApp, modal: &WorkflowModal) {
+    let popup = centered_rect(68, 11, area);
+    frame.render_widget(Clear, popup);
+    let mut lines = Vec::new();
+    if let Some(workflow) = app.selected_workflow() {
+        lines.push(metric("thread", truncate(&workflow.thread_id, 48)));
+        lines.push(metric(
+            "subject",
+            truncate(&workflow.latest_message_subject, 58),
+        ));
+    }
+    lines.push(metric("action", modal.action_summary()));
+    match modal {
+        WorkflowModal::Triage { .. } => {
+            lines.push(Line::from(
+                "Tab/Shift-Tab or 1-4 changes the triage bucket.",
+            ));
+            lines.push(Line::from(
+                "1 urgent | 2 needs_reply_soon | 3 waiting | 4 fyi",
+            ));
+        }
+        WorkflowModal::Promote { .. } => {
+            lines.push(Line::from(
+                "Tab/Shift-Tab changes the target. f follow_up | r ready_to_send",
+            ));
+            lines.push(Line::from("Closed promotion stays CLI-only in this issue."));
+        }
+        WorkflowModal::Snooze { until } => {
+            lines.push(Line::from(
+                "Type YYYY-MM-DD, or leave empty to clear snooze.",
+            ));
+            let until_value = if until.is_empty() {
+                String::from("<clear>")
+            } else {
+                until.clone()
+            };
+            let until_style = if snooze_until_validation_error(until).is_some() {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("until: ", Style::default().fg(Color::Cyan)),
+                Span::styled(until_value, until_style),
+            ]));
+            if let Some(error) = snooze_until_validation_error(until) {
+                lines.push(error_line(error));
+            }
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from("Enter confirm | Esc/q cancel | Ctrl-C quit"));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(Block::default().borders(Borders::ALL).title(modal.title()))
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn render_automation(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
@@ -647,18 +1183,19 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         area,
         "Help",
         vec![
-            Line::from("Read-only operator shell"),
+            Line::from("Operator shell"),
             Line::from(""),
             Line::from("1 Dashboard: auth, store, mailbox, and readiness summary."),
             Line::from("2 Search: run local SQLite FTS queries against synced mail."),
-            Line::from("3 Workflows: inspect thread workflow queue rows."),
+            Line::from(
+                "3 Workflows: inspect rows and confirm local triage/promote/snooze actions.",
+            ),
             Line::from("4 Automation: inspect rollout readiness and preview candidates."),
             Line::from("5 Help: key bindings and safety posture."),
             Line::from(""),
-            Line::from(
-                "No view sends drafts, archives mail, labels mail, trashes mail, applies automation,",
-            ),
-            Line::from("exports attachments, or writes automation snapshots."),
+            Line::from("Workflow actions call existing workflow services only after confirmation."),
+            Line::from("No view sends drafts, archives mail, labels mail, trashes mail,"),
+            Line::from("applies automation, exports attachments, or writes automation snapshots."),
         ],
     );
 }
@@ -708,6 +1245,134 @@ fn bool_word(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn workflow_table_row_capacity(area: Rect) -> usize {
+    // Table data rows are the outer area minus block borders and the header row.
+    usize::from(area.height.saturating_sub(3)).max(1)
+}
+
+fn snooze_until_validation_error(value: &str) -> Option<&'static str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut parts = value.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Some("invalid snooze date: use YYYY-MM-DD or clear the field");
+    };
+    if year.len() != 4
+        || month.len() != 2
+        || day.len() != 2
+        || !year.chars().all(|character| character.is_ascii_digit())
+        || !month.chars().all(|character| character.is_ascii_digit())
+        || !day.chars().all(|character| character.is_ascii_digit())
+    {
+        return Some("invalid snooze date: use YYYY-MM-DD or clear the field");
+    }
+
+    let year = year.parse::<i64>().ok()?;
+    let month = month.parse::<u32>().ok()?;
+    let day = day.parse::<u32>().ok()?;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return Some("invalid snooze date: month must be 01-12"),
+    };
+    if day == 0 || day > max_day {
+        return Some("invalid snooze date: day is out of range");
+    }
+    None
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn format_epoch_day_utc(epoch_s: i64) -> String {
+    let days_since_unix_epoch = epoch_s.div_euclid(86_400);
+    let (year, month, day) = civil_from_unix_days(days_since_unix_epoch);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_unix_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
+    let adjusted_days = days_since_unix_epoch + 719_468;
+    let era = if adjusted_days >= 0 {
+        adjusted_days
+    } else {
+        adjusted_days - 146_096
+    } / 146_097;
+    let day_of_era = adjusted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month, day)
+}
+
+fn next_triage_bucket(value: store::workflows::TriageBucket) -> store::workflows::TriageBucket {
+    use store::workflows::TriageBucket;
+    match value {
+        TriageBucket::Urgent => TriageBucket::NeedsReplySoon,
+        TriageBucket::NeedsReplySoon => TriageBucket::Waiting,
+        TriageBucket::Waiting => TriageBucket::Fyi,
+        TriageBucket::Fyi => TriageBucket::Urgent,
+    }
+}
+
+fn previous_triage_bucket(value: store::workflows::TriageBucket) -> store::workflows::TriageBucket {
+    use store::workflows::TriageBucket;
+    match value {
+        TriageBucket::Urgent => TriageBucket::Fyi,
+        TriageBucket::NeedsReplySoon => TriageBucket::Urgent,
+        TriageBucket::Waiting => TriageBucket::NeedsReplySoon,
+        TriageBucket::Fyi => TriageBucket::Waiting,
+    }
+}
+
+fn next_tui_promote_target(
+    value: store::workflows::WorkflowStage,
+) -> store::workflows::WorkflowStage {
+    match value {
+        store::workflows::WorkflowStage::FollowUp => store::workflows::WorkflowStage::ReadyToSend,
+        _ => store::workflows::WorkflowStage::FollowUp,
+    }
+}
+
+fn previous_tui_promote_target(
+    value: store::workflows::WorkflowStage,
+) -> store::workflows::WorkflowStage {
+    next_tui_promote_target(value)
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(height.min(area.height)),
+            Constraint::Fill(1),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
+}
+
 fn truncate(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
@@ -736,12 +1401,15 @@ fn error_chain(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, failed_diagnostic_reports, load_snapshot, render,
-        truncate,
+        Snapshot, TUI_SEARCH_LIMIT, TuiApp, View, WorkflowModal, failed_diagnostic_reports,
+        format_epoch_day_utc, handle_key, load_snapshot, render, snooze_until_validation_error,
+        truncate, workflow_table_row_capacity,
     };
     use crate::config;
     use crate::mailbox::{self, SearchRequest};
+    use crate::store::workflows::{TriageBucket, WorkflowRecord, WorkflowStage};
     use crate::workspace::WorkspacePaths;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tempfile::TempDir;
@@ -773,6 +1441,250 @@ mod tests {
     }
 
     #[test]
+    fn workflow_selection_wraps_over_available_rows() {
+        let mut app = TuiApp::new(snapshot_with_workflows(2), None);
+        app.view = View::Workflows;
+
+        app.select_previous_workflow();
+        assert_eq!(app.selected_thread_id().as_deref(), Some("thread-2"));
+
+        app.select_next_workflow();
+        assert_eq!(app.selected_thread_id().as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn workflow_selection_scrolls_to_keep_selected_row_inside_rendered_viewport() {
+        let visible_rows = workflow_table_row_capacity(ratatui::layout::Rect::new(0, 0, 59, 19));
+        let mut app = TuiApp::new(snapshot_with_workflows(visible_rows + 2), None);
+        app.view = View::Workflows;
+        app.set_workflow_window_limit(visible_rows);
+
+        for _ in 0..visible_rows {
+            app.select_next_workflow();
+        }
+
+        assert_eq!(app.workflow_selection, visible_rows);
+        assert_eq!(app.workflow_scroll, 1);
+
+        let output = render_app(&mut app);
+        assert!(output.contains(&format!("thread-{}", visible_rows + 1)));
+        assert!(output.contains(&format!("showing 2-{}", visible_rows + 1)));
+    }
+
+    #[test]
+    fn workflow_promote_modal_cycles_only_local_targets() {
+        let mut modal = WorkflowModal::Promote {
+            target: WorkflowStage::FollowUp,
+        };
+
+        modal.cycle_next();
+        assert!(matches!(
+            modal,
+            WorkflowModal::Promote {
+                target: WorkflowStage::ReadyToSend
+            }
+        ));
+
+        modal.cycle_next();
+        assert!(matches!(
+            modal,
+            WorkflowModal::Promote {
+                target: WorkflowStage::FollowUp
+            }
+        ));
+    }
+
+    #[test]
+    fn workflow_snooze_clear_modal_describes_stage_preserving_clear() {
+        let modal = WorkflowModal::Snooze {
+            until: String::new(),
+        };
+
+        assert_eq!(modal.action_summary(), "clear workflow snooze");
+    }
+
+    #[test]
+    fn workflow_snooze_validation_accepts_empty_clear_and_valid_dates() {
+        assert_eq!(snooze_until_validation_error(""), None);
+        assert_eq!(snooze_until_validation_error("2026-05-09"), None);
+        assert_eq!(snooze_until_validation_error("2028-02-29"), None);
+    }
+
+    #[test]
+    fn workflow_snooze_validation_rejects_invalid_dates() {
+        assert_eq!(
+            snooze_until_validation_error("tomorrow"),
+            Some("invalid snooze date: use YYYY-MM-DD or clear the field")
+        );
+        assert_eq!(
+            snooze_until_validation_error("2026-13-09"),
+            Some("invalid snooze date: month must be 01-12")
+        );
+        assert_eq!(
+            snooze_until_validation_error("2026-02-29"),
+            Some("invalid snooze date: day is out of range")
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_key_opens_and_cancels_triage_modal() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        let should_quit = handle_key(key(KeyCode::Char('t')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(!should_quit);
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Triage {
+                bucket: TriageBucket::Urgent
+            })
+        ));
+
+        handle_key(key(KeyCode::Esc), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(app.workflow_modal.is_none());
+        assert_eq!(app.status, "workflow action canceled");
+    }
+
+    #[tokio::test]
+    async fn workflow_modals_seed_from_selected_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut snapshot = snapshot_with_workflows(1);
+        let workflow = snapshot
+            .workflows
+            .as_mut()
+            .unwrap()
+            .workflows
+            .first_mut()
+            .unwrap();
+        workflow.current_stage = WorkflowStage::ReadyToSend;
+        workflow.triage_bucket = Some(TriageBucket::Waiting);
+        workflow.snoozed_until_epoch_s = Some(0);
+        let mut app = TuiApp::new(snapshot, None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('t')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Triage {
+                bucket: TriageBucket::Waiting
+            })
+        ));
+
+        app.workflow_modal = None;
+        handle_key(key(KeyCode::Char('p')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Promote {
+                target: WorkflowStage::ReadyToSend
+            })
+        ));
+
+        app.workflow_modal = None;
+        handle_key(key(KeyCode::Char('z')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Snooze { ref until }) if until == "1970-01-01"
+        ));
+    }
+
+    #[test]
+    fn epoch_day_format_uses_utc_calendar_day() {
+        assert_eq!(format_epoch_day_utc(0), "1970-01-01");
+        assert_eq!(format_epoch_day_utc(86_400), "1970-01-02");
+    }
+
+    #[tokio::test]
+    async fn workflow_snooze_modal_captures_text_input() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('z')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+        for character in "2026-05-09".chars() {
+            handle_key(
+                key(KeyCode::Char(character)),
+                &mut app,
+                &paths,
+                &config_report,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Snooze { ref until }) if until == "2026-05-09"
+        ));
+    }
+
+    #[tokio::test]
+    async fn workflow_snooze_modal_blocks_invalid_date_before_service_call() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+        app.workflow_modal = Some(WorkflowModal::Snooze {
+            until: String::from("tomorrow"),
+        });
+
+        handle_key(key(KeyCode::Enter), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            app.workflow_modal,
+            Some(WorkflowModal::Snooze { ref until }) if until == "tomorrow"
+        ));
+        assert_eq!(
+            app.status,
+            "invalid snooze date: use YYYY-MM-DD or clear the field"
+        );
+        let output = render_app(&mut app);
+        assert!(output.contains("error: invalid snooze date"));
+    }
+
+    #[tokio::test]
+    async fn workflow_action_requires_selected_row() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = WorkspacePaths::from_repo_root(temp_dir.path().to_path_buf());
+        let config_report = config::resolve(&paths).unwrap();
+        let mut app = TuiApp::new(snapshot_with_workflows(0), None);
+        app.view = View::Workflows;
+
+        handle_key(key(KeyCode::Char('p')), &mut app, &paths, &config_report)
+            .await
+            .unwrap();
+
+        assert!(app.workflow_modal.is_none());
+        assert_eq!(
+            app.status,
+            "workflow action unavailable: no workflow row selected"
+        );
+    }
+
+    #[test]
     fn failed_diagnostic_reports_preserve_task_failure_context() {
         let (doctor, verification) = failed_diagnostic_reports("worker panicked");
 
@@ -792,7 +1704,7 @@ mod tests {
         app.snapshot.doctor = Err(String::from("doctor failed"));
         app.snapshot.verification = Err(String::from("verification failed"));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: doctor failed"));
         assert!(output.contains("error: verification failed"));
@@ -803,7 +1715,7 @@ mod tests {
         let mut app = TuiApp::new(empty_snapshot(), Some(String::from("invoice")));
         app.search_report = Some(Err(String::from("search failed")));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: search failed"));
     }
@@ -814,9 +1726,26 @@ mod tests {
         app.view = View::Workflows;
         app.snapshot.workflows = Err(String::from("workflow report failed"));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: workflow report failed"));
+    }
+
+    #[test]
+    fn workflows_render_selected_detail_and_confirmation_modal() {
+        let mut app = TuiApp::new(snapshot_with_workflows(1), None);
+        app.view = View::Workflows;
+        app.workflow_modal = Some(WorkflowModal::Triage {
+            bucket: TriageBucket::Urgent,
+        });
+
+        let output = render_app(&mut app);
+
+        assert!(output.contains("Workflow detail"));
+        assert!(output.contains("thread-1"));
+        assert!(output.contains("Confirm triage set"));
+        assert!(output.contains("set triage bucket to urgent"));
+        assert!(output.contains("Enter confirm"));
     }
 
     #[test]
@@ -825,7 +1754,7 @@ mod tests {
         app.view = View::Automation;
         app.snapshot.automation = Err(String::from("automation report failed"));
 
-        let output = render_app(&app);
+        let output = render_app(&mut app);
 
         assert!(output.contains("error: automation report failed"));
     }
@@ -878,7 +1807,49 @@ mod tests {
         }
     }
 
-    fn render_app(app: &TuiApp) -> String {
+    fn snapshot_with_workflows(count: usize) -> Snapshot {
+        let mut snapshot = empty_snapshot();
+        snapshot.workflows = Ok(crate::workflows::WorkflowListReport {
+            stage: None,
+            triage_bucket: None,
+            workflows: (1..=count).map(sample_workflow).collect(),
+        });
+        snapshot
+    }
+
+    fn sample_workflow(index: usize) -> WorkflowRecord {
+        WorkflowRecord {
+            workflow_id: index as i64,
+            account_id: String::from("account-1"),
+            thread_id: format!("thread-{index}"),
+            current_stage: WorkflowStage::Triage,
+            triage_bucket: Some(TriageBucket::Urgent),
+            note: String::from("reply soon"),
+            snoozed_until_epoch_s: None,
+            follow_up_due_epoch_s: None,
+            latest_message_id: Some(format!("message-{index}")),
+            latest_message_internal_date_epoch_ms: Some(1_700_000_000_000),
+            latest_message_subject: format!("Subject {index}"),
+            latest_message_from_header: String::from("sender@example.com"),
+            latest_message_snippet: String::from("Snippet"),
+            current_draft_revision_id: None,
+            gmail_draft_id: None,
+            gmail_draft_message_id: None,
+            gmail_draft_thread_id: None,
+            last_remote_sync_epoch_s: None,
+            last_sent_message_id: None,
+            last_cleanup_action: None,
+            workflow_version: 1,
+            created_at_epoch_s: 1_700_000_000,
+            updated_at_epoch_s: 1_700_000_000,
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn render_app(app: &mut TuiApp) -> String {
         let backend = TestBackend::new(96, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();

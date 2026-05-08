@@ -14,8 +14,8 @@ pub use draft_local::{
 };
 pub(crate) use error::WorkflowServiceError;
 pub use queries::{
-    list_workflows, list_workflows_read_only, promote_workflow, set_triage, show_workflow,
-    snooze_workflow,
+    clear_workflow_snooze, list_workflows, list_workflows_read_only, promote_workflow, set_triage,
+    show_workflow, snooze_workflow,
 };
 
 use error::WorkflowResult;

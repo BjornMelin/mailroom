@@ -51,7 +51,7 @@ pub enum Commands {
     Roadmap,
     /// Search the local mailbox index
     Search(SearchArgs),
-    /// Open the read-only terminal operator shell
+    /// Open the terminal operator shell
     Tui(TuiArgs),
     /// Inspect, fetch, and export cataloged inbound attachments
     Attachment {

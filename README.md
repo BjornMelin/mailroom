@@ -5,9 +5,9 @@
 ## Current posture
 
 - Primary stack: Rust + `clap`
-- Operator surfaces: CLI first, read-only TUI foundation second
+- Operator surfaces: CLI first, TUI inspection and confirmed local workflow actions second
 - Local operational store: SQLite with migration-owned schema and FTS5-backed mailbox search
-- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, attachment catalog/export foundation, review-first automation rules, and a read-only terminal operator shell
+- Native Gmail foundation: OAuth login, active account persistence, live profile/label reads, one-shot mailbox sync, local search, thread-scoped workflow state, remote draft sync, reviewed cleanup actions, attachment catalog/export foundation, review-first automation rules, and a terminal operator shell
 - Hardening surface: read-only label audits, readiness verification, and operator runbooks for safe real-mailbox rollout
 - Versioned content: code, docs, examples, plans
 - Ignored runtime content: `.mailroom/` state, caches, exports, secrets, and attachment vaults
@@ -45,7 +45,7 @@ Repo-local overrides also live under `.mailroom/`:
 
 ## Native commands
 
-The current binary can now resolve config, bootstrap the local store, manage Gmail auth, sync mailbox metadata, search the local cache, catalog inbound attachments, manage thread workflows, sync remote Gmail drafts, execute reviewed cleanup actions, and open a read-only terminal operator shell:
+The current binary can now resolve config, bootstrap the local store, manage Gmail auth, sync mailbox metadata, search the local cache, catalog inbound attachments, manage thread workflows, sync remote Gmail drafts, execute reviewed cleanup actions, and open a terminal operator shell:
 
 ```bash
 cargo run -- workspace init
@@ -168,10 +168,11 @@ Read-only verification and hardening guidance live in
 [`docs/operations/verification-and-hardening.md`](docs/operations/verification-and-hardening.md),
 with the durable design captured in
 [`docs/decisions/0007-verification-audit-hardening.md`](docs/decisions/0007-verification-audit-hardening.md).
-The read-only terminal shell lives in
+The terminal operator shell lives in
 [`docs/operations/tui-operator-shell.md`](docs/operations/tui-operator-shell.md),
 with the durable design captured in
-[`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md).
+[`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md)
+and [`docs/decisions/0009-tui-workflow-actions.md`](docs/decisions/0009-tui-workflow-actions.md).
 
 Config precedence is:
 
@@ -215,6 +216,7 @@ Advanced manual overrides still work:
 - [`docs/decisions/0006-review-first-automation-rules.md`](docs/decisions/0006-review-first-automation-rules.md): review-first automation rules and persisted bulk-action snapshots
 - [`docs/decisions/0007-verification-audit-hardening.md`](docs/decisions/0007-verification-audit-hardening.md): read-only audit ownership and real-mailbox rollout posture
 - [`docs/decisions/0008-read-only-tui-foundation.md`](docs/decisions/0008-read-only-tui-foundation.md): read-only terminal shell ownership
+- [`docs/decisions/0009-tui-workflow-actions.md`](docs/decisions/0009-tui-workflow-actions.md): confirmed local workflow actions in the TUI
 - [`docs/operations/local-config-and-store.md`](docs/operations/local-config-and-store.md): config precedence, store bootstrapping, and hardening
 - [`docs/operations/gmail-auth-and-account.md`](docs/operations/gmail-auth-and-account.md): Gmail OAuth flow, credential storage, and account verification
 - [`docs/operations/mailbox-sync-and-search.md`](docs/operations/mailbox-sync-and-search.md): sync commands, search filters, and cursor behavior
@@ -222,7 +224,7 @@ Advanced manual overrides still work:
 - [`docs/operations/thread-workflow-and-cleanup.md`](docs/operations/thread-workflow-and-cleanup.md): triage, draft/send, snooze, and reviewed cleanup commands
 - [`docs/operations/automation-rules-and-bulk-actions.md`](docs/operations/automation-rules-and-bulk-actions.md): rule validation, persisted run snapshots, and review-first bulk apply
 - [`docs/operations/verification-and-hardening.md`](docs/operations/verification-and-hardening.md): deep-sync audit, label canonicalization, canary tests, and first-wave ruleset rollout
-- [`docs/operations/tui-operator-shell.md`](docs/operations/tui-operator-shell.md): read-only TUI usage, key bindings, and safety contract
+- [`docs/operations/tui-operator-shell.md`](docs/operations/tui-operator-shell.md): TUI usage, workflow action key bindings, and safety contract
 - [`docs/operations/plugin-assisted-workflows.md`](docs/operations/plugin-assisted-workflows.md): how Codex Gmail/GitHub workflows fit alongside native commands
 - [`docs/roadmap/v1-search-triage-draft-queue.md`](docs/roadmap/v1-search-triage-draft-queue.md): first milestone scope
 

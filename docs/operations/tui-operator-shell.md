@@ -1,11 +1,11 @@
 # TUI Operator Shell
 
-`mailroom tui` opens the native read-only terminal shell.
+`mailroom tui` opens the native terminal operator shell.
 
-It is designed for fast inspection after `workspace init`, auth setup, and a
-local sync. It does not replace the CLI JSON contract; it renders the same
-underlying read-only reports for human operation and avoids store initialization
-or migration side effects while launching.
+It is designed for fast inspection and deliberate local workflow actions after
+`workspace init`, auth setup, and a local sync. It does not replace the CLI JSON
+contract; it renders the same underlying reports for human operation and uses
+existing service owners for every action.
 
 ## Run
 
@@ -24,7 +24,8 @@ cargo run -- tui --search "project alpha"
 - Dashboard: workspace, database, auth, account, mailbox count, and readiness
   flags from `doctor` plus `audit verification`.
 - Search: local SQLite FTS search through the mailbox read model.
-- Workflows: read-only `workflow list` queue overview.
+- Workflows: `workflow list` queue overview, selected-row detail, and confirmed
+  local workflow actions.
 - Automation: read-only `automation rollout` readiness and candidate preview.
 - Help: key bindings and safety posture.
 
@@ -38,9 +39,37 @@ cargo run -- tui --search "project alpha"
 - `r`: refresh dashboard, workflow, and automation reports
 - `Ctrl-C`: quit
 
+Workflow view keys:
+
+- `j` / `Down`: select next workflow row
+- `k` / `Up`: select previous workflow row
+- `t`: open a triage-bucket confirmation
+- `p`: open a workflow-promotion confirmation
+- `z`: open a snooze / clear-snooze confirmation
+
+Workflow confirmation keys:
+
+- `Enter`: confirm the displayed action
+- `Esc` or `q`: cancel the confirmation
+- `Ctrl-C`: quit the TUI
+- `Tab` / `Shift+Tab`: cycle triage bucket or promotion target
+- `1` through `4`: choose `urgent`, `needs_reply_soon`, `waiting`, or `fyi`
+  in a triage confirmation
+- `f` / `r`: choose `follow_up` or `ready_to_send` in a promotion confirmation
+- text input: type `YYYY-MM-DD` in a snooze confirmation; leave empty to clear
+  the snooze without changing the current workflow stage
+
 ## Safety Contract
 
-The first TUI shell is read-only.
+The TUI shell is still review-first. It exposes only local workflow mutation
+actions from the existing workflow service layer:
+
+- `triage set`
+- `workflow promote` to `follow_up` or `ready_to_send`
+- `workflow snooze` or clear snooze
+
+Promotion to `closed` remains CLI-only in this slice because that service path
+can retire and delete a remote Gmail draft.
 
 It does not:
 
@@ -52,10 +81,12 @@ It does not:
 - fetch or export attachments
 - edit `.mailroom/automation.toml`
 
-Use the existing CLI commands for deliberate mutation flows:
+Use the existing CLI commands for mutation flows that are intentionally outside
+this TUI slice:
 
 ```bash
 cargo run -- draft send <thread-id> --json
+cargo run -- workflow promote <thread-id> --to closed --json
 cargo run -- cleanup archive <thread-id> --execute --json
 cargo run -- automation run --limit 10 --json
 cargo run -- automation apply <run-id> --execute --json

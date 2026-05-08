@@ -244,3 +244,83 @@ fn set_triage_state_preserves_existing_snapshot_metadata_on_equal_timestamp() {
         "Snippet for Current subject"
     );
 }
+
+#[test]
+fn clear_workflow_snooze_preserves_existing_stage() {
+    let (_repo_root, config_report, account) =
+        bootstrap_test_env("mailroom-workflow-clear-snooze-preserve-stage");
+
+    seed_drafting_workflow(&config_report, &account.account_id, "thread-1");
+    let workflow = snooze_workflow(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &SnoozeWorkflowInput {
+            account_id: account.account_id.clone(),
+            thread_id: String::from("thread-1"),
+            snoozed_until_epoch_s: Some(1_800_000_000),
+            snapshot: snapshot("message-2", "Follow-up"),
+            updated_at_epoch_s: 200,
+        },
+    )
+    .unwrap();
+    set_remote_draft_state(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &RemoteDraftStateInput {
+            account_id: account.account_id.clone(),
+            thread_id: workflow.thread_id.clone(),
+            gmail_draft_id: Some(String::from("gmail-draft-1")),
+            gmail_draft_message_id: Some(String::from("gmail-message-1")),
+            gmail_draft_thread_id: Some(String::from("gmail-thread-1")),
+            updated_at_epoch_s: 250,
+        },
+    )
+    .unwrap();
+    let workflow = upsert_stage(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &PromoteWorkflowInput {
+            account_id: account.account_id.clone(),
+            thread_id: workflow.thread_id.clone(),
+            to_stage: WorkflowStage::ReadyToSend,
+            snapshot: snapshot("message-3", "Follow-up"),
+            updated_at_epoch_s: 300,
+        },
+    )
+    .unwrap();
+    assert_eq!(workflow.current_stage, WorkflowStage::ReadyToSend);
+    assert_eq!(workflow.snoozed_until_epoch_s, Some(1_800_000_000));
+
+    let workflow = clear_workflow_snooze(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &ClearWorkflowSnoozeInput {
+            account_id: account.account_id.clone(),
+            thread_id: workflow.thread_id.clone(),
+            snapshot: snapshot("message-4", "Follow-up"),
+            updated_at_epoch_s: 400,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(workflow.current_stage, WorkflowStage::ReadyToSend);
+    assert_eq!(workflow.snoozed_until_epoch_s, None);
+
+    let detail = get_workflow_detail(
+        &config_report.config.store.database_path,
+        config_report.config.store.busy_timeout_ms,
+        &account.account_id,
+        "thread-1",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(detail.workflow.current_stage, WorkflowStage::ReadyToSend);
+    assert_eq!(detail.workflow.snoozed_until_epoch_s, None);
+    let event = detail
+        .events
+        .iter()
+        .find(|event| event.event_kind == "workflow_snooze_cleared")
+        .unwrap();
+    assert_eq!(event.from_stage, Some(WorkflowStage::ReadyToSend));
+    assert_eq!(event.to_stage, Some(WorkflowStage::ReadyToSend));
+}

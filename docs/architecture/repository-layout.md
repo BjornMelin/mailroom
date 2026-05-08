@@ -29,7 +29,8 @@
 - `src/audit.rs`: read-only label audit and verification/hardening reports
 - `src/automation/`: rules parsing, snapshot planning, and bulk-apply orchestration
 - `src/mailbox.rs`: sync/search orchestration over Gmail and SQLite
-- `src/tui.rs`: read-only Ratatui operator shell over existing service reports
+- `src/tui.rs`: Ratatui operator shell over existing service reports and
+  confirmed workflow actions
 - `src/workflows/`: thread-scoped triage, draft/send, snooze, and cleanup orchestration
 - `src/doctor.rs`: combined workspace/store/auth health reporting
 - `src/workspace.rs`: repo-root runtime path layout and initialization

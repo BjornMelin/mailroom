@@ -38,6 +38,7 @@ pub enum WorkflowAction {
     CleanupApplied,
     WorkflowPromoted,
     WorkflowSnoozed,
+    WorkflowSnoozeCleared,
     TriageSet,
     DraftStarted,
     DraftBodySet,
@@ -54,6 +55,7 @@ impl WorkflowAction {
             Self::CleanupApplied => "cleanup_applied",
             Self::WorkflowPromoted => "workflow_promoted",
             Self::WorkflowSnoozed => "workflow_snoozed",
+            Self::WorkflowSnoozeCleared => "workflow_snooze_cleared",
             Self::TriageSet => "triage_set",
             Self::DraftStarted => "draft_started",
             Self::DraftBodySet => "draft_body_set",
@@ -91,6 +93,7 @@ impl<'de> Deserialize<'de> for WorkflowAction {
             "cleanup_applied" => Self::CleanupApplied,
             "workflow_promoted" => Self::WorkflowPromoted,
             "workflow_snoozed" => Self::WorkflowSnoozed,
+            "workflow_snooze_cleared" => Self::WorkflowSnoozeCleared,
             "triage_set" => Self::TriageSet,
             "draft_started" => Self::DraftStarted,
             "draft_body_set" => Self::DraftBodySet,
@@ -109,6 +112,10 @@ mod tests {
     #[test]
     fn workflow_action_serializes_to_stable_snake_case_strings() {
         assert_eq!(
+            serde_json::to_string(&WorkflowAction::WorkflowSnoozeCleared).unwrap(),
+            "\"workflow_snooze_cleared\""
+        );
+        assert_eq!(
             serde_json::to_string(&WorkflowAction::DraftAttachmentRemoved).unwrap(),
             "\"draft_attachment_removed\""
         );
@@ -121,9 +128,12 @@ mod tests {
     #[test]
     fn workflow_action_deserializes_known_and_unknown_values() {
         let known: WorkflowAction = serde_json::from_str("\"workflow_promoted\"").unwrap();
+        let known_clear: WorkflowAction =
+            serde_json::from_str("\"workflow_snooze_cleared\"").unwrap();
         let unknown: WorkflowAction = serde_json::from_str("\"custom_action\"").unwrap();
 
         assert!(matches!(known, WorkflowAction::WorkflowPromoted));
+        assert!(matches!(known_clear, WorkflowAction::WorkflowSnoozeCleared));
         assert!(matches!(unknown, WorkflowAction::Other(value) if value == "custom_action"));
     }
 }
